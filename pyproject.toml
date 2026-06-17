@@ -1,0 +1,44 @@
+[project]
+name = "codex-control"
+version = "2.4.0"
+description = "Maximum-power local GUI workstation for the Codex CLI"
+requires-python = ">=3.11"
+readme = "README.md"
+license = { file = "LICENSE" }
+authors = [{ name = "ao" }]
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project.scripts]
+codex-gui = "codex_gui:main"
+
+[tool.codex-control]
+entrypoint = "codex_gui.py"
+launcher = "~/.local/bin/codex-gui"
+
+[tool.setuptools]
+py-modules = [
+  "codex_actions",
+  "codex_agents",
+  "codex_autopilot",
+  "codex_brief",
+  "codex_context",
+  "codex_devices",
+  "codex_gui",
+  "codex_mission",
+  "codex_orchestration",
+  "codex_palette",
+  "codex_preflight",
+  "codex_project",
+  "codex_prompting",
+  "codex_quality",
+  "codex_receipts",
+  "codex_roadmap",
+  "codex_runs",
+  "codex_sessions",
+  "codex_team",
+  "codex_visual",
+  "codex_workstation",
+]
