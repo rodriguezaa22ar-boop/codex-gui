@@ -56,6 +56,7 @@ TOKENS: tuple[VisualToken, ...] = (
 REQUIRED_SELECTORS = (
     ".topbar",
     ".nav",
+    ".nav-more",
     ".page",
     ".panel",
     ".operator-console",
@@ -148,6 +149,12 @@ window {
 .nav row:selected image,
 .nav row:selected label {
   color: #ffffff;
+}
+
+.nav-more {
+  margin: 4px 0;
+  padding: 4px;
+  border-color: #1d2a33;
 }
 
 .page {
@@ -407,6 +414,17 @@ entry, textview, dropdown, expander {
   background: @cc_panel_deep;
   color: @cc_text;
   border-color: @cc_border;
+}
+
+expander {
+  border: 1px solid @cc_border;
+  border-radius: 8px;
+  padding: 8px;
+}
+
+expander title {
+  color: @cc_muted;
+  font-weight: 700;
 }
 
 .device-mesh {
