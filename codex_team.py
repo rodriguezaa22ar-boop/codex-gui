@@ -116,6 +116,91 @@ class TeamBusReport:
         return {item.device_name: item.status for item in self.targets}
 
 
+@dataclass(frozen=True)
+class TeamOperatorSummary:
+    headline: str
+    next_action: str
+    status: str
+    lane_text: str
+    bus_text: str
+
+
+def team_lane_status_counts(run_status: TeamRunStatus | None) -> dict[str, int]:
+    if run_status is None:
+        return {}
+    counts: dict[str, int] = {}
+    for lane in run_status.lanes:
+        counts[lane.status] = counts.get(lane.status, 0) + 1
+    return counts
+
+
+def team_operator_summary(
+    run_status: TeamRunStatus | None,
+    bus_report: TeamBusReport | None = None,
+    *,
+    ready_devices: int = 0,
+    saved_runs: int = 0,
+    assignment_count: int = 0,
+) -> TeamOperatorSummary:
+    if run_status is None:
+        lane_text = f"{assignment_count} lane(s)" if assignment_count else "no lanes"
+        if ready_devices <= 0:
+            return TeamOperatorSummary(
+                headline=f"{ready_devices} ready trusted device(s). Run fleet check before preparing a team.",
+                next_action="Check Fleet",
+                status="review",
+                lane_text=lane_text,
+                bus_text="bus not started",
+            )
+        return TeamOperatorSummary(
+            headline=f"{ready_devices} ready trusted device(s). {saved_runs} saved team run(s).",
+            next_action="Prepare Team",
+            status="ready",
+            lane_text=lane_text,
+            bus_text="bus not started",
+        )
+
+    lane_count = run_status.lane_count
+    collected = run_status.collected_count
+    counts = team_lane_status_counts(run_status)
+    failed = counts.get("failed", 0)
+    prepared = counts.get("prepared", 0)
+    finished = counts.get("finished", 0)
+    lane_bits = []
+    for label, count in (
+        ("collected", collected),
+        ("finished", finished),
+        ("prepared", prepared),
+        ("failed", failed),
+    ):
+        if count:
+            lane_bits.append(f"{count} {label}")
+    lane_text = " / ".join(lane_bits) if lane_bits else f"{lane_count} lane(s)"
+
+    if bus_report is None:
+        bus_text = "bus not synced"
+        if failed:
+            return TeamOperatorSummary(run_status.summary_line(), "Inspect Failures", "blocked", lane_text, bus_text)
+        if collected >= lane_count and lane_count:
+            return TeamOperatorSummary(run_status.summary_line(), "Sync Bus", "ready", lane_text, bus_text)
+        if prepared == lane_count and lane_count:
+            return TeamOperatorSummary(run_status.summary_line(), "Launch Team", "ready", lane_text, bus_text)
+        return TeamOperatorSummary(run_status.summary_line(), "Collect Team", "review", lane_text, bus_text)
+
+    bus_total = len(bus_report.targets)
+    legacy_failures = len(bus_report.failures)
+    bus_text = f"{bus_report.synced_count} synced / {bus_report.failed_count} failed / {bus_report.stale_count} stale"
+    if bus_total:
+        bus_text += f" of {bus_total}"
+    elif legacy_failures:
+        bus_text += f" | {legacy_failures} failure(s)"
+    if bus_report.failed_count or bus_report.stale_count or legacy_failures:
+        return TeamOperatorSummary(run_status.summary_line(), "Repair Bus", "blocked", lane_text, bus_text)
+    if collected >= lane_count and lane_count:
+        return TeamOperatorSummary(run_status.summary_line(), "Review Summary", "ready", lane_text, bus_text)
+    return TeamOperatorSummary(run_status.summary_line(), "Collect Team", "review", lane_text, bus_text)
+
+
 TEAM_ROLES: tuple[TeamRole, ...] = (
     TeamRole(
         id="coordinator",

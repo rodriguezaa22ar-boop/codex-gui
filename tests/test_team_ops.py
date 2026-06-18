@@ -166,6 +166,8 @@ class TeamOpsTests(unittest.TestCase):
             self.assertEqual(payload["lane_count"], 1)
             self.assertEqual(len(payload["assignments"]), 1)
             self.assertIn("project", payload)
+            self.assertEqual(payload["operator"]["next_action"], "Launch Team")
+            self.assertIn("prepared", payload["operator"]["lane_text"])
         finally:
             team_ops.CONFIG_DIR = original_config
             team_ops.DEVICES_FILE = original_devices

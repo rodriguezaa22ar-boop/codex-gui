@@ -5,12 +5,16 @@ import unittest
 from pathlib import Path
 
 from codex_team import (
+    TeamBusReport,
     TeamBusTargetStatus,
+    TeamLaneStatus,
+    TeamRunStatus,
     load_bus_report,
     inspect_team_run,
     latest_team_run_dir,
     merge_team_chat_texts,
     read_team_chat,
+    team_operator_summary,
     team_role_for_device,
     team_roles_markdown,
     team_run_dirs,
@@ -250,6 +254,109 @@ class CodexTeamTests(unittest.TestCase):
             self.assertEqual(status.synced_count, 1)
             self.assertEqual(status.failed_count, 0)
             self.assertEqual(status.stale_count, 1)
+
+    def test_team_operator_summary_guides_unprepared_fleet(self) -> None:
+        blocked = team_operator_summary(None, ready_devices=0, saved_runs=0)
+        ready = team_operator_summary(None, ready_devices=3, saved_runs=2)
+
+        self.assertEqual(blocked.next_action, "Check Fleet")
+        self.assertEqual(blocked.status, "review")
+        self.assertEqual(blocked.lane_text, "no lanes")
+        self.assertEqual(ready.next_action, "Prepare Team")
+        self.assertEqual(ready.status, "ready")
+
+    def test_team_operator_summary_guides_team_lifecycle(self) -> None:
+        run_status = TeamRunStatus(
+            run_id="team-one",
+            team_dir=Path("/tmp/team-one"),
+            project="/work/codex-gui",
+            created="2026-06-18T12:00:00-07:00",
+            assignments=(),
+            lanes=(
+                TeamLaneStatus(
+                    lane_slug="backend",
+                    lane_title="Backend",
+                    device_name="atlas-builder",
+                    focus="backend",
+                    status="prepared",
+                    detail="waiting",
+                ),
+                TeamLaneStatus(
+                    lane_slug="verify",
+                    lane_title="Verify",
+                    device_name="atlas-cockpit",
+                    focus="verify",
+                    status="prepared",
+                    detail="waiting",
+                ),
+            ),
+        )
+        prepared = team_operator_summary(run_status)
+
+        self.assertEqual(prepared.next_action, "Launch Team")
+        self.assertIn("prepared", prepared.lane_text)
+
+        collected = TeamRunStatus(
+            run_id=run_status.run_id,
+            team_dir=run_status.team_dir,
+            project=run_status.project,
+            created=run_status.created,
+            assignments=run_status.assignments,
+            lanes=(
+                TeamLaneStatus("backend", "Backend", "atlas-builder", "backend", "collected", "handoff"),
+                TeamLaneStatus("verify", "Verify", "atlas-cockpit", "verify", "collected", "handoff"),
+            ),
+        )
+        needs_bus = team_operator_summary(collected)
+
+        self.assertEqual(needs_bus.next_action, "Sync Bus")
+
+    def test_team_operator_summary_prioritizes_bus_repair(self) -> None:
+        run_status = TeamRunStatus(
+            run_id="team-one",
+            team_dir=Path("/tmp/team-one"),
+            project="/work/codex-gui",
+            created="2026-06-18T12:00:00-07:00",
+            assignments=(),
+            lanes=(TeamLaneStatus("backend", "Backend", "atlas-builder", "backend", "collected", "handoff"),),
+        )
+        bus = TeamBusReport(
+            run_id="team-one",
+            team_dir="/tmp/team-one",
+            bus_path="/tmp/team-one/out/handoff-bus.md",
+            sent=1,
+            failures=("atlas-builder: stale",),
+            generated="2026-06-18T12:10:00-07:00",
+            generated_epoch=1710000000,
+            targets=(
+                TeamBusTargetStatus(
+                    lane_slug="backend",
+                    device_name="atlas-builder",
+                    target="atlas-builder",
+                    status="stale",
+                    detail="checksum mismatch",
+                ),
+            ),
+        )
+        summary = team_operator_summary(run_status, bus)
+
+        self.assertEqual(summary.next_action, "Repair Bus")
+        self.assertEqual(summary.status, "blocked")
+        self.assertIn("stale", summary.bus_text)
+
+        legacy_bus = TeamBusReport(
+            run_id="team-one",
+            team_dir="/tmp/team-one",
+            bus_path="/tmp/team-one/out/handoff-bus.md",
+            sent=1,
+            failures=("atlas-builder: timeout",),
+            generated="2026-06-18T12:10:00-07:00",
+            generated_epoch=1710000000,
+        )
+        legacy_summary = team_operator_summary(run_status, legacy_bus)
+
+        self.assertEqual(legacy_summary.next_action, "Repair Bus")
+        self.assertIn("failure", legacy_summary.bus_text)
 
     def test_write_and_load_bus_report_with_targets(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

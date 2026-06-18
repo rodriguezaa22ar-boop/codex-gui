@@ -45,8 +45,10 @@ from codex_devices import (
 from codex_team import (
     inspect_team_run,
     latest_team_run_dir,
+    load_bus_report,
     write_role_bootstrap,
     write_team_summary,
+    team_operator_summary,
     team_role_for_device,
     role_profile_hint,
 )
@@ -468,6 +470,7 @@ def collect_team_results(
 
 
 def _serialize_run_status(run: Any) -> dict[str, Any]:
+    operator = team_operator_summary(run, load_bus_report(run.team_dir))
     return {
         "run_id": run.run_id,
         "team_dir": str(run.team_dir),
@@ -477,6 +480,7 @@ def _serialize_run_status(run: Any) -> dict[str, Any]:
         "lanes": [asdict(lane) for lane in run.lanes],
         "lane_count": run.lane_count,
         "collected_count": run.collected_count,
+        "operator": asdict(operator),
     }
 
 
@@ -578,6 +582,8 @@ def cmd_status(args: argparse.Namespace) -> int:
         return 0
 
     print(run.summary_line())
+    operator = team_operator_summary(run, load_bus_report(run.team_dir))
+    print(f"next: {operator.next_action} | {operator.lane_text} | {operator.bus_text}")
     for lane in run.lanes:
         print(f"- {lane.device_name}: {lane.status} :: {lane.detail}")
     return 0
