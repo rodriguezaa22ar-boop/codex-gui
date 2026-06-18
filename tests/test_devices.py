@@ -455,6 +455,8 @@ class DeviceMeshTests(unittest.TestCase):
         self.assertIn("chmod 600", launch[-1])
         self.assertIn("cat \"$HOME\"/.config/codex-gui/team/run-1/lanes/ui-polish.md", launch[-1])
         self.assertIn("-p \"$role_profile\"", launch[-1])
+        self.assertIn("exec -s workspace-write", launch[-1])
+        self.assertIn("--add-dir \"$HOME\"/.config/codex-gui/team/run-1/out", launch[-1])
         self.assertIn("--output-last-message", launch[-1])
         self.assertIn("ui-polish.status.txt", launch[-1])
         self.assertNotIn("> \"$HOME\"/.config/codex-gui/team/run-1/out/ui-polish.handoff.md", launch[-1])
@@ -493,6 +495,8 @@ class DeviceMeshTests(unittest.TestCase):
         self.assertEqual(launch[:2], ("bash", "-lc"))
         self.assertIn("ensure_team_chat()", launch[-1])
         self.assertIn("cat \"$HOME\"/.config/codex-gui/team/run-1/lanes/coordinator.md", launch[-1])
+        self.assertIn("exec -s workspace-write", launch[-1])
+        self.assertIn("--add-dir \"$HOME\"/.config/codex-gui/team/run-1/out", launch[-1])
         self.assertIn("--output-last-message", launch[-1])
         self.assertNotIn("ssh", launch[0])
 

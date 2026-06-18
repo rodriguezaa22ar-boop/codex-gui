@@ -1015,10 +1015,11 @@ def remote_file_sha256sum_command(device: DeviceRecord, remote_path: str) -> tup
 
 def agent_shell_script(device: DeviceRecord, run_id: str, lane_slug: str) -> str:
     remote_dir = remote_team_dir(run_id)
+    out_dir = f"{remote_dir}/out"
     prompt_path = f"{remote_dir}/lanes/{slugify(lane_slug)}.md"
-    final_path = f"{remote_dir}/out/{slugify(lane_slug)}.final.txt"
-    status_path = f"{remote_dir}/out/{slugify(lane_slug)}.status.txt"
-    chat_path = remote_path_expr(f"{remote_dir}/out/{TEAM_CHAT_FILE}")
+    final_path = f"{out_dir}/{slugify(lane_slug)}.final.txt"
+    status_path = f"{out_dir}/{slugify(lane_slug)}.status.txt"
+    chat_path = remote_path_expr(f"{out_dir}/{TEAM_CHAT_FILE}")
     lane_slug_safe = shlex.quote(slugify(lane_slug))
     lane_device_safe = shlex.quote(device.name)
     run_id_safe = shlex.quote(run_id)
@@ -1045,7 +1046,7 @@ def agent_shell_script(device: DeviceRecord, run_id: str, lane_slug: str) -> str
         "fi; "
         "return 0; "
         "} && "
-        f"mkdir -p {remote_path_expr(remote_dir + '/out')} && "
+        f"mkdir -p {remote_path_expr(out_dir)} && "
         f"cd {remote_path_expr(device.project_root)} && "
         "append_team_chat \"started\" && "
         f"prompt=$(cat {remote_path_expr(prompt_path)}) && "
@@ -1058,12 +1059,12 @@ def agent_shell_script(device: DeviceRecord, run_id: str, lane_slug: str) -> str
         "if [ -n \"$role_boundary\" ]; then printf 'Role boundary: %s\\n' \"$role_boundary\"; fi && "
         f"if [ -n \"$role_profile\" ]; then "
         f"  {_codex_launcher_expression(device)} && "
-        f"  $CODEX_BIN -p \"$role_profile\" -C {remote_path_expr(device.project_root)} "
-        f"exec --skip-git-repo-check --output-last-message {remote_path_expr(final_path)} \"$prompt\"; "
+        f"  $CODEX_BIN -p \"$role_profile\" exec -s workspace-write -C {remote_path_expr(device.project_root)} "
+        f"--add-dir {remote_path_expr(out_dir)} --skip-git-repo-check --output-last-message {remote_path_expr(final_path)} \"$prompt\"; "
         "else "
         f"  {_codex_launcher_expression(device)} && "
-        f"  $CODEX_BIN -C {remote_path_expr(device.project_root)} "
-        f"exec --skip-git-repo-check --output-last-message {remote_path_expr(final_path)} \"$prompt\"; "
+        f"  $CODEX_BIN exec -s workspace-write -C {remote_path_expr(device.project_root)} "
+        f"--add-dir {remote_path_expr(out_dir)} --skip-git-repo-check --output-last-message {remote_path_expr(final_path)} \"$prompt\"; "
         "fi; "
         "status=$?; "
         "append_team_chat \"complete status=$status finished=$(date -Is)\"; "
