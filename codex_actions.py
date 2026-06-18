@@ -52,6 +52,7 @@ ACTION_SPECS: tuple[ActionSpec, ...] = (
     ActionSpec("autopilot.track", "Track Autopilot", "Autopilot", "Run the selected Autopilot package with live status and artifacts.", ("monitor", "run"), 88),
     ActionSpec("autopilot.terminal", "Replay Autopilot In Terminal", "Autopilot", "Replay the selected package in the embedded terminal.", ("terminal", "script"), 70),
     ActionSpec("autopilot.stop", "Stop Autopilot", "Autopilot", "Stop the tracked Autopilot process for this app session.", ("cancel", "process"), 58),
+    ActionSpec("mesh.discover", "Discover Tailnet", "Mesh", "Import this Tailscale tailnet into the local Device Mesh without duplicating existing device records.", ("tailscale", "tailnet", "magicdns", "devices", "ssh"), 96),
     ActionSpec("mesh.check", "Check Fleet", "Mesh", "Probe every trusted Codex device over SSH for CLI, project, Git, and memory readiness.", ("tailscale", "ssh", "devices", "health"), 94),
     ActionSpec("mesh.latest", "Load Latest Team", "Mesh", "Reload the most recent saved Codex Team run from local team storage.", ("agents", "team", "history", "reload"), 93),
     ActionSpec("mesh.prepare_team", "Prepare Codex Team", "Mesh", "Create a shared ledger and role-specific prompt package for ready trusted devices.", ("agents", "team", "lanes", "prompts"), 92),

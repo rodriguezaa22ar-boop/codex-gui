@@ -9,6 +9,7 @@ import shlex
 import time
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
+from typing import Any
 
 
 @dataclass(frozen=True)
@@ -124,6 +125,190 @@ def upsert_device(devices: tuple[DeviceRecord, ...], device: DeviceRecord) -> tu
     next_devices = [item for item in devices if item.id != device.id]
     next_devices.insert(0, device)
     return tuple(sorted(next_devices, key=lambda item: item.updated, reverse=True))
+
+
+def tailscale_status_command() -> tuple[str, ...]:
+    return ("tailscale", "status", "--json")
+
+
+def _clean_dns_name(value: object) -> str:
+    return str(value or "").strip().rstrip(".")
+
+
+def _tailnet_ipv4(record: dict[str, Any]) -> str:
+    ips = record.get("TailscaleIPs", [])
+    if not isinstance(ips, list):
+        return ""
+    for value in ips:
+        text = str(value or "").strip()
+        if text.count(".") == 3:
+            return text
+    return str(ips[0]).strip() if ips else ""
+
+
+def _tailnet_name(record: dict[str, Any], magic_dns_suffix: str) -> str:
+    dns_name = _clean_dns_name(record.get("DNSName"))
+    suffix = magic_dns_suffix.strip().strip(".").lower()
+    if dns_name:
+        lower = dns_name.lower()
+        if suffix and lower.endswith("." + suffix):
+            return dns_name[: -(len(suffix) + 1)] or dns_name.split(".", 1)[0]
+        return dns_name.split(".", 1)[0]
+    return str(record.get("HostName") or _tailnet_ipv4(record) or "tailnet-device").strip()
+
+
+def _tailnet_host(record: dict[str, Any]) -> str:
+    return _clean_dns_name(record.get("DNSName")) or _tailnet_ipv4(record) or str(record.get("HostName") or "").strip()
+
+
+def _tailnet_note(record: dict[str, Any], online: bool) -> str:
+    parts = [f"tailnet {'online' if online else 'offline'}"]
+    os_name = str(record.get("OS") or "").strip()
+    ip = _tailnet_ipv4(record)
+    last_seen = str(record.get("LastSeen") or "").strip()
+    if os_name:
+        parts.append(os_name)
+    if ip:
+        parts.append(ip)
+    if last_seen and not last_seen.startswith("0001-"):
+        parts.append(f"last seen {last_seen}")
+    return " | ".join(parts)
+
+
+def devices_from_tailscale_status_json(
+    text: str,
+    *,
+    user: str = "",
+    port: int = 22,
+    project_root: str = "~/Projects/codex-gui",
+    codex_bin: str = "~/.local/bin/codex",
+    include_self: bool = True,
+    local_self_host: str = "",
+    include_offline: bool = True,
+    worker_os: tuple[str, ...] = (),
+) -> tuple[DeviceRecord, ...]:
+    data = json.loads(text)
+    if not isinstance(data, dict):
+        return ()
+    current_tailnet = data.get("CurrentTailnet", {})
+    magic_dns_suffix = ""
+    if isinstance(current_tailnet, dict):
+        magic_dns_suffix = str(current_tailnet.get("MagicDNSSuffix") or "")
+    magic_dns_suffix = magic_dns_suffix or str(data.get("MagicDNSSuffix") or "")
+
+    records: list[tuple[int, bool, dict[str, Any]]] = []
+    self_record = data.get("Self")
+    if include_self and isinstance(self_record, dict):
+        records.append((0, True, self_record))
+    peers = data.get("Peer", {})
+    if isinstance(peers, dict):
+        for peer in peers.values():
+            if isinstance(peer, dict):
+                records.append((1, False, peer))
+
+    timestamp = now()
+    devices: list[tuple[int, DeviceRecord]] = []
+    for order, is_self, record in records:
+        host = local_self_host.strip() if is_self and local_self_host.strip() else _tailnet_host(record)
+        if not host:
+            continue
+        online = bool(record.get("Online"))
+        if not include_offline and not online:
+            continue
+        os_name = str(record.get("OS") or "").strip().lower()
+        if worker_os and os_name not in {item.lower() for item in worker_os}:
+            continue
+        name = _tailnet_name(record, magic_dns_suffix)
+        status = "unknown" if online else "offline"
+        devices.append((
+            order,
+            DeviceRecord(
+                id=device_id(name, host),
+                name=name,
+                host=host,
+                user="" if is_self and local_self_host.strip() else user.strip(),
+                port=int(port or 22),
+                project_root=project_root.strip() or "~/Projects/codex-gui",
+                codex_bin=codex_bin.strip() or "~/.local/bin/codex",
+                status=status,
+                note=_tailnet_note(record, online),
+                updated=timestamp,
+            ),
+        ))
+    return tuple(device for _order, device in sorted(devices, key=lambda item: (item[0], item[1].name.lower())))
+
+
+def _looks_like_tailnet_ipv4(value: str) -> bool:
+    parts = value.split(".")
+    if len(parts) != 4:
+        return False
+    try:
+        return parts[0] == "100" and all(0 <= int(part) <= 255 for part in parts)
+    except ValueError:
+        return False
+
+
+def _device_match_keys(device: DeviceRecord) -> set[str]:
+    keys = {f"id:{device.id}"}
+    if device.name:
+        keys.add(f"name:{slugify(device.name)}")
+    host = _clean_dns_name(device.host).lower()
+    if host:
+        keys.add(f"host:{host}")
+        keys.add(f"short:{host.split('.', 1)[0]}")
+        if _looks_like_tailnet_ipv4(host):
+            keys.add(f"ip:{host}")
+    for token in device.note.replace("|", " ").replace(",", " ").split():
+        clean = token.strip().strip("[]()")
+        if _looks_like_tailnet_ipv4(clean):
+            keys.add(f"ip:{clean}")
+    return keys
+
+
+def _merged_tailnet_device(existing: DeviceRecord, discovered: DeviceRecord) -> DeviceRecord:
+    if discovered.status == "offline":
+        status = "offline"
+        note = discovered.note
+    else:
+        status = "unknown" if existing.status == "offline" else existing.status
+        note = discovered.note if not existing.note or existing.note.startswith("tailnet ") else existing.note
+    return update_device(
+        existing,
+        name=existing.name or discovered.name,
+        host=discovered.host or existing.host,
+        user=existing.user or discovered.user,
+        port=existing.port or discovered.port,
+        project_root=existing.project_root or discovered.project_root,
+        codex_bin=existing.codex_bin or discovered.codex_bin,
+        status=status,
+        note=note,
+    )
+
+
+def merge_discovered_devices(
+    existing: tuple[DeviceRecord, ...],
+    discovered: tuple[DeviceRecord, ...],
+) -> tuple[DeviceRecord, ...]:
+    merged = list(existing)
+    key_to_index: dict[str, int] = {}
+    for index, device in enumerate(merged):
+        for key in _device_match_keys(device):
+            key_to_index.setdefault(key, index)
+
+    for device in discovered:
+        match_index: int | None = None
+        for key in _device_match_keys(device):
+            if key in key_to_index:
+                match_index = key_to_index[key]
+                break
+        if match_index is None:
+            merged.append(device)
+            match_index = len(merged) - 1
+        else:
+            merged[match_index] = _merged_tailnet_device(merged[match_index], device)
+        for key in _device_match_keys(merged[match_index]):
+            key_to_index[key] = match_index
+    return tuple(sorted(merged, key=lambda item: item.updated, reverse=True))
 
 
 def remove_device(devices: tuple[DeviceRecord, ...], device_id_value: str) -> tuple[DeviceRecord, ...]:
@@ -289,7 +474,43 @@ def device_probe_script(device: DeviceRecord) -> str:
 
 
 def ssh_probe_command(device: DeviceRecord) -> tuple[str, ...]:
-    return (*device.ssh_prefix(), "bash -lc " + shlex.quote(device_probe_script(device)))
+    return (
+        "ssh",
+        "-o",
+        "BatchMode=yes",
+        "-o",
+        "NumberOfPasswordPrompts=0",
+        "-o",
+        "ConnectTimeout=8",
+        "-o",
+        "ServerAliveInterval=5",
+        "-o",
+        "ServerAliveCountMax=2",
+        "-p",
+        str(device.port),
+        device.target(),
+        "bash -lc " + shlex.quote(device_probe_script(device)),
+    )
+
+
+def local_probe_command(device: DeviceRecord) -> tuple[str, ...]:
+    return ("bash", "-lc", device_probe_script(device))
+
+
+def classify_probe_failure(text: str, returncode: int) -> tuple[str, str]:
+    clean = " ".join(line.strip() for line in text.splitlines() if line.strip())
+    lower = clean.lower()
+    if "login.tailscale.com/a/" in lower or "tailscale ssh requires an additional check" in lower:
+        return "blocked", "Tailscale SSH approval required"
+    if "permission denied" in lower:
+        return "blocked", "SSH auth denied"
+    if "could not resolve hostname" in lower or "name or service not known" in lower:
+        return "blocked", "SSH host cannot be resolved"
+    if "connection timed out" in lower or "operation timed out" in lower or returncode == 124:
+        return "offline", "SSH probe timed out"
+    if "connection refused" in lower:
+        return "blocked", "SSH connection refused"
+    return "blocked", clean or "probe failed"
 
 
 def parse_probe_output(device: DeviceRecord, text: str, returncode: int, timestamp: int | None = None) -> DeviceProbe:
@@ -308,8 +529,7 @@ def parse_probe_output(device: DeviceRecord, text: str, returncode: int, timesta
     memory_state = values.get("MEMORY_STATE", "")
     system = values.get("UNAME", "")
     if returncode != 0 or codex_exit != 0:
-        status = "blocked"
-        summary = codex_version or "probe failed"
+        status, summary = classify_probe_failure(text or codex_version, returncode)
     elif not project_exists:
         status = "review"
         summary = f"Codex ready, project missing: {device.project_root}"
@@ -415,12 +635,12 @@ def rsync_team_results_command(team_dir: Path, device: DeviceRecord, run_id: str
     )
 
 
-def remote_agent_command(device: DeviceRecord, run_id: str, lane_slug: str) -> tuple[str, ...]:
+def agent_shell_script(device: DeviceRecord, run_id: str, lane_slug: str) -> str:
     remote_dir = remote_team_dir(run_id)
     prompt_path = f"{remote_dir}/lanes/{slugify(lane_slug)}.md"
     final_path = f"{remote_dir}/out/{slugify(lane_slug)}.final.txt"
     status_path = f"{remote_dir}/out/{slugify(lane_slug)}.status.txt"
-    remote = (
+    return (
         f"mkdir -p {remote_path_expr(remote_dir + '/out')} && "
         f"cd {remote_path_expr(device.project_root)} && "
         f"prompt=$(cat {remote_path_expr(prompt_path)}) && "
@@ -431,7 +651,14 @@ def remote_agent_command(device: DeviceRecord, run_id: str, lane_slug: str) -> t
         f"printf 'lane=%s\\nstatus=%s\\nfinished=%s\\n' {shlex.quote(slugify(lane_slug))} \"$status\" \"$(date -Is)\" > {remote_path_expr(status_path)}; "
         "exit \"$status\""
     )
-    return (*device.ssh_prefix(), remote)
+
+
+def remote_agent_command(device: DeviceRecord, run_id: str, lane_slug: str) -> tuple[str, ...]:
+    return (*device.ssh_prefix(), agent_shell_script(device, run_id, lane_slug))
+
+
+def local_agent_command(device: DeviceRecord, run_id: str, lane_slug: str) -> tuple[str, ...]:
+    return ("bash", "-lc", agent_shell_script(device, run_id, lane_slug))
 
 
 def team_prompt(

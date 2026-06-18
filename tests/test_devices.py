@@ -5,9 +5,13 @@ from pathlib import Path
 
 from codex_devices import (
     DeviceRecord,
+    devices_from_tailscale_status_json,
     import_memory_text,
+    local_agent_command,
+    local_probe_command,
     load_devices,
     load_memory,
+    merge_discovered_devices,
     memory_markdown,
     mesh_state,
     new_device,
@@ -25,6 +29,7 @@ from codex_devices import (
     ssh_probe_command,
     ssh_launch_command,
     ssh_test_command,
+    tailscale_status_command,
     team_prompt,
     update_device_from_probe,
     upsert_device,
@@ -50,6 +55,138 @@ class DeviceMeshTests(unittest.TestCase):
 
             self.assertEqual([device.name for device in loaded], ["Workstation", "Laptop"])
             self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+
+    def test_tailscale_status_json_discovers_magicdns_devices(self) -> None:
+        payload = """
+        {
+          "MagicDNSSuffix": "tailabc.ts.net",
+          "Self": {
+            "HostName": "ubuntu-aio",
+            "DNSName": "atlas-ubuntu.tailabc.ts.net.",
+            "OS": "linux",
+            "Online": true,
+            "TailscaleIPs": ["100.99.25.89", "fd7a:115c:a1e0::1"]
+          },
+          "Peer": {
+            "nodekey:builder": {
+              "HostName": "atlas-builder",
+              "DNSName": "atlas-builder.tailabc.ts.net.",
+              "OS": "linux",
+              "Online": true,
+              "TailscaleIPs": ["100.66.164.109"]
+            },
+            "nodekey:cockpit": {
+              "HostName": "parrot",
+              "DNSName": "atlas-cockpit.tailabc.ts.net.",
+              "OS": "linux",
+              "Online": false,
+              "LastSeen": "2026-06-17T00:24:15.1Z",
+              "TailscaleIPs": ["100.73.251.93"]
+            }
+          }
+        }
+        """
+
+        devices = devices_from_tailscale_status_json(payload, user="ao")
+        by_name = {device.name: device for device in devices}
+
+        self.assertEqual(tailscale_status_command(), ("tailscale", "status", "--json"))
+        self.assertEqual([device.name for device in devices], ["atlas-ubuntu", "atlas-builder", "atlas-cockpit"])
+        self.assertEqual(by_name["atlas-builder"].host, "atlas-builder.tailabc.ts.net")
+        self.assertEqual(by_name["atlas-builder"].target(), "ao@atlas-builder.tailabc.ts.net")
+        self.assertEqual(by_name["atlas-builder"].status, "unknown")
+        self.assertIn("tailnet online", by_name["atlas-builder"].note)
+        self.assertEqual(by_name["atlas-cockpit"].status, "offline")
+        self.assertIn("last seen 2026-06-17T00:24:15.1Z", by_name["atlas-cockpit"].note)
+
+    def test_discovered_tailnet_devices_merge_without_losing_probe_status(self) -> None:
+        existing = (
+            DeviceRecord(
+                id="manual-builder",
+                name="atlas-builder",
+                host="atlas-builder",
+                user="ao",
+                status="ready",
+                note="codex-cli 0.140.0 | project ready",
+                updated=1,
+            ),
+        )
+        discovered = (
+            DeviceRecord(
+                id="discovered-builder",
+                name="atlas-builder",
+                host="atlas-builder.tailabc.ts.net",
+                user="ao",
+                status="unknown",
+                note="tailnet online | linux | 100.66.164.109",
+                updated=2,
+            ),
+            DeviceRecord(
+                id="discovered-cockpit",
+                name="atlas-cockpit",
+                host="atlas-cockpit.tailabc.ts.net",
+                user="ao",
+                status="offline",
+                note="tailnet offline | linux | 100.73.251.93",
+                updated=2,
+            ),
+        )
+
+        merged = merge_discovered_devices(existing, discovered)
+        by_name = {device.name: device for device in merged}
+
+        self.assertEqual(len(merged), 2)
+        self.assertEqual(by_name["atlas-builder"].id, "manual-builder")
+        self.assertEqual(by_name["atlas-builder"].host, "atlas-builder.tailabc.ts.net")
+        self.assertEqual(by_name["atlas-builder"].status, "ready")
+        self.assertEqual(by_name["atlas-builder"].note, "codex-cli 0.140.0 | project ready")
+        self.assertEqual(by_name["atlas-cockpit"].status, "offline")
+
+    def test_tailnet_discovery_can_filter_to_online_worker_machines(self) -> None:
+        payload = """
+        {
+          "MagicDNSSuffix": "tailabc.ts.net",
+          "Self": {
+            "HostName": "ubuntu-aio",
+            "DNSName": "atlas-ubuntu.tailabc.ts.net.",
+            "OS": "linux",
+            "Online": true,
+            "TailscaleIPs": ["100.99.25.89"]
+          },
+          "Peer": {
+            "nodekey:main": {
+              "HostName": "ao",
+              "DNSName": "atlas-main.tailabc.ts.net.",
+              "OS": "linux",
+              "Online": true,
+              "TailscaleIPs": ["100.100.175.65"]
+            },
+            "nodekey:phone": {
+              "HostName": "phone",
+              "DNSName": "pixel.tailabc.ts.net.",
+              "OS": "android",
+              "Online": true,
+              "TailscaleIPs": ["100.80.10.20"]
+            },
+            "nodekey:offline": {
+              "HostName": "old",
+              "DNSName": "old-worker.tailabc.ts.net.",
+              "OS": "linux",
+              "Online": false,
+              "TailscaleIPs": ["100.80.10.21"]
+            }
+          }
+        }
+        """
+
+        devices = devices_from_tailscale_status_json(
+            payload,
+            user="ao",
+            include_offline=False,
+            worker_os=("linux", "macos"),
+        )
+
+        self.assertEqual([device.name for device in devices], ["atlas-ubuntu", "atlas-main"])
 
     def test_memory_import_save_and_markdown(self) -> None:
         imported = import_memory_text(
@@ -137,10 +274,14 @@ class DeviceMeshTests(unittest.TestCase):
         )
         command = ssh_probe_command(device)
 
-        self.assertEqual(command[:4], ("ssh", "-p", "2222", "ao@atlas-builder"))
+        self.assertEqual(command[0], "ssh")
+        self.assertIn("BatchMode=yes", command)
+        self.assertIn("ConnectTimeout=8", command)
+        self.assertIn("2222", command)
+        self.assertIn("ao@atlas-builder", command)
         self.assertIn("bash -lc", command[-1])
         self.assertIn("CODEX_PROBE=1", command[-1])
-        self.assertNotIn("password", " ".join(command).lower())
+        self.assertNotIn("token", " ".join(command).lower())
 
         output = "\n".join([
             "CODEX_PROBE=1",
@@ -175,6 +316,26 @@ class DeviceMeshTests(unittest.TestCase):
 
         self.assertEqual(probe.status, "review")
         self.assertIn("project missing", probe.summary)
+
+    def test_probe_parser_classifies_tailnet_ssh_auth_blockers(self) -> None:
+        device = DeviceRecord(id="main", name="Main", host="atlas-main.tailnet")
+        output = "\n".join([
+            "# Tailscale SSH requires an additional check.",
+            "# To authenticate, visit: https://login.tailscale.com/a/example",
+        ])
+
+        probe = parse_probe_output(device, output, 124, timestamp=123)
+
+        self.assertEqual(probe.status, "blocked")
+        self.assertEqual(probe.summary, "Tailscale SSH approval required")
+
+    def test_probe_parser_classifies_plain_ssh_permission_denied(self) -> None:
+        device = DeviceRecord(id="builder", name="Builder", host="atlas-builder.tailnet")
+
+        probe = parse_probe_output(device, "ao@atlas-builder: Permission denied (publickey).", 255, timestamp=123)
+
+        self.assertEqual(probe.status, "blocked")
+        self.assertEqual(probe.summary, "SSH auth denied")
 
     def test_remote_team_commands_use_prompt_files_not_raw_prompt(self) -> None:
         device = DeviceRecord(
@@ -211,6 +372,24 @@ class DeviceMeshTests(unittest.TestCase):
         self.assertNotIn("secret prompt body", " ".join(launch))
         self.assertIn("Team protocol", prompt)
         self.assertIn("secret prompt body should stay in files", prompt)
+
+    def test_local_team_commands_skip_ssh_but_use_same_prompt_files(self) -> None:
+        device = DeviceRecord(
+            id="local",
+            name="This Device",
+            host="localhost",
+            project_root="/home/ao/project",
+            codex_bin="/home/ao/.local/bin/codex",
+        )
+        probe = local_probe_command(device)
+        launch = local_agent_command(device, "Run 1", "Coordinator")
+
+        self.assertEqual(probe[:2], ("bash", "-lc"))
+        self.assertIn("CODEX_PROBE=1", probe[-1])
+        self.assertEqual(launch[:2], ("bash", "-lc"))
+        self.assertIn("cat \"$HOME\"/.config/codex-gui/team/run-1/lanes/coordinator.md", launch[-1])
+        self.assertIn("--output-last-message", launch[-1])
+        self.assertNotIn("ssh", launch[0])
 
     def test_mesh_summary_counts_ready_devices_and_memories(self) -> None:
         devices = (

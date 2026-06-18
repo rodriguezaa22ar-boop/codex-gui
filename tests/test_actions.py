@@ -35,6 +35,12 @@ class ActionCatalogTests(unittest.TestCase):
         results = rank_actions("handoff bus", limit=5)
         self.assertTrue(any(item.id == "mesh.sync_bus" for item in results))
 
+    def test_search_finds_tailnet_discovery(self) -> None:
+        action = action_by_id("mesh.discover")
+        self.assertIsNotNone(action)
+        results = rank_actions("tailnet discover", limit=5)
+        self.assertTrue(any(item.id == "mesh.discover" for item in results))
+
     def test_search_finds_bus_retry(self) -> None:
         action = action_by_id("mesh.retry_bus")
         self.assertIsNotNone(action)

@@ -72,9 +72,13 @@ from codex_devices import (
     DeviceRecord,
     DeviceProbe,
     MemoryItem,
+    devices_from_tailscale_status_json,
     import_memory_text,
+    local_agent_command,
+    local_probe_command,
     load_devices,
     load_memory,
+    merge_discovered_devices,
     memory_markdown,
     mesh_state,
     new_device,
@@ -93,6 +97,7 @@ from codex_devices import (
     ssh_probe_command,
     ssh_test_command,
     slugify,
+    tailscale_status_command,
     team_prompt,
     update_device_from_probe,
     upsert_device,
@@ -1695,6 +1700,7 @@ class CodexControl(Gtk.Application):
             ("show-mission", lambda *_args: self.show_page("mission")),
             ("show-autopilot", lambda *_args: self.show_page("autopilot")),
             ("show-mesh", lambda *_args: self.show_page("mesh")),
+            ("mesh-discover", lambda *_args: self.on_discover_tailnet(Gtk.Button())),
             ("mesh-check", lambda *_args: self.on_check_fleet(Gtk.Button())),
             ("mesh-latest", lambda *_args: self.on_load_latest_mesh_team(Gtk.Button())),
             ("mesh-prepare-team", lambda *_args: self.on_prepare_mesh_team(Gtk.Button())),
@@ -3489,6 +3495,7 @@ class CodexControl(Gtk.Application):
         actions = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
         for label, handler, primary in [
             ("Refresh", self.on_refresh_mesh, False),
+            ("Discover Tailnet", self.on_discover_tailnet, True),
             ("Check Fleet", self.on_check_fleet, False),
             ("Prepare Team", self.on_prepare_mesh_team, True),
             ("Launch Team", self.on_launch_mesh_team, False),
@@ -3644,6 +3651,9 @@ class CodexControl(Gtk.Application):
             return self.selected_device
         return self.devices[0] if self.devices else None
 
+    def is_local_mesh_device(self, device: DeviceRecord) -> bool:
+        return device.host.strip().lower() in {"localhost", "127.0.0.1", "::1"}
+
     def fill_device_form(self, device: DeviceRecord | None) -> None:
         if not hasattr(self, "device_name_entry"):
             return
@@ -3765,10 +3775,16 @@ class CodexControl(Gtk.Application):
             )
             self.set_text(self.mesh_detail_buffer, text)
             return
-        test_command = shell_join(list(ssh_test_command(device)))
-        probe_command = shell_join(list(ssh_probe_command(device)))
-        launch_command = shell_join(list(ssh_launch_command(device)))
-        sync_command = shell_join(list(rsync_memory_command(MEMORY_FILE, device)))
+        if self.is_local_mesh_device(device):
+            test_command = shell_join(["bash", "-lc", f"{device.codex_bin} --version && pwd"])
+            probe_command = shell_join(list(local_probe_command(device)))
+            launch_command = shell_join(list(local_agent_command(device, "team-run", "local-lane")))
+            sync_command = "local device: portable memory is already on this machine"
+        else:
+            test_command = shell_join(list(ssh_test_command(device)))
+            probe_command = shell_join(list(ssh_probe_command(device)))
+            launch_command = shell_join(list(ssh_launch_command(device)))
+            sync_command = shell_join(list(rsync_memory_command(MEMORY_FILE, device)))
         detail = [
             f"Selected: {device.name}",
             f"Target: {device.target()}",
@@ -4032,6 +4048,10 @@ class CodexControl(Gtk.Application):
                     with lock:
                         errors.append(f"{assignment.get('device_name', 'device')}: missing device record")
                     return
+                if self.is_local_mesh_device(device):
+                    with lock:
+                        sent += 1
+                    return
                 try:
                     team_mkdir = run_cmd(list(ssh_mkdir_command(device, remote_team_dir(run_id))), timeout=20)
                 except Exception as exc:  # noqa: BLE001
@@ -4108,6 +4128,10 @@ class CodexControl(Gtk.Application):
                 if device is None:
                     with lock:
                         errors.append(f"{assignment.get('device_name', 'device')}: missing device record")
+                    return
+                if self.is_local_mesh_device(device):
+                    with lock:
+                        sent += 1
                     return
                 try:
                     team_mkdir = run_cmd(list(ssh_mkdir_command(device, remote_team_dir(self.mesh_team_run_id))), timeout=20)
@@ -4245,6 +4269,80 @@ class CodexControl(Gtk.Application):
         self.render_mesh_team()
         return False
 
+    def tailnet_discovery_defaults(self) -> tuple[str, str, str]:
+        form_user = self.device_user_entry.get_text().strip() if hasattr(self, "device_user_entry") else ""
+        project_root = (
+            self.device_project_entry.get_text().strip()
+            if hasattr(self, "device_project_entry")
+            else "~/Projects/codex-gui"
+        )
+        codex_bin = (
+            self.device_codex_entry.get_text().strip()
+            if hasattr(self, "device_codex_entry")
+            else "~/.local/bin/codex"
+        )
+        return form_user or os.environ.get("USER", ""), project_root, codex_bin
+
+    def finish_tailnet_discovery(self, discovered: tuple[DeviceRecord, ...], error: str = "") -> bool:
+        if error:
+            detail = error.strip().splitlines()[-1] if error.strip() else "tailscale discovery failed"
+            self.set_mesh_team_status(f"Tailnet discovery failed: {detail}", "bad")
+            self.set_status("Tailnet discovery failed", "bad")
+            return False
+        if not discovered:
+            self.set_mesh_team_status("No Tailnet devices found.", "warn")
+            self.set_status("No Tailnet devices found", "warn")
+            return False
+        self.devices = merge_discovered_devices(self.devices, discovered)
+        if self.selected_device is None or all(device.id != self.selected_device.id for device in self.devices):
+            self.selected_device = self.devices[0] if self.devices else None
+        else:
+            self.selected_device = next(
+                (device for device in self.devices if self.selected_device is not None and device.id == self.selected_device.id),
+                self.selected_device,
+            )
+        self.persist_devices()
+        self.render_mesh()
+        online = sum(1 for device in discovered if device.status != "offline")
+        offline = len(discovered) - online
+        self.set_mesh_team_status(
+            f"Discovered {len(discovered)} Tailnet device(s): {online} online, {offline} offline. Run Check Fleet next."
+        )
+        self.set_status(f"Tailnet discovered: {online} online")
+        return False
+
+    def on_discover_tailnet(self, _button: Gtk.Button) -> None:
+        user, project_root, codex_bin = self.tailnet_discovery_defaults()
+        self.set_mesh_team_status("Discovering Tailnet devices from Tailscale...")
+        self.set_status("Tailnet discovery running")
+
+        def worker() -> None:
+            try:
+                result = run_cmd(list(tailscale_status_command()), timeout=10)
+            except Exception as exc:  # noqa: BLE001
+                GLib.idle_add(self.finish_tailnet_discovery, (), str(exc))
+                return
+            if result.returncode != 0:
+                GLib.idle_add(self.finish_tailnet_discovery, (), result.stderr or result.stdout or "tailscale status failed")
+                return
+            try:
+                discovered = devices_from_tailscale_status_json(
+                    result.stdout,
+                    user=user,
+                    project_root=project_root,
+                    codex_bin=codex_bin,
+                    include_self=True,
+                    local_self_host="localhost",
+                    include_offline=False,
+                    worker_os=("linux", "macos"),
+                )
+            except (ValueError, json.JSONDecodeError) as exc:
+                GLib.idle_add(self.finish_tailnet_discovery, (), str(exc))
+                return
+            GLib.idle_add(self.finish_tailnet_discovery, discovered, "")
+
+        threading.Thread(target=worker, daemon=True).start()
+
     def on_check_fleet(self, _button: Gtk.Button) -> None:
         targets = [device for device in self.devices if self.trusted_mesh_device(device)]
         if not targets:
@@ -4257,7 +4355,8 @@ class CodexControl(Gtk.Application):
         def worker() -> None:
             for device in targets:
                 try:
-                    result = run_cmd(list(ssh_probe_command(device)), timeout=25)
+                    command = local_probe_command(device) if self.is_local_mesh_device(device) else ssh_probe_command(device)
+                    result = run_cmd(list(command), timeout=25)
                     text = result.stdout
                     if result.stderr:
                         text += "\n[stderr]\n" + result.stderr
@@ -4279,6 +4378,8 @@ class CodexControl(Gtk.Application):
             self.set_status(f"Prepared Codex Team {self.mesh_team_run_id}")
 
     def should_sync_project_to_device(self, device: DeviceRecord, project_path: Path) -> bool:
+        if self.is_local_mesh_device(device):
+            return False
         local_hosts = {"localhost", "127.0.0.1", "::1"}
         if device.host in local_hosts:
             try:
@@ -4296,6 +4397,8 @@ class CodexControl(Gtk.Application):
             device = self.mesh_assignment_device(assignment)
             if device is None:
                 errors.append(f"{assignment.get('device_name', 'device')}: missing device record")
+                continue
+            if self.is_local_mesh_device(device):
                 continue
             if self.should_sync_project_to_device(device, project_path):
                 try:
@@ -4342,7 +4445,12 @@ class CodexControl(Gtk.Application):
             if device is None:
                 continue
             title = f"{assignment['lane_title']} {device.name}"
-            self.launch_external(list(remote_agent_command(device, run_id, assignment["lane_slug"])), title, stamp=False)
+            command = (
+                list(local_agent_command(device, run_id, assignment["lane_slug"]))
+                if self.is_local_mesh_device(device)
+                else list(remote_agent_command(device, run_id, assignment["lane_slug"]))
+            )
+            self.launch_external(command, title, stamp=False)
             launched += 1
         self.set_mesh_team_status(f"Launched {launched} Codex team lane(s). Collect Team after terminals finish.")
         self.set_status(f"Launched {launched} team lane(s)")
@@ -4405,6 +4513,9 @@ class CodexControl(Gtk.Application):
                 device = self.mesh_assignment_device(assignment)
                 if device is None:
                     errors.append(f"{assignment.get('device_name', 'device')}: missing device record")
+                    continue
+                if self.is_local_mesh_device(device):
+                    collected += 1
                     continue
                 try:
                     result = run_cmd(list(rsync_team_results_command(team_dir, device, run_id)), timeout=35)
@@ -4491,6 +4602,9 @@ class CodexControl(Gtk.Application):
             return
         self.persist_memory_from_editor()
         self.render_mesh_detail()
+        if self.is_local_mesh_device(device):
+            self.set_status("Local memory saved")
+            return
         self.launch_external(list(rsync_memory_command(MEMORY_FILE, device)), f"Sync {device.name}", stamp=False)
 
     def on_open_device_session(self, _button: Gtk.Button) -> None:
@@ -6549,6 +6663,7 @@ class CodexControl(Gtk.Application):
                 "autopilot.track": self.on_track_autopilot,
                 "autopilot.terminal": self.on_run_selected_autopilot,
                 "autopilot.stop": self.on_stop_autopilot,
+                "mesh.discover": self.on_discover_tailnet,
                 "mesh.check": self.on_check_fleet,
                 "mesh.latest": self.on_load_latest_mesh_team,
                 "mesh.prepare_team": self.on_prepare_mesh_team,

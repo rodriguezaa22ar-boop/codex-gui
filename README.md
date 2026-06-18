@@ -67,17 +67,20 @@ Detailed install and release notes:
   run ledger, terminal availability, and receipt posture. It can prepare, run,
   copy, and save packages to `~/.config/codex-gui/launch-package.md`.
   `Ctrl+Shift+O` opens the full orchestration page.
-- Device Mesh for connecting your other Codex machines over SSH. It stores
-  device records locally, previews the exact SSH launch and memory-sync
-  commands, opens remote Codex sessions in a terminal, and syncs the explicit
-  portable memory file with `rsync`.
+- Device Mesh for connecting your other Codex machines over SSH. It can discover
+  active Linux/macOS workers from `tailscale status --json`, merge MagicDNS
+  devices into the local mesh without duplicating manual entries, preview the
+  exact SSH launch and memory-sync commands, open remote Codex sessions in a
+  terminal, and sync the explicit portable memory file with `rsync`.
 - Codex Team mode on the Mesh page. It probes trusted Tailscale devices, assigns
   each ready machine a focus lane such as Coordinator, Backend Builder, UI
   Polish, or Verifier, writes a shared ledger plus per-lane prompt files, syncs
-  the package to each device, launches terminal-backed remote Codex lanes, and
-  collects lane handoffs/results back into the local run folder. Team runs are
-  reloadable after app restart and can generate a combined `summary.md` from
-  collected lane artifacts. The handoff bus writes `out/handoff-bus.md` and
+  the package to each remote device, launches terminal-backed Codex lanes, and
+  collects lane handoffs/results back into the local run folder. The current
+  workstation is treated as a local coordinator worker and runs direct local
+  probe/launch commands instead of SSHing into itself. Team runs are reloadable
+  after app restart and can generate a combined `summary.md` from collected lane
+  artifacts. The handoff bus writes `out/handoff-bus.md` and
   `out/team-summary.md`, then redistributes that context to every current team
   device for the next pass. Failed bus deliveries are persisted in
   `out/handoff-bus-report.json`, and the GUI can retry only the failed devices.
