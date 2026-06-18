@@ -37,6 +37,14 @@ Open in browser:
 http://127.0.0.1:9760
 ```
 
+For unattended startup on the machine you run this from, use the service wrapper:
+
+```bash
+bash scripts/atlas-builder-monitor-service.sh install
+bash scripts/atlas-builder-monitor-service.sh status
+bash scripts/atlas-builder-monitor-service.sh logs
+```
+
 Defaults:
 
 - host: `atlas-builder`
@@ -71,8 +79,10 @@ bash scripts/atlas-builder-full-access.sh atlas-builder ao sudo
 # run one privileged command
 bash scripts/atlas-builder-full-access.sh atlas-builder ao sudo "journalctl -u sshd -n 80"
 
-# open monitor fast path
+# open monitor (legacy remote-path mode)
 bash scripts/atlas-builder-full-access.sh atlas-builder ao monitor
+# recommended local monitor launch (stable):
+bash scripts/atlas-builder-ops.sh monitor
 
 # open persistent tmux session (keeps shell alive across reconnects)
 bash scripts/atlas-builder-full-access.sh atlas-builder ao tmux
@@ -117,6 +127,10 @@ bash scripts/atlas-builder-ops.sh shell
 bash scripts/atlas-builder-ops.sh command "systemctl --user status"
 bash scripts/atlas-builder-ops.sh root
 bash scripts/atlas-builder-ops.sh monitor
+# run monitor as a persistent local service
+bash scripts/atlas-builder-ops.sh monitor-daemon install
+bash scripts/atlas-builder-ops.sh monitor-daemon status
+bash scripts/atlas-builder-ops.sh monitor-daemon logs
 
 # Reduce noisy startup output when running commands
 bash scripts/atlas-builder-ops.sh --quiet status
