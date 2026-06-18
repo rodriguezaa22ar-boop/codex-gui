@@ -30,7 +30,8 @@ class QualityGateTests(unittest.TestCase):
             )
         self.assertEqual(plan.project, tmp)
         self.assertEqual(plan.checks[0].label, "unit")
-        self.assertEqual(plan.checks[1].label, "Codex doctor")
+        self.assertEqual(plan.checks[1].label, "Setup readiness")
+        self.assertEqual(plan.checks[2].label, "Codex doctor")
 
     def test_build_quality_plan_adds_visual_audit_when_available(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -43,7 +44,7 @@ class QualityGateTests(unittest.TestCase):
                 desktop_file=None,
             )
 
-        self.assertEqual([check.label for check in plan.checks], ["Visual system audit"])
+        self.assertEqual([check.label for check in plan.checks], ["Visual system audit", "Setup readiness"])
 
     def test_run_quality_plan_scores_failed_required_checks(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

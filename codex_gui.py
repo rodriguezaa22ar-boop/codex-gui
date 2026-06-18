@@ -123,6 +123,7 @@ from codex_quality import (
     save_quality_report,
 )
 from codex_roadmap import Roadmap, RoadmapMilestone, build_roadmap
+from codex_setup import build_setup_report
 from codex_preflight import PreflightReport, build_preflight_report, codex_available
 from codex_prompting import PromptVariant, enhance_prompt, model_variant_request, parse_model_variants
 from codex_receipts import (
@@ -4661,6 +4662,7 @@ class CodexControl(Gtk.Application):
         buttons = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
         for label, handler, primary in [
             ("Run Doctor", self.on_run_doctor, True),
+            ("Setup Check", self.on_run_setup_check, False),
             ("Update Codex", self.on_update_codex, False),
             ("Login", self.on_login_codex, False),
             ("App Server Start", self.on_app_server_start, False),
@@ -5261,6 +5263,14 @@ class CodexControl(Gtk.Application):
             return None
         return self.project_snapshot if selected == scanned else None
 
+    def ensure_project_snapshot(self) -> ProjectSnapshot:
+        snapshot = self.current_project_snapshot()
+        if snapshot is not None:
+            return snapshot
+        snapshot = inspect_project(self.selected_project())
+        self.project_snapshot = snapshot
+        return snapshot
+
     def build_current_preflight_report(self) -> PreflightReport:
         receipt_auto = self.receipt_auto_switch.get_active() if hasattr(self, "receipt_auto_switch") else bool(self.config.get("receipt_auto", True))
         report = build_preflight_report(
@@ -5498,6 +5508,7 @@ class CodexControl(Gtk.Application):
 
     def build_current_mission_blueprint(self) -> MissionBlueprint:
         prompt = self.selected_prompt()
+        snapshot = self.ensure_project_snapshot()
         context = self.project_context_text()
         variants = enhance_prompt(prompt, context)
         preflight = self.build_current_preflight_report()
@@ -5513,7 +5524,7 @@ class CodexControl(Gtk.Application):
         blueprint = build_mission_blueprint(
             prompt=prompt,
             variants=variants,
-            snapshot=self.current_project_snapshot(),
+            snapshot=snapshot,
             preflight=preflight,
             agent_plan=plan,
         )
@@ -6649,7 +6660,8 @@ class CodexControl(Gtk.Application):
         self.update_command_preview()
 
     def project_context_text(self) -> str:
-        return self.project_snapshot.summary() if self.project_snapshot is not None else ""
+        snapshot = self.current_project_snapshot()
+        return snapshot.summary() if snapshot is not None else ""
 
     def refresh_project_snapshot_async(self) -> None:
         if hasattr(self, "project_intel_name"):
@@ -6686,6 +6698,8 @@ class CodexControl(Gtk.Application):
             self.render_prompt_variants()
         if hasattr(self, "preflight_summary_label") or hasattr(self, "preflight_page_summary_label"):
             self.refresh_preflight()
+        if hasattr(self, "mission_title_label") or hasattr(self, "mission_page_title_label"):
+            self.refresh_mission_blueprint()
         self.render_quality_gate()
         self.update_command_preview()
         return False
@@ -8053,6 +8067,17 @@ class CodexControl(Gtk.Application):
         self.render_operator_brief()
         self.set_status("Health failed", "bad")
         return False
+
+    def on_run_setup_check(self, _button: Gtk.Button) -> None:
+        report = build_setup_report(
+            project=self.selected_project(),
+            codex_bin=self.codex_bin,
+            desktop_file=Path.home() / ".local" / "share" / "applications" / "codex-gui.desktop",
+            devices_file=DEVICES_FILE,
+        )
+        self.set_text(self.health_buffer, report.detail_text())
+        status = "ok" if report.status == "ready" else "warn" if report.status == "review" else "bad"
+        self.set_status(report.summary(), status)
 
     def refresh_projects(self) -> None:
         paths = {self.selected_project()}

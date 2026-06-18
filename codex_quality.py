@@ -11,7 +11,6 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Protocol
 
-
 class CommandLike(Protocol):
     label: str
     command: str
@@ -135,6 +134,20 @@ def build_quality_plan(
             cwd,
             timeout=20,
         ))
+
+    checks.append(QualityCheckSpec(
+        "Setup readiness",
+        (
+            "python3",
+            "-c",
+            "from codex_setup import build_setup_report; "
+            f"report = build_setup_report(project='.', codex_bin={codex_bin!r}); "
+            "print(report.summary()); "
+            "raise SystemExit(0 if report.blocks == 0 else 1)",
+        ),
+        cwd,
+        timeout=45,
+    ))
 
     if codex_bin:
         command = (codex_bin, "doctor", "--summary", "--ascii")

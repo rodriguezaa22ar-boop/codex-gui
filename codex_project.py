@@ -143,7 +143,7 @@ def detect_commands(root: Path, stack: tuple[str, ...]) -> tuple[ProjectCommand,
     if "GTK" in stack and (root / "codex_gui.py").exists():
         commands.insert(0, ProjectCommand(
             "GUI compile",
-            "python3 -m py_compile codex_gui.py codex_actions.py codex_context.py codex_devices.py codex_roadmap.py codex_orchestration.py codex_palette.py codex_visual.py codex_workstation.py codex_brief.py codex_quality.py codex_autopilot.py codex_mission.py codex_prompting.py codex_project.py codex_sessions.py codex_agents.py codex_receipts.py codex_runs.py codex_preflight.py",
+            "python3 -m py_compile codex_gui.py codex_actions.py codex_context.py codex_devices.py codex_roadmap.py codex_orchestration.py codex_palette.py codex_visual.py codex_workstation.py codex_brief.py codex_quality.py codex_autopilot.py codex_mission.py codex_prompting.py codex_project.py codex_sessions.py codex_agents.py codex_receipts.py codex_runs.py codex_preflight.py codex_setup.py",
         ))
     seen: set[str] = set()
     unique: list[ProjectCommand] = []

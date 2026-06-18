@@ -1,0 +1,51 @@
+# Install Codex Control
+
+Codex Control is a local Linux workstation for the Codex CLI. It is designed
+for a real terminal-backed Codex workflow, not a hosted chat replacement.
+
+## Requirements
+
+- Python 3.11 or newer
+- GTK 4 and PyGObject
+- Codex CLI available as `codex`
+- A terminal fallback such as Konsole, GNOME Console, GNOME Terminal, or xterm
+- Git, if you want project intelligence, mesh sync, and public repo workflows
+
+On Fedora/KDE-style systems, the GTK/PyGObject package names are typically in
+the `gtk4` and `python3-gobject` family. On Debian/Ubuntu-style systems, look
+for `gir1.2-gtk-4.0`, `python3-gi`, and `python3-gi-cairo`.
+
+## Install From GitHub
+
+```bash
+git clone git@github.com:rodriguezaa22ar-boop/codex-gui.git
+cd codex-gui
+python3 -m pip install --user .
+codex-gui
+```
+
+If `pip` is missing but Python has `ensurepip`:
+
+```bash
+python3 -m ensurepip --upgrade --user
+python3 -m pip install --user .
+```
+
+## Verify
+
+From the clone:
+
+```bash
+python3 -m py_compile *.py
+python3 -m unittest discover -s tests
+codex doctor --summary --ascii
+```
+
+The app's Quality Gate also runs a setup readiness check that reports missing
+runtime pieces before you rely on the workstation.
+
+## Device Mesh
+
+For other trusted machines, first make each machine a clean clone of the same
+repo, then add it on the Mesh page. SSH access, GitHub access, Codex CLI, and
+the same project path should all be working before launching team lanes.

@@ -38,6 +38,7 @@ py-modules = [
   "codex_roadmap",
   "codex_runs",
   "codex_sessions",
+  "codex_setup",
   "codex_team",
   "codex_visual",
   "codex_workstation",

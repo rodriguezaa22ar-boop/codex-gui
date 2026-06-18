@@ -30,6 +30,11 @@ python3 -m pip install --user .
 That installs the `codex-gui` launcher and keeps the app runnable from a
 GitHub checkout without editing paths.
 
+Detailed install and release notes:
+
+- [Install guide](docs/INSTALL.md)
+- [Public release checklist](docs/PUBLIC_RELEASE.md)
+
 ## Included Workflows
 
 - Embedded terminal Codex sessions
