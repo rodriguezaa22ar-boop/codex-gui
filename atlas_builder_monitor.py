@@ -283,8 +283,24 @@ print(json.dumps(payload, sort_keys=True))
 
 def run_ssh_metrics(host: str, user: str = "ao", timeout: float = 8.0) -> dict[str, Any]:
     """Fetch latest metrics from a remote machine via SSH."""
-
-    command = "python3 - <<'PY'\n" + REMOTE_METRICS_PY + "\nPY"
+    command = (
+        "tmp=\"${TMPDIR:-/tmp}/atlas_builder_metrics_$$.py\"\n"
+        "cat > \"$tmp\" <<'PY'\n"
+        + REMOTE_METRICS_PY
+        + "\nPY\n"
+        "if command -v python3 >/dev/null 2>&1; then\n"
+        "  python3 \"$tmp\"\n"
+        "elif command -v nix-shell >/dev/null 2>&1; then\n"
+        "  nix-shell -p python3 --run \"python3 $tmp\"\n"
+        "else\n"
+        "  echo '{\"error\":\"python3 unavailable\"}' >&2\n"
+        "  rm -f \"$tmp\"\n"
+        "  exit 127\n"
+        "fi\n"
+        "status=$?\n"
+        "rm -f \"$tmp\"\n"
+        "exit \"$status\"\n"
+    )
     target = f"{user}@{host}" if user else host
     result = subprocess.run(
         [
@@ -313,6 +329,11 @@ def run_ssh_metrics(host: str, user: str = "ao", timeout: float = 8.0) -> dict[s
     if not text:
         raise RuntimeError("empty metrics output")
     try:
+        payload_start = text.find("{")
+        payload_end = text.rfind("}")
+        if payload_start == -1 or payload_end <= payload_start:
+            raise RuntimeError(f"invalid remote metrics payload: {text[:200]}")
+        text = text[payload_start : payload_end + 1]
         return json.loads(text)
     except json.JSONDecodeError as exc:
         raise RuntimeError(f"invalid remote metrics payload: {text[:200]}") from exc
