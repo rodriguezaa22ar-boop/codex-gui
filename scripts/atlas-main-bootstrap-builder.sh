@@ -12,6 +12,18 @@ remote_payload() {
 set -euo pipefail
 
 export PATH="$HOME/.local/bin:$PATH"
+export GIT_TERMINAL_PROMPT=0
+REMOTE_SSH="git@github.com:rodriguezaa22ar-boop/codex-gui.git"
+REMOTE_HTTPS="https://github.com/rodriguezaa22ar-boop/codex-gui.git"
+
+repo_remote_url() {
+  if git ls-remote "$REMOTE_SSH" HEAD >/dev/null 2>&1; then
+    printf '%s\n' "$REMOTE_SSH"
+  else
+    printf '%s\n' "$REMOTE_HTTPS"
+  fi
+}
+
 mkdir -p "$HOME/Projects"
 cd "$HOME/Projects"
 
@@ -20,13 +32,25 @@ if ! command -v git >/dev/null 2>&1; then
     exec nix-shell -p git tmux --run 'bash -s' <<'NIXREMOTE'
 set -euo pipefail
 export PATH="$HOME/.local/bin:$PATH"
+export GIT_TERMINAL_PROMPT=0
+REMOTE_SSH="git@github.com:rodriguezaa22ar-boop/codex-gui.git"
+REMOTE_HTTPS="https://github.com/rodriguezaa22ar-boop/codex-gui.git"
+
+repo_remote_url() {
+  if git ls-remote "$REMOTE_SSH" HEAD >/dev/null 2>&1; then
+    printf '%s\n' "$REMOTE_SSH"
+  else
+    printf '%s\n' "$REMOTE_HTTPS"
+  fi
+}
+
 mkdir -p "$HOME/Projects"
 cd "$HOME/Projects"
 if [ ! -d codex-gui/.git ]; then
-  git clone git@github.com:rodriguezaa22ar-boop/codex-gui.git codex-gui || git clone https://github.com/rodriguezaa22ar-boop/codex-gui.git codex-gui
+  git clone "$(repo_remote_url)" codex-gui
 fi
 cd codex-gui
-git remote set-url origin git@github.com:rodriguezaa22ar-boop/codex-gui.git || true
+git remote set-url origin "$(repo_remote_url)" || true
 git fetch origin main
 git checkout main
 git pull --ff-only origin main
@@ -39,11 +63,11 @@ NIXREMOTE
 fi
 
 if [ ! -d codex-gui/.git ]; then
-  git clone git@github.com:rodriguezaa22ar-boop/codex-gui.git codex-gui || git clone https://github.com/rodriguezaa22ar-boop/codex-gui.git codex-gui
+  git clone "$(repo_remote_url)" codex-gui
 fi
 
 cd codex-gui
-git remote set-url origin git@github.com:rodriguezaa22ar-boop/codex-gui.git || true
+git remote set-url origin "$(repo_remote_url)" || true
 git fetch origin main
 git checkout main
 git pull --ff-only origin main

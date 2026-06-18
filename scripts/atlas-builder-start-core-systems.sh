@@ -8,6 +8,15 @@ REMOTE_HTTPS="https://github.com/rodriguezaa22ar-boop/codex-gui.git"
 MISSION_DIR="$HOME/.config/codex-gui/missions"
 PROMPT_FILE="$MISSION_DIR/atlas-builder-core-systems.prompt"
 SCRIPT_PATH="$(readlink -f "$0")"
+export GIT_TERMINAL_PROMPT=0
+
+repo_remote_url() {
+  if git ls-remote "$REMOTE_SSH" HEAD >/dev/null 2>&1; then
+    printf '%s\n' "$REMOTE_SSH"
+  else
+    printf '%s\n' "$REMOTE_HTTPS"
+  fi
+}
 
 if [[ "${1:-}" == "--run-codex" ]]; then
   cd "$REPO"
@@ -37,11 +46,11 @@ fi
 mkdir -p "$HOME/Projects" "$MISSION_DIR"
 
 if [[ ! -d "$REPO/.git" ]]; then
-  git clone "$REMOTE_SSH" "$REPO" || git clone "$REMOTE_HTTPS" "$REPO"
+  git clone "$(repo_remote_url)" "$REPO"
 fi
 
 cd "$REPO"
-git remote set-url origin "$REMOTE_SSH" || true
+git remote set-url origin "$(repo_remote_url)" || true
 git fetch origin main
 git checkout main
 git pull --ff-only origin main

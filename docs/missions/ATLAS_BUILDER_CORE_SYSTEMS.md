@@ -27,8 +27,9 @@ SSH on the Builder node once:
 sudo tailscale set --ssh=true --operator=$USER
 ```
 
-The script above opens a persistent `tmux` session and launches Codex with this
-mission. The manual setup below is the expanded version.
+The script above opens a persistent `tmux` session, selects SSH or HTTPS GitHub
+access based on what works on the node, and launches Codex with this mission.
+The manual setup below is the expanded version.
 
 ```bash
 mkdir -p ~/Projects
@@ -155,16 +156,16 @@ Branch: lane/core-systems
 Commit:
 
 Changed:
-- 
+-
 
 Validation:
-- 
+-
 
 Risks:
-- 
+-
 
 Next:
-- 
+-
 EOF
 
 tailscale file cp /tmp/atlas-builder-handoff.txt atlas-ubuntu:

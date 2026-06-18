@@ -37,6 +37,8 @@ This script tries regular SSH first, then Tailscale SSH. If it reaches
 `atlas-builder`, it will:
 
 - pull latest `main` on Builder
+- use GitHub SSH when available and fall back to HTTPS without forcing a broken
+  SSH remote
 - create/reset `lane/core-systems`
 - write Builder's mission prompt
 - start `tmux` session `codex-core-systems`
