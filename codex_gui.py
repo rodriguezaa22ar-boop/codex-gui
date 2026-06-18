@@ -2906,15 +2906,31 @@ class CodexControl(Gtk.Application):
     def build_composer_panel(self) -> Gtk.Widget:
         composer = self.panel("Ask Codex")
         composer.add_css_class("composer")
-        button_grid = Gtk.Grid(column_spacing=8, row_spacing=8)
-        for index, (name, prompt) in enumerate(PROMPTS.items()):
+        primary_template_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        for name in ("Best", "Build", "Fix"):
+            prompt = PROMPTS[name]
             button = Gtk.Button(label=name)
             button.add_css_class("secondary")
             if name == "Best":
                 button.add_css_class("accent")
             button.connect("clicked", self.on_prompt_template, prompt, name)
+            primary_template_row.append(button)
+        composer.append(primary_template_row)
+
+        template_expander = Gtk.Expander(label="Prompt templates")
+        button_grid = Gtk.Grid(column_spacing=8, row_spacing=8)
+        secondary_prompts = [
+            (name, prompt)
+            for name, prompt in PROMPTS.items()
+            if name not in {"Best", "Build", "Fix"}
+        ]
+        for index, (name, prompt) in enumerate(secondary_prompts):
+            button = Gtk.Button(label=name)
+            button.add_css_class("secondary")
+            button.connect("clicked", self.on_prompt_template, prompt, name)
             button_grid.attach(button, index % 4, index // 4, 1, 1)
-        composer.append(button_grid)
+        template_expander.set_child(button_grid)
+        composer.append(template_expander)
 
         self.prompt_view = Gtk.TextView()
         self.prompt_view.add_css_class("composer-view")
@@ -2935,6 +2951,19 @@ class CodexControl(Gtk.Application):
         for label, handler, primary in [
             ("Run Max", self.on_run_embedded, True),
             ("Enhance", self.on_enhance_prompt, False),
+        ]:
+            button = Gtk.Button(label=label)
+            if primary:
+                button.add_css_class("primary")
+            else:
+                button.add_css_class("secondary")
+            button.connect("clicked", handler)
+            button_row.append(button)
+        composer.append(button_row)
+
+        run_options = Gtk.Expander(label="Run options")
+        option_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        for label, handler, primary in [
             ("AI Enhance", self.on_ai_enhance_prompt, False),
             ("Detach", self.on_run_external, False),
             ("Exec JSON", self.on_run_headless, False),
@@ -2946,8 +2975,9 @@ class CodexControl(Gtk.Application):
             else:
                 button.add_css_class("secondary")
             button.connect("clicked", handler)
-            button_row.append(button)
-        composer.append(button_row)
+            option_row.append(button)
+        run_options.set_child(option_row)
+        composer.append(run_options)
         return composer
 
     def build_control_rail(self) -> Gtk.Widget:
