@@ -81,6 +81,32 @@ bash scripts/atlas-builder-full-access.sh atlas-builder ao tmux
 bash scripts/atlas-builder-full-access.sh atlas-builder ao tmux-root
 ```
 
+## Fastest Builder Access
+
+One command for persistent root access:
+
+```bash
+bash scripts/atlas-builder-fast.sh
+```
+
+Optional quick overrides:
+
+```bash
+# open regular shell
+bash scripts/atlas-builder-fast.sh shell
+
+# run command mode
+bash scripts/atlas-builder-fast.sh command "systemctl --user status"
+```
+
+Set host/user defaults once per workstation:
+
+```bash
+export ATLAS_BUILDER_HOST=atlas-builder
+export ATLAS_BUILDER_USER=ao
+export ATLAS_BUILDER_SESSION=atlas-builder
+```
+
 ## Install
 
 From a clone:
