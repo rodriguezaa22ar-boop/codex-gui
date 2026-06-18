@@ -83,9 +83,8 @@ def spawn_cmd(args: list[str], cwd: str | Path | None = None):
         args,
         cwd=str(cwd) if cwd is not None else None,
         stdin=subprocess.DEVNULL,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
         start_new_session=True,
     )
 
