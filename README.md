@@ -35,6 +35,7 @@ Detailed install and release notes:
 - [Install guide](docs/INSTALL.md)
 - [Public release checklist](docs/PUBLIC_RELEASE.md)
 - [Codex team operating model](docs/TEAM_ROLES.md)
+- [Atlas Builder core systems mission](docs/missions/ATLAS_BUILDER_CORE_SYSTEMS.md)
 
 ## Included Workflows
 
