@@ -171,14 +171,14 @@ window {
   color: @cc_text;
   border: 1px solid @cc_border;
   border-radius: 8px;
-  padding: 12px;
+  padding: 10px;
 }
 
 .operator-console {
-  background: @cc_panel;
-  border: 1px solid @cc_accent_edge;
+  background: @cc_panel_alt;
+  border: 1px solid @cc_border_strong;
   border-radius: 8px;
-  padding: 16px;
+  padding: 12px;
 }
 
 .operator-card,
@@ -391,6 +391,22 @@ button:hover {
   border-color: @cc_border_strong;
 }
 
+.terminal-panel {
+  padding: 10px;
+  border-color: @cc_accent;
+}
+
+.composer {
+  padding: 10px;
+}
+
+.side-rail .panel,
+.side-rail expander {
+  background: transparent;
+  border-color: #1b2934;
+  padding: 8px;
+}
+
 .terminal-frame,
 .code-view {
   background: #020509;
@@ -402,12 +418,14 @@ button:hover {
 .composer-view {
   background: @cc_panel_deep;
   color: @cc_text;
-  border: 1px solid @cc_border;
+  border: 1px solid #1f303b;
   border-radius: 8px;
 }
 
 .side-rail {
-  background: @cc_toolbar;
+  background: @cc_root;
+  border-left: 1px solid #1b2934;
+  padding-left: 10px;
 }
 
 entry, textview, dropdown, expander {
@@ -417,9 +435,9 @@ entry, textview, dropdown, expander {
 }
 
 expander {
-  border: 1px solid @cc_border;
+  border: 1px solid #1b2934;
   border-radius: 8px;
-  padding: 8px;
+  padding: 6px;
 }
 
 expander title {

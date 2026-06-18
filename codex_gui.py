@@ -2882,7 +2882,7 @@ class CodexControl(Gtk.Application):
         terminal_panel = self.panel()
         terminal_panel.add_css_class("terminal-panel")
         terminal_panel.set_vexpand(True)
-        terminal_panel.set_size_request(-1, 340)
+        terminal_panel.set_size_request(-1, 400)
         header = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
         title = self.label("Terminal", "section")
         self.terminal_cwd_label = self.label(self.selected_project(), "muted")
@@ -3652,6 +3652,7 @@ class CodexControl(Gtk.Application):
         ]:
             form.append(self.form_row(label, widget))
         device_buttons = Gtk.Grid(column_spacing=8, row_spacing=8)
+        self.mesh_selected_device_buttons: list[Gtk.Button] = []
         for index, (label, handler, primary) in enumerate([
             ("New", self.on_new_device_form, False),
             ("Add/Update", self.on_add_device, True),
@@ -3666,6 +3667,9 @@ class CodexControl(Gtk.Application):
             button = Gtk.Button(label=label)
             button.add_css_class("primary" if primary else "secondary")
             button.connect("clicked", handler)
+            if label in {"Remove", "Check", "Copy Test", "Copy Launch", "Sync Memory", "Open Session"}:
+                button.set_tooltip_text("Select a device first.")
+                self.mesh_selected_device_buttons.append(button)
             device_buttons.attach(button, index % 3, index // 3, 1, 1)
         form.append(device_buttons)
         left.append(form)
@@ -3714,6 +3718,7 @@ class CodexControl(Gtk.Application):
         self.mesh_team_status_label = self.label("No team package yet", "muted", wrap=True)
         team.append(self.mesh_team_status_label)
         team_buttons = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        self.mesh_prepared_team_buttons: list[Gtk.Button] = []
         for label, handler, primary in [
             ("Check", self.on_check_fleet, False),
             ("Latest", self.on_load_latest_mesh_team, False),
@@ -3734,6 +3739,9 @@ class CodexControl(Gtk.Application):
             button = Gtk.Button(label=label)
             button.add_css_class("primary" if primary else "secondary")
             button.connect("clicked", handler)
+            if label not in {"Check", "Latest", "Prepare", "Prepare Visible"}:
+                button.set_tooltip_text("Prepare or load a team first.")
+                self.mesh_prepared_team_buttons.append(button)
             team_buttons.append(button)
         team.append(team_buttons)
         self.mesh_team_list = Gtk.ListBox()
@@ -4077,6 +4085,7 @@ class CodexControl(Gtk.Application):
         self.set_chip(self.mesh_memory_count_label, f"{len(self.memory_items)} memories", "chip-strong" if self.memory_items else "chip")
         device = self.selected_mesh_device()
         self.set_chip(self.mesh_selected_label, device.name if device else "none selected", "mode-pill" if device else "chip")
+        self.refresh_mesh_action_sensitivity()
         if device is None:
             text = (
                 "No selected device.\n\n"
@@ -4135,6 +4144,16 @@ class CodexControl(Gtk.Application):
         if probe is not None:
             detail.extend(["", "Last probe", probe.detail_text()])
         self.set_text(self.mesh_detail_buffer, "\n".join(detail) + "\n")
+
+    def refresh_mesh_action_sensitivity(self) -> None:
+        has_device = self.selected_mesh_device() is not None
+        has_team = self.mesh_team_dir is not None and bool(self.mesh_team_assignments) and bool(self.mesh_team_run_id)
+        for button in getattr(self, "mesh_selected_device_buttons", []):
+            button.set_sensitive(has_device)
+            button.set_tooltip_text("" if has_device else "Select a device first.")
+        for button in getattr(self, "mesh_prepared_team_buttons", []):
+            button.set_sensitive(has_team)
+            button.set_tooltip_text("" if has_team else "Prepare or load a team first.")
 
     def render_mesh(self) -> None:
         self.render_device_list()
@@ -5033,6 +5052,7 @@ class CodexControl(Gtk.Application):
     def render_mesh_team(self) -> None:
         if not hasattr(self, "mesh_team_list"):
             return
+        self.refresh_mesh_action_sensitivity()
         self.clear_listbox(self.mesh_team_list)
         if not self.mesh_team_assignments:
             row = Gtk.ListBoxRow()
