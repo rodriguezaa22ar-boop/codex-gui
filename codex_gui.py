@@ -178,6 +178,7 @@ from codex_team import (
     latest_team_run_dir,
     merge_team_chat_texts,
     role_profile_hint,
+    team_operator_summary,
     team_role_for_device,
     team_run_dirs,
     write_role_bootstrap,
@@ -3566,6 +3567,7 @@ class CodexControl(Gtk.Application):
         summary = self.panel()
         summary.add_css_class("mesh-summary")
         initial_readiness = mesh_readiness_report(self.devices, self.mesh_probe_records)
+        initial_operator = self.current_team_operator_summary()
         top = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
         title_col = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=3)
         title_col.set_hexpand(True)
@@ -3576,7 +3578,28 @@ class CodexControl(Gtk.Application):
         self.mesh_device_count_label = self.chip_label("0 devices", "chip")
         self.mesh_memory_count_label = self.chip_label("0 memories", "chip")
         self.mesh_selected_label = self.chip_label("none selected", "chip")
-        for chip in [self.mesh_device_count_label, self.mesh_memory_count_label, self.mesh_selected_label]:
+        self.mesh_ready_count_label = self.chip_label(
+            f"{initial_readiness.ready_count} ready",
+            "chip-strong" if initial_readiness.ready_count else "chip",
+        )
+        self.mesh_lane_count_label = self.chip_label(
+            initial_operator.lane_text,
+            self.chip_css_for_status(initial_operator.status),
+        )
+        self.mesh_bus_health_label = self.chip_label(
+            initial_operator.bus_text,
+            self.chip_css_for_status(initial_operator.status),
+        )
+        self.mesh_next_action_label = self.chip_label(f"Next: {initial_operator.next_action}", "mode-pill")
+        for chip in [
+            self.mesh_device_count_label,
+            self.mesh_memory_count_label,
+            self.mesh_selected_label,
+            self.mesh_ready_count_label,
+            self.mesh_lane_count_label,
+            self.mesh_bus_health_label,
+            self.mesh_next_action_label,
+        ]:
             top.append(chip)
         summary.append(top)
         actions = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
@@ -3999,12 +4022,53 @@ class CodexControl(Gtk.Application):
         if selected_row is not None:
             self.device_list.select_row(selected_row)
 
+    def current_team_operator_summary(self, run_status=None):
+        ready = len(self.ready_mesh_devices())
+        saved = len(team_run_dirs(TEAM_DIR))
+        assignment_count = len(self.mesh_team_assignments)
+        if run_status is None and self.mesh_team_dir is not None:
+            run_status = inspect_team_run(self.mesh_team_dir)
+        return team_operator_summary(
+            run_status,
+            self._team_bus_report(),
+            ready_devices=ready,
+            saved_runs=saved,
+            assignment_count=assignment_count,
+        )
+
+    def refresh_mesh_operator_chips(self, readiness: MeshReadinessReport) -> None:
+        if not hasattr(self, "mesh_next_action_label"):
+            return
+        operator = self.current_team_operator_summary()
+        ready = readiness.ready_count
+        self.set_chip(
+            self.mesh_ready_count_label,
+            f"{ready} ready",
+            "chip-strong" if ready else "chip",
+        )
+        self.set_chip(
+            self.mesh_lane_count_label,
+            operator.lane_text,
+            self.chip_css_for_status(operator.status),
+        )
+        self.set_chip(
+            self.mesh_bus_health_label,
+            operator.bus_text,
+            self.chip_css_for_status(operator.status),
+        )
+        self.set_chip(
+            self.mesh_next_action_label,
+            f"Next: {operator.next_action}",
+            "mode-pill",
+        )
+
     def render_mesh_detail(self) -> None:
         if not hasattr(self, "mesh_summary_label"):
             return
         readiness = mesh_readiness_report(self.devices, self.mesh_probe_records)
         visible_devices = self._filtered_mesh_devices(readiness)
         self.mesh_summary_label.set_text(f"{readiness.summary} | {len(self.memory_items)} memory item(s)")
+        self.refresh_mesh_operator_chips(readiness)
         self.set_chip(
             self.mesh_device_count_label,
             f"{len(visible_devices)}/{len(self.devices)} devices",
