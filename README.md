@@ -34,6 +34,7 @@ Detailed install and release notes:
 
 - [Install guide](docs/INSTALL.md)
 - [Public release checklist](docs/PUBLIC_RELEASE.md)
+- [Codex team roles](docs/TEAM_ROLES.md)
 
 ## Included Workflows
 

@@ -4,7 +4,16 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from codex_team import inspect_team_run, latest_team_run_dir, team_run_dirs, write_bus_report, write_handoff_bus, write_team_summary
+from codex_team import (
+    inspect_team_run,
+    latest_team_run_dir,
+    team_role_for_device,
+    team_roles_markdown,
+    team_run_dirs,
+    write_bus_report,
+    write_handoff_bus,
+    write_team_summary,
+)
 
 
 class CodexTeamTests(unittest.TestCase):
@@ -115,6 +124,19 @@ class CodexTeamTests(unittest.TestCase):
 
             self.assertEqual(team_run_dirs(root), (newer, older))
             self.assertEqual(latest_team_run_dir(root), newer)
+
+    def test_named_atlas_devices_get_stable_separate_roles(self) -> None:
+        self.assertEqual(team_role_for_device("atlas-builder", "atlas-builder.tailnet").id, "backend-builder")
+        self.assertEqual(team_role_for_device("atlas-ubuntu", "atlas-ubuntu.tailnet").id, "verifier")
+        self.assertEqual(team_role_for_device("atlas-cockpit", "atlas-cockpit.tailnet").id, "ui-polish")
+        self.assertEqual(team_role_for_device("This Device Test", "localhost").id, "coordinator")
+
+    def test_team_roles_markdown_documents_boundaries(self) -> None:
+        text = team_roles_markdown()
+
+        self.assertIn("Backend Builder", text)
+        self.assertIn("Boundary:", text)
+        self.assertIn("Verifier", text)
 
 
 if __name__ == "__main__":

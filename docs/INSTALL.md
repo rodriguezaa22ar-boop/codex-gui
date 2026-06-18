@@ -15,6 +15,13 @@ On Fedora/KDE-style systems, the GTK/PyGObject package names are typically in
 the `gtk4` and `python3-gobject` family. On Debian/Ubuntu-style systems, look
 for `gir1.2-gtk-4.0`, `python3-gi`, and `python3-gi-cairo`.
 
+On NixOS or other Nix-enabled machines:
+
+```bash
+nix-shell
+python3 -m unittest discover -s tests
+```
+
 ## Install From GitHub
 
 ```bash

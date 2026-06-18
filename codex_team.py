@@ -46,6 +46,92 @@ class TeamRunStatus:
         return f"{self.run_id} | {self.collected_count}/{self.lane_count} lanes collected | {self.project}"
 
 
+@dataclass(frozen=True)
+class TeamRole:
+    id: str
+    title: str
+    focus: str
+    boundary: str
+    match_terms: tuple[str, ...] = ()
+
+    def assignment_focus(self) -> str:
+        return f"{self.focus} Boundary: {self.boundary}"
+
+
+TEAM_ROLES: tuple[TeamRole, ...] = (
+    TeamRole(
+        id="coordinator",
+        title="Coordinator",
+        focus="Integrate teammate handoffs, keep scope tight, resolve conflicts, and decide final merge order.",
+        boundary="Do not make broad feature changes unless needed to unblock integration.",
+        match_terms=("localhost", "127.0.0.1", "this device", "local"),
+    ),
+    TeamRole(
+        id="backend-builder",
+        title="Backend Builder",
+        focus="Own core implementation for Codex Control: mesh orchestration, durable command paths, packaging, setup readiness, persistence, and tests.",
+        boundary="Do not spend time on visual styling except where backend state or controls need UI exposure.",
+        match_terms=("atlas-builder", "builder"),
+    ),
+    TeamRole(
+        id="ui-polish",
+        title="UI Polish",
+        focus="Own GTK layout, visual hierarchy, interaction fit, text fit, status surfaces, and screenshot readiness.",
+        boundary="Do not alter backend behavior beyond small UI plumbing without handing it to Backend Builder.",
+        match_terms=("atlas-cockpit", "cockpit"),
+    ),
+    TeamRole(
+        id="verifier",
+        title="Verifier",
+        focus="Own validation: compile, unit tests, Quality Gate, Codex doctor, packaging checks, remote pull checks, and regression notes.",
+        boundary="Prefer failing fast with exact commands and logs over making broad fixes.",
+        match_terms=("atlas-ubuntu", "ubuntu"),
+    ),
+    TeamRole(
+        id="architect",
+        title="Architect",
+        focus="Split the mission into high-leverage next actions and identify risky assumptions.",
+        boundary="Produce plans and interfaces; leave implementation to Builder lanes when possible.",
+    ),
+    TeamRole(
+        id="reviewer",
+        title="Reviewer",
+        focus="Review diffs for regressions, missing tests, unsafe behavior, and UX gaps.",
+        boundary="Do not rewrite large areas unless the review finds a concrete blocker.",
+    ),
+)
+
+
+FALLBACK_ROLE_IDS = ("architect", "backend-builder", "reviewer", "ui-polish", "verifier")
+
+
+def team_role_by_id(role_id: str) -> TeamRole:
+    return next((role for role in TEAM_ROLES if role.id == role_id), TEAM_ROLES[0])
+
+
+def team_role_for_device(name: str, host: str, index: int = 0) -> TeamRole:
+    identity = f"{name} {host}".lower()
+    for role in TEAM_ROLES:
+        if role.match_terms and any(term in identity for term in role.match_terms):
+            return role
+    fallback_id = FALLBACK_ROLE_IDS[index % len(FALLBACK_ROLE_IDS)]
+    return team_role_by_id(fallback_id)
+
+
+def team_roles_markdown() -> str:
+    lines = ["# Codex Team Roles", ""]
+    for role in TEAM_ROLES:
+        lines.extend([
+            f"## {role.title}",
+            "",
+            f"ID: `{role.id}`",
+            f"Focus: {role.focus}",
+            f"Boundary: {role.boundary}",
+            "",
+        ])
+    return "\n".join(lines).rstrip() + "\n"
+
+
 def _read_json(path: Path) -> dict[str, Any]:
     try:
         data = json.loads(path.read_text(encoding="utf-8"))

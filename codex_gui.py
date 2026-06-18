@@ -163,7 +163,15 @@ from codex_sessions import (
     touch_session,
     upsert_session,
 )
-from codex_team import inspect_team_run, latest_team_run_dir, team_run_dirs, write_bus_report, write_handoff_bus, write_team_summary
+from codex_team import (
+    inspect_team_run,
+    latest_team_run_dir,
+    team_role_for_device,
+    team_run_dirs,
+    write_bus_report,
+    write_handoff_bus,
+    write_team_summary,
+)
 from codex_visual import visual_system_css
 from codex_workstation import (
     ActionFeedback,
@@ -3833,23 +3841,8 @@ class CodexControl(Gtk.Application):
         )
 
     def focus_for_mesh_device(self, device: DeviceRecord, index: int) -> tuple[str, str]:
-        identity = f"{device.name} {device.host}".lower()
-        if "localhost" in identity or "127.0.0.1" in identity or "this device" in identity:
-            return "Coordinator", "Integrate teammate handoffs, keep scope tight, and decide final merge order."
-        if "builder" in identity:
-            return "Backend Builder", "Implement backend orchestration, durable command paths, and data validation."
-        if "cockpit" in identity:
-            return "UI Polish", "Improve GTK layout, visual hierarchy, interaction fit, and screenshot readiness."
-        if "ubuntu" in identity:
-            return "Verifier", "Run checks, package validation, and report regressions with exact commands."
-        fallbacks = (
-            ("Architect", "Split the mission into high-leverage next actions and identify risky assumptions."),
-            ("Builder", "Implement scoped product improvements with minimal churn."),
-            ("Reviewer", "Review diffs for regressions, missing tests, unsafe behavior, and UX gaps."),
-            ("UI Polish", "Improve fit, spacing, contrast, states, and desktop-quality presentation."),
-            ("Verifier", "Run validation, capture failures, and produce a clean handoff."),
-        )
-        return fallbacks[index % len(fallbacks)]
+        role = team_role_for_device(device.name, device.host, index)
+        return role.title, role.assignment_focus()
 
     def mesh_base_prompt(self) -> str:
         prompt = self.selected_prompt()
@@ -3873,6 +3866,7 @@ class CodexControl(Gtk.Application):
             assignments.append({
                 "device_id": device.id,
                 "device_name": device.name,
+                "role_id": team_role_for_device(device.name, device.host, index).id,
                 "target": f"{device.target()}:{device.port}",
                 "lane_title": lane_title,
                 "lane_slug": lane_slug,
