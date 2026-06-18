@@ -37,6 +37,23 @@ DRY_RUN=false
 NODES=()
 TARGET_NODES=(atlas-main atlas-builder)
 
+normalize_node() {
+  local node="$1"
+  case "$node" in
+    main)
+      echo "atlas-main"
+      return
+      ;;
+    builder)
+      echo "atlas-builder"
+      return
+      ;;
+    *)
+      echo "$node"
+      ;;
+  esac
+}
+
 require_repo() {
   if [[ ! -d "$REPO/.git" ]]; then
     echo "Not a git repository: $REPO" >&2
@@ -98,7 +115,11 @@ sync_repo() {
 
 run_remote_sync() {
   local node="$1"
-  local target="$node"
+  local target
+  local normalized
+
+  normalized="$(normalize_node "$node")"
+  target="$normalized"
 
   if [[ "$target" != *"@"* ]]; then
     target="$REMOTE_USER@$target"
@@ -132,6 +153,10 @@ if [[ ! -d "$repo/.git" ]]; then
   exit 1
 fi
 
+workspace_clean() {
+  [[ -z "$(git -C "$repo" status --porcelain=1)" ]]
+}
+
 echo "Remote sync: $repo (${branch})"
 
 git -C "$repo" fetch --prune origin
@@ -149,6 +174,16 @@ if ! git -C "$repo" ls-remote --exit-code --heads origin "refs/heads/$branch" >/
 fi
 
 current="$(git -C "$repo" symbolic-ref -q --short HEAD 2>/dev/null || true)"
+
+if ! workspace_clean; then
+  if [[ "$current" == "$branch" ]]; then
+    echo "Remote branch '$branch' has local changes on $repo; skipping fast-forward pull to avoid overwrite." >&2
+    exit 0
+  fi
+
+  echo "Remote branch has local changes on $repo; skipping checkout of '$branch' to avoid overwrite." >&2
+  exit 0
+fi
 
 if [[ "$current" == "$branch" ]]; then
   git -C "$repo" pull --ff-only origin "$branch"
