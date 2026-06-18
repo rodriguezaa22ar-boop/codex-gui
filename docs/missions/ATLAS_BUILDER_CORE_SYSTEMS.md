@@ -12,6 +12,24 @@ config, raw prompts, terminal logs, or credentials.
 
 ## Pull Latest Source
 
+Headless NixOS quick start:
+
+```bash
+cd ~/Projects/codex-gui
+bash scripts/atlas-builder-start-core-systems.sh
+tmux attach -t codex-core-systems
+```
+
+If Ubuntu Commander needs to drive this node over SSH later, enable Tailscale
+SSH on the Builder node once:
+
+```bash
+sudo tailscale set --ssh=true --operator=$USER
+```
+
+The script above opens a persistent `tmux` session and launches Codex with this
+mission. The manual setup below is the expanded version.
+
 ```bash
 mkdir -p ~/Projects
 cd ~/Projects
