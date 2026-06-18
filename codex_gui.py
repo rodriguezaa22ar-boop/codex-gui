@@ -255,6 +255,17 @@ NAV_ITEMS = (
     ("health", "Health", "security-high-symbolic"),
 )
 
+PRIMARY_NAV_PAGES = {
+    "launch",
+    "mesh",
+    "quality",
+    "mission",
+    "runs",
+    "monitor",
+    "projects",
+    "git",
+}
+
 MODELS = [
     ("config", "Config default"),
     ("gpt-5.5", "GPT-5.5 - best default"),
@@ -1504,6 +1515,7 @@ class CodexControl(Gtk.Application):
         if self.mesh_filter_mode not in {"all", "ready", "review", "blocked", "offline"}:
             self.mesh_filter_mode = "all"
         self.mesh_team_only = bool(self.config.get("mesh_team_only", False))
+        self.focus_mode = bool(self.config.get("focus_mode", False))
         self.window: Gtk.ApplicationWindow | None = None
         self.status_label: Gtk.Label | None = None
         self.stack: Gtk.Stack | None = None
@@ -1590,6 +1602,9 @@ class CodexControl(Gtk.Application):
         self.operator_signal_labels: list[tuple[Gtk.Label, Gtk.Label, Gtk.Label]] = []
         self.operator_signal_cards: list[Gtk.Widget] = []
         self.nav_rows: dict[str, Gtk.ListBoxRow] = {}
+        self.nav_lists: list[Gtk.ListBox] = []
+        self.sidebar_widget: Gtk.Widget | None = None
+        self.focus_button: Gtk.Button | None = None
         self.health_summary: dict[str, Any] = {}
         self.headless_run_id = ""
         self.execution_run_ids: dict[str, str] = {}
@@ -1612,7 +1627,8 @@ class CodexControl(Gtk.Application):
         self.stack.set_hexpand(True)
         self.stack.set_vexpand(True)
         self.stack.set_transition_type(Gtk.StackTransitionType.CROSSFADE)
-        body.append(self.build_sidebar())
+        self.sidebar_widget = self.build_sidebar()
+        body.append(self.sidebar_widget)
         body.append(self.stack)
         root.append(body)
 
@@ -1644,6 +1660,7 @@ class CodexControl(Gtk.Application):
         self.show_page("launch")
         self.install_actions()
         self.refresh_all()
+        self.apply_focus_mode()
         GLib.idle_add(self.on_run_setup_check)
         self.save_current_state()
 
@@ -1673,29 +1690,53 @@ class CodexControl(Gtk.Application):
         self.nav_list.add_css_class("nav-list")
         self.nav_list.set_selection_mode(Gtk.SelectionMode.SINGLE)
         self.nav_rows = {}
+        self.nav_lists = [self.nav_list]
         for page_name, title, icon_name in NAV_ITEMS:
-            row = Gtk.ListBoxRow()
-            row.page_name = page_name
-            row.add_css_class("nav-row")
-            content = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
-            content.set_valign(Gtk.Align.CENTER)
-            image = Gtk.Image.new_from_icon_name(icon_name)
-            image.add_css_class("nav-icon")
-            image.set_pixel_size(16)
-            label = Gtk.Label(label=title, xalign=0)
-            label.set_hexpand(True)
-            content.append(image)
-            content.append(label)
-            row.set_child(content)
+            if page_name not in PRIMARY_NAV_PAGES:
+                continue
+            row = self.build_nav_row(page_name, title, icon_name)
             self.nav_list.append(row)
             self.nav_rows[page_name] = row
         self.nav_list.connect("row-selected", self.on_nav_selected)
         nav.append(self.nav_list)
 
+        more = Gtk.Expander(label="More")
+        more.add_css_class("nav-more")
+        self.nav_more_expander = more
+        secondary_list = Gtk.ListBox()
+        secondary_list.add_css_class("nav-list")
+        secondary_list.set_selection_mode(Gtk.SelectionMode.SINGLE)
+        self.nav_lists.append(secondary_list)
+        for page_name, title, icon_name in NAV_ITEMS:
+            if page_name in PRIMARY_NAV_PAGES:
+                continue
+            row = self.build_nav_row(page_name, title, icon_name)
+            secondary_list.append(row)
+            self.nav_rows[page_name] = row
+        secondary_list.connect("row-selected", self.on_nav_selected)
+        more.set_child(secondary_list)
+        nav.append(more)
+
         spacer = Gtk.Box()
         spacer.set_vexpand(True)
         nav.append(spacer)
         return nav
+
+    def build_nav_row(self, page_name: str, title: str, icon_name: str) -> Gtk.ListBoxRow:
+        row = Gtk.ListBoxRow()
+        row.page_name = page_name
+        row.add_css_class("nav-row")
+        content = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        content.set_valign(Gtk.Align.CENTER)
+        image = Gtk.Image.new_from_icon_name(icon_name)
+        image.add_css_class("nav-icon")
+        image.set_pixel_size(16)
+        label = Gtk.Label(label=title, xalign=0)
+        label.set_hexpand(True)
+        content.append(image)
+        content.append(label)
+        row.set_child(content)
+        return row
 
     def on_nav_selected(self, _listbox: Gtk.ListBox, row: Gtk.ListBoxRow | None) -> None:
         if row is not None:
@@ -1723,6 +1764,21 @@ class CodexControl(Gtk.Application):
             text_label.set_text(label)
         else:
             button.set_label(label)
+
+    def apply_focus_mode(self) -> None:
+        if self.sidebar_widget is not None:
+            self.sidebar_widget.set_visible(not self.focus_mode)
+        if self.focus_button is not None:
+            self.set_button_text(self.focus_button, "Exit Focus" if self.focus_mode else "Focus")
+            self.focus_button.remove_css_class("primary")
+            self.focus_button.remove_css_class("secondary")
+            self.focus_button.add_css_class("primary" if self.focus_mode else "secondary")
+
+    def on_toggle_focus_mode(self, _button: Gtk.Button) -> None:
+        self.focus_mode = not self.focus_mode
+        self.apply_focus_mode()
+        self.save_current_state()
+        self.set_status("Focus mode enabled" if self.focus_mode else "Focus mode disabled")
 
     def install_actions(self) -> None:
         actions = [
@@ -1760,6 +1816,7 @@ class CodexControl(Gtk.Application):
             ("show-quality", lambda *_args: self.show_page("quality")),
             ("show-runs", lambda *_args: self.show_page("runs")),
             ("show-monitor", lambda *_args: self.show_page("monitor")),
+            ("toggle-focus", lambda *_args: self.on_toggle_focus_mode(Gtk.Button())),
         ]
         for name, callback in actions:
             action = Gio.SimpleAction.new(name, None)
@@ -1774,6 +1831,7 @@ class CodexControl(Gtk.Application):
         self.set_accels_for_action("app.show-roadmap", ["<Control><Shift>M"])
         self.set_accels_for_action("app.show-orchestrate", ["<Control><Shift>O"])
         self.set_accels_for_action("app.show-mesh", ["<Control><Shift>D"])
+        self.set_accels_for_action("app.toggle-focus", ["<Control><Shift>F"])
         self.set_accels_for_action("app.focus-prompt", ["<Control>L"])
         self.set_accels_for_action("app.focus-project", ["<Control><Shift>L"])
 
@@ -1796,12 +1854,16 @@ class CodexControl(Gtk.Application):
 
         refresh = self.make_button("Refresh", "view-refresh-symbolic")
         refresh.connect("clicked", lambda _b: self.refresh_all())
+        self.focus_button = self.make_button("Focus", "view-fullscreen-symbolic")
+        self.focus_button.add_css_class("secondary")
+        self.focus_button.connect("clicked", self.on_toggle_focus_mode)
         launch = self.make_button("Run", "media-playback-start-symbolic")
         launch.add_css_class("primary")
         launch.connect("clicked", self.on_run_embedded)
         self.status_label = Gtk.Label(label="Starting...")
         self.status_label.add_css_class("status-pill")
         bar.append(refresh)
+        bar.append(self.focus_button)
         bar.append(launch)
         bar.append(self.status_label)
         return bar
@@ -7198,6 +7260,7 @@ class CodexControl(Gtk.Application):
             "atlas_root": self.atlas_root_entry.get_text().strip() if hasattr(self, "atlas_root_entry") else "",
             "receipt_auto": self.receipt_auto_switch.get_active() if hasattr(self, "receipt_auto_switch") else True,
             "prompt": self.selected_prompt(),
+            "focus_mode": self.focus_mode,
             "mesh_filter_mode": self.mesh_filter_mode,
             "mesh_team_only": self.mesh_team_only,
             "layout": layout_to_config(self.current_layout_state()),
@@ -7293,10 +7356,17 @@ class CodexControl(Gtk.Application):
     def show_page(self, name: str) -> None:
         if self.stack is not None:
             self.stack.set_visible_child_name(name)
-        nav_list = getattr(self, "nav_list", None)
         row = self.nav_rows.get(name) if hasattr(self, "nav_rows") else None
-        if nav_list is not None and row is not None and nav_list.get_selected_row() is not row:
-            nav_list.select_row(row)
+        nav_lists = getattr(self, "nav_lists", [])
+        if row is not None and name not in PRIMARY_NAV_PAGES and hasattr(self, "nav_more_expander"):
+            self.nav_more_expander.set_expanded(True)
+        for listbox in nav_lists:
+            selected = listbox.get_selected_row()
+            if row is not None and row.get_parent() is listbox:
+                if selected is not row:
+                    listbox.select_row(row)
+            elif selected is not None:
+                listbox.unselect_row(selected)
 
     def render_action_list(self, listbox: Gtk.ListBox, actions: tuple[ActionSpec, ...]) -> None:
         self.clear_listbox(listbox)
