@@ -638,11 +638,18 @@ def cmd_collect(args: argparse.Namespace) -> int:
         write_team_summary(team_dir)
     except OSError:
         pass
+    latest = inspect_team_run(team_dir)
 
     if args.json:
-        print(json.dumps({"team_dir": str(team_dir), "collected": collected, "errors": errors}, sort_keys=True))
+        print(json.dumps({
+            "team_dir": str(team_dir),
+            "collected": latest.collected_count,
+            "transfer_attempts": collected,
+            "lane_count": latest.lane_count,
+            "errors": errors,
+        }, sort_keys=True))
     else:
-        print(f"Collected {collected} lane output(s)")
+        print(f"Collected {latest.collected_count}/{latest.lane_count} lane output(s)")
 
     if errors:
         for item in errors:
