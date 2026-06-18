@@ -159,6 +159,58 @@ def _packaging_check(project: Path) -> SetupCheck:
     return SetupCheck("packaging", "Public Packaging", "warn", "`codex-gui` launcher metadata is incomplete.", "Add a `[project.scripts]` entry.")
 
 
+def _launcher_check(project: Path) -> SetupCheck:
+    script = Path.home() / ".local" / "bin" / "codex-gui"
+    if not script.exists():
+        return SetupCheck(
+            "launcher",
+            "Launcher",
+            "note",
+            f"{script} is not currently installed.",
+            "Run `python3 -m pip install --user .` from this project root.",
+        )
+    if not os.access(script, os.X_OK):
+        return SetupCheck(
+            "launcher",
+            "Launcher",
+            "warn",
+            f"{script} is not executable.",
+            f"Run `chmod +x {script}` and then reinstall with pip.",
+        )
+    if not project.exists() or not project.is_dir():
+        return SetupCheck(
+            "launcher",
+            "Launcher",
+            "note",
+            f"Project path {project} does not exist for launcher import check.",
+            "Select a valid codex-gui checkout and rerun setup diagnostics.",
+        )
+    command = (
+        sys.executable,
+        "-c",
+        "import codex_launcher; import codex_gui; print('ok')",
+    )
+    result = _run(command, cwd=project, timeout=20)
+    if result.returncode == 0:
+        return SetupCheck(
+            "launcher",
+            "Launcher",
+            "ok",
+            f"{script} imports and resolves the installed launch path.",
+        )
+    detail = (result.stderr or result.stdout or "").strip() or "unable to import launcher modules"
+    message = f"{script} failed startup checks: {detail}"
+    if "could not locate `codex_gui`" in detail.lower():
+        return SetupCheck("launcher", "Launcher", "warn", message, "Run `python3 -m pip install --user .` to refresh the entrypoint and `PYTHONPATH` behavior.")
+    return SetupCheck(
+        "launcher",
+        "Launcher",
+        "warn",
+        message,
+        "Run `python3 -m pip install --user .` from this project root.",
+    )
+
+
 def _desktop_check(desktop_file: Path | None) -> SetupCheck:
     if desktop_file is None:
         return SetupCheck("desktop", "Desktop Entry", "note", "No desktop entry path was provided.")
@@ -198,6 +250,7 @@ def build_setup_report(
         _terminal_check(),
         _project_check(project_path),
         _packaging_check(project_path),
+        _launcher_check(project_path),
         _desktop_check(desktop_file),
         _mesh_check(devices_file),
     )

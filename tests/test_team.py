@@ -5,13 +5,19 @@ import unittest
 from pathlib import Path
 
 from codex_team import (
+    TeamBusTargetStatus,
+    load_bus_report,
     inspect_team_run,
     latest_team_run_dir,
+    merge_team_chat_texts,
+    read_team_chat,
     team_role_for_device,
     team_roles_markdown,
     team_run_dirs,
+    write_team_chat_entry,
     write_bus_report,
     write_handoff_bus,
+    write_role_bootstrap,
     write_team_summary,
 )
 
@@ -97,6 +103,95 @@ class CodexTeamTests(unittest.TestCase):
             self.assertIn("Next-round protocol", text)
             self.assertIn("Backend handoff", text)
 
+    def test_team_chat_writes_and_reads(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            team_dir = Path(tmp) / "team-chat"
+            team_dir.mkdir(parents=True)
+            path = write_team_chat_entry(
+                team_dir,
+                sender="Atlas Builder",
+                lane="backend-builder-atlas-builder",
+                message="Lane bootstrap started.\nNo blockers so far.",
+            )
+            self.assertTrue(path.exists())
+            self.assertTrue(path.name.endswith("team-chat.md"))
+            raw = read_team_chat(team_dir, max_lines=25)
+            self.assertIn("Atlas Builder", raw)
+            self.assertIn("Lane bootstrap started.", raw)
+
+    def test_team_chat_truncates_to_max_lines(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            team_dir = Path(tmp) / "team-chat"
+            team_dir.mkdir(parents=True)
+            for index in range(5):
+                write_team_chat_entry(team_dir, sender=f"lane-{index}", lane=f"lane-{index}", message=f"update {index}")
+            raw = read_team_chat(team_dir, max_lines=3)
+            self.assertEqual(len(raw.strip().splitlines()), 3)
+
+    def test_merge_team_chat_texts_deduplicates_entries(self) -> None:
+        merged = merge_team_chat_texts(
+            "# Codex Team Chat\n[2026-01-01 12:00:00] atlas-builder (backend-builder): started\n",
+            "  # Codex Team Chat\n[2026-01-01 12:00:00] atlas-builder (backend-builder): started\n"
+            "[2026-01-01 12:05:00] atlas-builder (backend-builder): blocked",
+        )
+        lines = [line for line in merged.splitlines() if line.strip()]
+        self.assertEqual(len(lines), 3)
+        self.assertEqual(lines[0], "# Codex Team Chat")
+        self.assertEqual(lines[1], "[2026-01-01 12:00:00] atlas-builder (backend-builder): started")
+        self.assertEqual(lines[2], "[2026-01-01 12:05:00] atlas-builder (backend-builder): blocked")
+
+    def test_write_role_bootstrap_includes_lane_roles_and_startup(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            team_dir = Path(tmp) / "team-one"
+            self.write_manifest(team_dir, "team-one")
+            bootstrap_json = write_role_bootstrap(team_dir)
+            bootstrap_md = bootstrap_json.with_name("role-bootstrap.md")
+
+            markdown = bootstrap_md.read_text(encoding="utf-8")
+            payload = json.loads(bootstrap_json.read_text(encoding="utf-8"))
+
+            self.assertEqual(payload["lane_count"], 1)
+            self.assertEqual(payload["run_id"], "team-one")
+            self.assertEqual(payload["roles"][0]["role_id"], "")
+            self.assertIn("backend-builder-atlas-builder", markdown)
+            self.assertIn("startup: codex -p maximum-power", markdown)
+            self.assertIn("Codex Team Role Bootstrap", markdown)
+
+    def test_write_role_bootstrap_respects_assignment_role_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            team_dir = Path(tmp) / "team-custom"
+            payload = {
+                "run_id": "team-custom",
+                "created": "2026-06-16T17:00:00-07:00",
+                "project": "/work/codex-gui",
+                "assignments": [
+                    {
+                        "lane_slug": "custom-lane",
+                        "lane_title": "Custom Lane",
+                        "device_name": "builder",
+                        "role_id": "verifier",
+                        "role_title": "Custom Verifier",
+                        "role_profile": "pro-default",
+                        "role_focus": "Test release gate assumptions.",
+                        "role_boundary": "Strict output-only review.",
+                        "target": "ao@atlas-cockpit:22",
+                        "focus": "validate checks.",
+                        "project_root": "/home/ao/Projects/codex-gui",
+                    }
+                ],
+            }
+            team_dir.mkdir(parents=True, exist_ok=True)
+            (team_dir / "manifest.json").write_text(json.dumps(payload), encoding="utf-8")
+
+            bootstrap_json = write_role_bootstrap(team_dir)
+            payload_out = json.loads(bootstrap_json.read_text(encoding="utf-8"))
+            lane_role = payload_out["roles"][0]
+
+            self.assertEqual(lane_role["role_id"], "verifier")
+            self.assertEqual(lane_role["role_title"], "Custom Verifier")
+            self.assertEqual(lane_role["role_profile"], "pro-default")
+            self.assertIn("Strict output-only review.", lane_role["role_boundary"])
+
     def test_write_bus_report_persists_failures(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             team_dir = Path(tmp) / "team-one"
@@ -111,6 +206,114 @@ class CodexTeamTests(unittest.TestCase):
             self.assertEqual(report.name, "handoff-bus-report.json")
             self.assertEqual(payload["sent"], 2)
             self.assertEqual(payload["failures"], ["atlas-cockpit: timeout"])
+
+    def test_bus_report_synced_and_stale_counts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            team_dir = Path(tmp) / "team-one"
+            self.write_manifest(team_dir, "team-one")
+            out_dir = team_dir / "out"
+            out_dir.mkdir(parents=True, exist_ok=True)
+            bus_path = out_dir / "handoff-bus.md"
+            bus_path.write_text("bus", encoding="utf-8")
+            write_bus_report(
+                team_dir,
+                sent=2,
+                failures=[],
+                bus_path=bus_path,
+                target_statuses=(
+                    TeamBusTargetStatus(
+                        lane_slug="backend-builder-atlas-builder",
+                        device_name="atlas-builder",
+                        target="atlas-builder",
+                        status="synced",
+                        detail="ok",
+                        artifact_path=str(bus_path),
+                        artifact_sha256="",
+                        ts=1710000000,
+                    ),
+                    TeamBusTargetStatus(
+                        lane_slug="ui-polish-atlas-main",
+                        device_name="atlas-main",
+                        target="atlas-main",
+                        status="stale",
+                        detail="stale",
+                        artifact_path=str(bus_path),
+                        artifact_sha256="abc",
+                        ts=1710000001,
+                    ),
+                ),
+            )
+            status = load_bus_report(team_dir)
+            self.assertIsNotNone(status)
+            if status is None:
+                self.fail("Expected bus report")
+            self.assertEqual(status.synced_count, 1)
+            self.assertEqual(status.failed_count, 0)
+            self.assertEqual(status.stale_count, 1)
+
+    def test_write_and_load_bus_report_with_targets(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            team_dir = Path(tmp) / "team-one"
+            self.write_manifest(team_dir, "team-one")
+            out_dir = team_dir / "out"
+            out_dir.mkdir(parents=True, exist_ok=True)
+            bus_path = out_dir / "handoff-bus.md"
+            bus_path.write_text("bus", encoding="utf-8")
+            report_path = write_bus_report(
+                team_dir,
+                sent=2,
+                failures=["atlas-cockpit: timeout"],
+                bus_path=bus_path,
+                target_statuses=(
+                    TeamBusTargetStatus(
+                        lane_slug="backend-builder-atlas-builder",
+                        device_name="atlas-builder",
+                        target="atlas-builder",
+                        status="synced",
+                        detail="ok",
+                        artifact_path="/tmp/bus",
+                        artifact_sha256="sha",
+                        artifact_remote_sha256="remote-sha",
+                        ts=1710000000,
+                    ),
+                ),
+            )
+            self.assertEqual(report_path.name, "handoff-bus-report.json")
+            parsed = load_bus_report(team_dir)
+
+            self.assertIsNotNone(parsed)
+            if parsed is None:
+                self.fail("Expected parsed bus report")
+            self.assertEqual(parsed.run_id, "team-one")
+            self.assertEqual(parsed.targets[0].device_name, "atlas-builder")
+            self.assertEqual(parsed.targets[0].status, "synced")
+            self.assertEqual(parsed.targets[0].artifact_sha256, "sha")
+            self.assertEqual(parsed.targets[0].artifact_remote_sha256, "remote-sha")
+
+    def test_load_bus_report_legacy_payload(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            team_dir = Path(tmp) / "team-one"
+            self.write_manifest(team_dir, "team-one")
+            out_dir = team_dir / "out"
+            out_dir.mkdir(parents=True, exist_ok=True)
+            report_path = out_dir / "handoff-bus-report.json"
+            report_path.write_text(json.dumps({
+                "run_id": "team-one",
+                "team_dir": str(team_dir),
+                "bus_path": str(out_dir / "handoff-bus.md"),
+                "sent": 1,
+                "failures": ["atlas-cockpit: offline"],
+                "generated": "2026-06-16T20:00:00-07:00",
+            }), encoding="utf-8")
+
+            status = load_bus_report(team_dir)
+
+            self.assertIsNotNone(status)
+            if status is None:
+                self.fail("Expected bus report")
+            self.assertEqual(status.targets, ())
+            self.assertEqual(status.failed_count, 0)
+            self.assertEqual(status.sent, 1)
 
     def test_latest_team_run_dir_sorts_by_mtime(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

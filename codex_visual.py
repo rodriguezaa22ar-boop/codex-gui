@@ -365,6 +365,7 @@ button:hover {
 .mesh-summary,
 .mesh-detail,
 .team-panel,
+.team-stream-panel,
 .memory-panel,
 .project-intel,
 .session-workspace,
@@ -436,7 +437,8 @@ entry, textview, dropdown, expander {
 }
 
 .mesh-detail .code-view,
-.memory-panel .code-view {
+.memory-panel .code-view,
+.team-stream-panel .code-view {
   min-height: 180px;
 }
 """

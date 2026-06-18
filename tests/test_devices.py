@@ -13,14 +13,18 @@ from codex_devices import (
     load_memory,
     merge_discovered_devices,
     memory_markdown,
+    mesh_readiness_report,
     mesh_state,
     new_device,
     parse_probe_output,
     remote_path_expr,
     remote_agent_command,
     remote_team_dir,
+    remote_file_sha256sum_command,
     rsync_memory_command,
     rsync_project_command,
+    rsync_team_chat_command,
+    rsync_team_chat_pull_command,
     rsync_team_package_command,
     rsync_team_results_command,
     save_devices,
@@ -337,6 +341,74 @@ class DeviceMeshTests(unittest.TestCase):
         self.assertEqual(probe.status, "blocked")
         self.assertEqual(probe.summary, "SSH auth denied")
 
+    def test_mesh_readiness_report_categorizes_missing_project(self) -> None:
+        device = DeviceRecord(id="one", name="Builder", host="atlas-builder.tailnet", project_root="~/Projects/codex-gui")
+        output = "\n".join([
+            "CODEX_EXIT=0",
+            "CODEX_VERSION=codex-cli 0.140.0",
+            "PROJECT_ROOT=~/Projects/codex-gui",
+            "PROJECT_EXISTS=no",
+        ])
+
+        probe = parse_probe_output(device, output, 0, timestamp=123)
+        report = mesh_readiness_report((device,), {device.id: probe})
+        row = report.by_device(device.id)
+
+        self.assertIsNotNone(row)
+        assert row is not None
+        self.assertEqual(row.status, "review")
+        self.assertEqual(row.blocker_category, "missing-project")
+        self.assertEqual(report.review_count, 1)
+        self.assertIn("project missing", row.summary.lower())
+
+    def test_mesh_readiness_report_categorizes_tailscale_approval_blocker(self) -> None:
+        device = DeviceRecord(id="two", name="Builder", host="atlas-builder.tailnet")
+        output = "\n".join([
+            "# Tailscale SSH requires an additional check.",
+            "# To authenticate, visit: https://login.tailscale.com/a/example",
+        ])
+
+        probe = parse_probe_output(device, output, 124, timestamp=123)
+        report = mesh_readiness_report((device,), {device.id: probe})
+        row = report.by_device(device.id)
+
+        self.assertIsNotNone(row)
+        assert row is not None
+        self.assertEqual(row.status, "blocked")
+        self.assertEqual(row.blocker_category, "tailscale-approval-required")
+        self.assertTrue(any("Tailscale" in action for action in row.next_actions))
+
+    def test_mesh_readiness_report_detects_stale_checkout(self) -> None:
+        device = DeviceRecord(id="three", name="Builder", host="atlas-builder.tailnet", project_root="~/Projects/codex-gui")
+        output = "\n".join([
+            "CODEX_EXIT=0",
+            "CODEX_VERSION=codex-cli 0.140.0",
+            "PROJECT_ROOT=~/Projects/codex-gui",
+            "PROJECT_EXISTS=yes",
+            "PROJECT_PWD=~/Projects/codex-gui",
+            "GIT_STATE=## HEAD detached at abc123 | branch=abc123 | changes=0",
+        ])
+
+        probe = parse_probe_output(device, output, 0, timestamp=123)
+        report = mesh_readiness_report((device,), {device.id: probe})
+        row = report.by_device(device.id)
+
+        self.assertIsNotNone(row)
+        assert row is not None
+        self.assertEqual(row.blocker_category, "stale-checkout")
+        self.assertEqual(row.status, "review")
+
+    def test_mesh_readiness_report_uses_saved_ready_status_without_probe(self) -> None:
+        device = DeviceRecord(id="four", name="Saved Ready", host="atlas-main.tailnet", status="ready")
+
+        report = mesh_readiness_report((device,), {})
+        row = report.by_device(device.id)
+
+        self.assertIsNotNone(row)
+        assert row is not None
+        self.assertEqual(row.status, "ready")
+        self.assertIn(row.blocker_category, {"ready-saved", "local-ready"})
+
     def test_remote_team_commands_use_prompt_files_not_raw_prompt(self) -> None:
         device = DeviceRecord(
             id="builder",
@@ -358,20 +430,48 @@ class DeviceMeshTests(unittest.TestCase):
             run_id="Run 1",
             device=device,
             teammates=("Builder on builder",),
+            role_id="ui-polish",
+            role_title="Product / GTK UX Engineer",
+            role_profile="maximum-power",
+            role_focus="Refine visual hierarchy.",
+            role_boundary="Do not alter backend behavior without signoff.",
         )
-
         self.assertEqual(remote_team_dir("Run 1"), "~/.config/codex-gui/team/run-1")
         self.assertEqual(package[0], "rsync")
         self.assertEqual(collect[0], "rsync")
+        chat_sync = rsync_team_chat_command(Path("/tmp/team-run"), device, "Run 1")
+        self.assertEqual(chat_sync[0], "rsync")
+        self.assertIn("team-chat.md", " ".join(chat_sync))
+        self.assertIn("ssh -o ConnectTimeout=8 -o ServerAliveInterval=5 -o ServerAliveCountMax=2 -p 2222", chat_sync)
+        chat_pull = rsync_team_chat_pull_command(Path("/tmp/team-run"), device, "Run 1")
+        self.assertEqual(chat_pull[0], "rsync")
+        self.assertIn("team-chat.md", " ".join(chat_pull))
+        self.assertIn("ssh -o ConnectTimeout=8 -o ServerAliveInterval=5 -o ServerAliveCountMax=2 -p 2222", chat_pull)
         self.assertIn("ssh -o ConnectTimeout=8 -o ServerAliveInterval=5 -o ServerAliveCountMax=2 -p 2222", package)
         self.assertIn("builder.tailnet", launch[3])
         self.assertIn("cat \"$HOME\"/.config/codex-gui/team/run-1/lanes/ui-polish.md", launch[-1])
+        self.assertIn("-p \"$role_profile\"", launch[-1])
         self.assertIn("--output-last-message", launch[-1])
         self.assertIn("ui-polish.status.txt", launch[-1])
         self.assertNotIn("> \"$HOME\"/.config/codex-gui/team/run-1/out/ui-polish.handoff.md", launch[-1])
         self.assertNotIn("secret prompt body", " ".join(launch))
         self.assertIn("Team protocol", prompt)
         self.assertIn("secret prompt body should stay in files", prompt)
+        self.assertIn("Assigned role: Product / GTK UX Engineer", prompt)
+        self.assertIn("Role preset: maximum-power", prompt)
+        self.assertIn("Role focus: Refine visual hierarchy.", prompt)
+        self.assertIn("Role boundary: Do not alter backend behavior without signoff.", prompt)
+        self.assertIn("team-chat.md", prompt)
+
+    def test_remote_sha256sum_command_targets_expected_remote_path(self) -> None:
+        device = DeviceRecord(id="builder", name="Builder", host="builder.tailnet", user="ao", port=2222)
+        command = remote_file_sha256sum_command(device, "~/.config/codex-gui/team/run-1/out/handoff-bus.md")
+        command_text = " ".join(command)
+
+        self.assertEqual(command[:3], ("ssh", "-p", "2222"))
+        self.assertIn("sha256sum", command_text)
+        self.assertIn("handoff-bus.md", command_text)
+        self.assertIn("missing", command_text)
 
     def test_local_team_commands_skip_ssh_but_use_same_prompt_files(self) -> None:
         device = DeviceRecord(

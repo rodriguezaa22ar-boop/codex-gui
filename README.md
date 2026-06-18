@@ -13,6 +13,16 @@ thread, config, profile, Git, and health workflows around it.
 codex-gui
 ```
 
+Startup now runs a launcher preflight by default. If checks return warning/blocker,
+`codex-gui` will stop and print remediation steps.
+
+```bash
+codex-gui --self-check            # text report
+codex-gui --self-check --json      # machine-readable report
+codex-gui --self-check --project /path/to/project  # target project
+codex-gui --force-start            # force launch despite warning-level checks
+```
+
 Or directly:
 
 ```bash

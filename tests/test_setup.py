@@ -1,5 +1,6 @@
 import tempfile
 import unittest
+import sys
 from pathlib import Path
 from unittest.mock import patch
 
@@ -71,6 +72,81 @@ class SetupReportTests(unittest.TestCase):
         codex_check = next(check for check in report.checks if check.id == "codex")
         self.assertEqual(codex_check.status, "ok")
         self.assertIn("codex-cli test", codex_check.detail)
+
+    def test_launcher_check_reports_ok_when_entrypoint_imports_modules(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "README.md").write_text("# Demo\n", encoding="utf-8")
+            (root / "LICENSE").write_text("MIT\n", encoding="utf-8")
+            (root / "pyproject.toml").write_text(
+                "[project.scripts]\ncodex-gui = 'codex_launcher:main'\n",
+                encoding="utf-8",
+            )
+            home = Path(tmp) / "home"
+            script = home / ".local" / "bin" / "codex-gui"
+            script.parent.mkdir(parents=True, exist_ok=True)
+            script.write_text("#!/usr/bin/env python3\nfrom codex_launcher import main\n", encoding="utf-8")
+            script.chmod(0o755)
+
+            def fake_run(args, cwd=None, timeout=10):
+                command = tuple(args)
+                if command[:2] == (sys.executable, "-c"):
+                    if "import codex_launcher" in command[2]:
+                        return type("Result", (), {"returncode": 0, "stdout": "ok\n", "stderr": ""})()
+                if command[:4] == ("git", "-C", str(root), "rev-parse"):
+                    return type("Result", (), {"returncode": 0, "stdout": "true\n", "stderr": ""})()
+                if command[:4] == ("git", "-C", str(root), "remote"):
+                    return type("Result", (), {"returncode": 0, "stdout": "git@github.com:owner/repo.git\n", "stderr": ""})()
+                if command == (str(sys.executable), "-c", "import codex_launcher; import codex_gui; print('ok')"):
+                    return type("Result", (), {"returncode": 0, "stdout": "ok\n", "stderr": ""})()
+                return type("Result", (), {"returncode": 0, "stdout": "ok\n", "stderr": ""})()
+
+            with (
+                patch("codex_setup._run", fake_run),
+                patch("codex_setup.Path.home", return_value=home),
+                patch("codex_setup._is_executable", return_value=True),
+            ):
+                report = build_setup_report(project=str(root), codex_bin="codex")
+
+            launcher_check = next(check for check in report.checks if check.id == "launcher")
+            self.assertEqual(launcher_check.status, "ok")
+            self.assertIn("imports and resolves", launcher_check.detail)
+
+    def test_launcher_check_warns_when_modules_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "README.md").write_text("# Demo\n", encoding="utf-8")
+            (root / "LICENSE").write_text("MIT\n", encoding="utf-8")
+            (root / "pyproject.toml").write_text(
+                "[project.scripts]\ncodex-gui = 'codex_launcher:main'\n",
+                encoding="utf-8",
+            )
+            home = Path(tmp) / "home"
+            script = home / ".local" / "bin" / "codex-gui"
+            script.parent.mkdir(parents=True, exist_ok=True)
+            script.write_text("#!/usr/bin/env python3\n", encoding="utf-8")
+            script.chmod(0o755)
+
+            def fake_run(args, cwd=None, timeout=10):
+                command = tuple(args)
+                if command[:4] == ("git", "-C", str(root), "rev-parse"):
+                    return type("Result", (), {"returncode": 0, "stdout": "true\n", "stderr": ""})()
+                if command[:4] == ("git", "-C", str(root), "remote"):
+                    return type("Result", (), {"returncode": 0, "stdout": "git@github.com:owner/repo.git\n", "stderr": ""})()
+                if command == (str(sys.executable), "-c", "import codex_launcher; import codex_gui; print('ok')"):
+                    return type("Result", (), {"returncode": 2, "stdout": "", "stderr": "ModuleNotFoundError: No module named codex_launcher\n"})()
+                return type("Result", (), {"returncode": 0, "stdout": "ok\n", "stderr": ""})()
+
+            with (
+                patch("codex_setup._run", fake_run),
+                patch("codex_setup.Path.home", return_value=home),
+                patch("codex_setup._is_executable", return_value=True),
+            ):
+                report = build_setup_report(project=str(root), codex_bin="codex")
+
+            launcher_check = next(check for check in report.checks if check.id == "launcher")
+            self.assertEqual(launcher_check.status, "warn")
+            self.assertIn("python3 -m pip install", launcher_check.fix)
 
 
 if __name__ == "__main__":

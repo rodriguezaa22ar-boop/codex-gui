@@ -47,6 +47,54 @@ class ActionCatalogTests(unittest.TestCase):
         results = rank_actions("retry bus", limit=5)
         self.assertTrue(any(item.id == "mesh.retry_bus" for item in results))
 
+    def test_search_finds_team_chat_refresh(self) -> None:
+        action = action_by_id("mesh.refresh_chat")
+        self.assertIsNotNone(action)
+        results = rank_actions("team stream", limit=5)
+        self.assertTrue(any(item.id == "mesh.refresh_chat" for item in results))
+
+    def test_search_finds_team_chat_sync(self) -> None:
+        action = action_by_id("mesh.sync_chat")
+        self.assertIsNotNone(action)
+        results = rank_actions("broadcast team stream", limit=5)
+        self.assertTrue(any(item.id == "mesh.sync_chat" for item in results))
+
+    def test_search_finds_team_chat_copy(self) -> None:
+        action = action_by_id("mesh.copy_chat")
+        self.assertIsNotNone(action)
+        results = rank_actions("team stream copy", limit=5)
+        self.assertTrue(any(item.id == "mesh.copy_chat" for item in results))
+
+    def test_search_finds_mesh_repair(self) -> None:
+        action = action_by_id("mesh.repair_bus")
+        self.assertIsNotNone(action)
+        results = rank_actions("repair bus", limit=5)
+        self.assertTrue(any(item.id == "mesh.repair_bus" for item in results))
+
+    def test_search_finds_mesh_repair_preview(self) -> None:
+        action = action_by_id("mesh.preview_repair_bus")
+        self.assertIsNotNone(action)
+        results = rank_actions("preview repair bus", limit=5)
+        self.assertTrue(any(item.id == "mesh.preview_repair_bus" for item in results))
+
+    def test_search_finds_role_bootstrap(self) -> None:
+        action = action_by_id("mesh.copy_role_bootstrap")
+        self.assertIsNotNone(action)
+        results = rank_actions("role bootstrap", limit=5)
+        self.assertTrue(any(item.id == "mesh.copy_role_bootstrap" for item in results))
+
+    def test_search_finds_launcher_diagnostics(self) -> None:
+        action = action_by_id("launcher.diagnostics")
+        self.assertIsNotNone(action)
+        results = rank_actions("launcher diagnostics", limit=5)
+        self.assertTrue(any(item.id == "launcher.diagnostics" for item in results))
+
+    def test_search_finds_launcher_repair(self) -> None:
+        action = action_by_id("launcher.repair")
+        self.assertIsNotNone(action)
+        results = rank_actions("repair launcher", limit=5)
+        self.assertTrue(any(item.id == "launcher.repair" for item in results))
+
     def test_blank_search_returns_priority_order(self) -> None:
         results = rank_actions("", limit=2)
         self.assertEqual(results[0].id, "run.max")

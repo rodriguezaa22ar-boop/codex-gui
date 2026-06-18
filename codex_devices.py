@@ -9,7 +9,7 @@ import shlex
 import time
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 
 @dataclass(frozen=True)
@@ -84,8 +84,313 @@ class DeviceProbe:
         return "\n".join(lines)
 
 
+@dataclass(frozen=True)
+class MeshReadinessRow:
+    device_id: str
+    device_name: str
+    host: str
+    status: str
+    blocker_category: str
+    summary: str
+    next_actions: tuple[str, ...]
+    checked: int = 0
+    source: str = "saved"
+
+    @property
+    def is_ready(self) -> bool:
+        return self.status == "ready"
+
+
+@dataclass(frozen=True)
+class MeshReadinessReport:
+    generated: int
+    rows: tuple[MeshReadinessRow, ...]
+
+    @property
+    def ready_count(self) -> int:
+        return sum(1 for row in self.rows if row.is_ready)
+
+    @property
+    def review_count(self) -> int:
+        return sum(1 for row in self.rows if row.status in {"review", "unknown"})
+
+    @property
+    def offline_count(self) -> int:
+        return sum(1 for row in self.rows if row.status == "offline")
+
+    @property
+    def blocked_count(self) -> int:
+        return sum(1 for row in self.rows if row.status == "blocked")
+
+    @property
+    def total(self) -> int:
+        return len(self.rows)
+
+    @property
+    def summary(self) -> str:
+        return (
+            f"{self.total} device(s) | "
+            f"{self.ready_count} ready | "
+            f"{self.blocked_count} blocked | "
+            f"{self.review_count} review | "
+            f"{self.offline_count} offline"
+        )
+
+    def by_device(self, device_id: str) -> MeshReadinessRow | None:
+        return next((row for row in self.rows if row.device_id == device_id), None)
+
+    def detail_text(self) -> str:
+        lines = [
+            "# Mesh readiness",
+            self.summary,
+            "",
+        ]
+        for row in self.rows:
+            lines.extend([
+                f"## {row.device_name} ({row.host})",
+                f"Status: {row.status}",
+                f"Category: {row.blocker_category}",
+                f"Summary: {row.summary}",
+            ])
+            if row.checked:
+                lines.append(f"Checked: {row.checked}")
+            if row.next_actions:
+                lines.append("Next steps:")
+                lines.extend([f"- {item}" for item in row.next_actions])
+            lines.append("")
+        return "\n".join(lines).strip() + "\n"
+
+
 def now() -> int:
     return int(time.time())
+
+
+def _is_local_host(host: str) -> bool:
+    return host.strip().lower() in {"localhost", "127.0.0.1", "::1"}
+
+
+def _git_state_change_count(git_state: str) -> int:
+    for token in git_state.replace("|", " ").replace(";", " ").split():
+        if token.startswith("changes="):
+            try:
+                return int(token.split("=", 1)[1])
+            except ValueError:
+                return 0
+    return 0
+
+
+def _is_stale_checkout(git_state: str) -> bool:
+    lower = git_state.lower().strip()
+    if not lower:
+        return False
+    if "detached" in lower or "not currently on a branch" in lower:
+        return True
+    if "[behind" in lower or "behind " in lower or "diverged" in lower:
+        return True
+    return False
+
+
+def _has_uncommitted_changes(git_state: str) -> bool:
+    return _git_state_change_count(git_state) > 0
+
+
+def _missing_codex_hint(probe: DeviceProbe, device: DeviceRecord) -> bool:
+    haystack = f"{probe.raw} {probe.summary} {probe.codex_version} {probe.returncode}".lower()
+    codex_name = Path(device.codex_bin).name.lower() if device.codex_bin else "codex"
+    if "no such file" in haystack and ("codex" in haystack or codex_name in haystack):
+        return True
+    if "command not found" in haystack:
+        return True
+    return False
+
+
+def _probe_actions(category: str, device: DeviceRecord) -> tuple[str, ...]:
+    if category == "ready-saved":
+        return ("Run Check Fleet to refresh this saved status before assigning team work.",)
+    if category == "local-ready":
+        return ("Device is local and probe-ready. Rerun Check Fleet when the project changes.",)
+    if category == "missing-project":
+        return (
+            "Sync the project to the device or update the profile device root.",
+            f"Project root target: {device.project_root}",
+            "Run Check Fleet after syncing before assigning work.",
+        )
+    if category == "missing-codex":
+        return (
+            "Install Codex CLI on this device and verify `codex --version` works.",
+            f"Expected binary path: {device.codex_bin}",
+            "Rerun Check Fleet once installed.",
+        )
+    if category == "tailscale-approval-required":
+        return (
+            "Open your Tailscale approval link in this device's browser.",
+            "Wait for auth to complete, then rerun Check Fleet.",
+        )
+    if category == "ssh-auth-denied":
+        return (
+            "Fix SSH key auth for this machine on the launcher and target device.",
+            "Rerun Check Fleet after trust/auth is updated.",
+        )
+    if category == "offline-or-timeout":
+        return (
+            "Verify this device is online in Tailscale.",
+            "Confirm SSH service/daemon is running and the host is reachable.",
+            "Rerun Check Fleet.",
+        )
+    if category == "stale-checkout":
+        return (
+            "Open the device and fix checkout state (commit/stash/rebase) first.",
+            "A clean, current checkout is recommended before team launch.",
+            "Run Check Fleet after checkout is refreshed.",
+        )
+    if category == "needs-probe":
+        return ("Run Check Fleet to collect fresh readiness before assigning this device to team lanes.",)
+    if category == "needs-review":
+        return ("Collect a fresh probe and resolve the review reason before team assignment.",)
+    if category == "ready":
+        return ()
+    return ("Inspect probe summary and rerun Check Fleet after remediation.",)
+
+
+def _row_from_device_probe(device: DeviceRecord, probe: DeviceProbe | None) -> MeshReadinessRow:
+    if probe is None:
+        if device.status in {"ready", "ok", "prepared", "launched", "done", "passed"}:
+            category = "local-ready" if _is_local_host(device.host) else "ready-saved"
+            return MeshReadinessRow(
+                device_id=device.id,
+                device_name=device.name,
+                host=device.host,
+                status="ready",
+                blocker_category=category,
+                summary="Saved device state is ready.",
+                next_actions=_probe_actions(category, device),
+                checked=0,
+                source="saved",
+            )
+        if device.status == "offline":
+            return MeshReadinessRow(
+                device_id=device.id,
+                device_name=device.name,
+                host=device.host,
+                status="offline",
+                blocker_category="offline",
+                summary="Device is currently offline in saved mesh state.",
+                next_actions=_probe_actions("offline-or-timeout", device),
+                source="saved",
+            )
+        return MeshReadinessRow(
+            device_id=device.id,
+            device_name=device.name,
+            host=device.host,
+            status="review",
+            blocker_category="needs-probe",
+            summary=f"No probe data yet. Last note: {device.note or 'no note'}",
+            next_actions=_probe_actions("needs-probe", device),
+            source="saved",
+        )
+
+    status = probe.status
+    category = "ready" if probe.status == "ready" else "needs-review"
+    summary = probe.summary
+
+    if status == "ready":
+        if _is_stale_checkout(probe.git_state):
+            status = "review"
+            category = "stale-checkout"
+            summary = "Codex ready but checkout requires refresh"
+        elif _has_uncommitted_changes(probe.git_state):
+            status = "review"
+            category = "needs-review"
+            summary = "Working tree has uncommitted changes"
+        return MeshReadinessRow(
+            device_id=device.id,
+            device_name=device.name,
+            host=device.host,
+            status=status,
+            blocker_category=category,
+            summary=summary,
+            next_actions=_probe_actions(category if status != "ready" else "local-ready" if _is_local_host(device.host) else "ready", device),
+            checked=probe.checked,
+            source="probe",
+        )
+
+    if status == "review":
+        if not probe.project_exists:
+            category = "missing-project"
+            summary = f"Project missing at {probe.project_root or device.project_root}"
+        elif _is_stale_checkout(probe.git_state):
+            category = "stale-checkout"
+            summary = "Checkout is stale and should be refreshed"
+        elif _has_uncommitted_changes(probe.git_state):
+            summary = "Working tree has uncommitted changes"
+            category = "needs-review"
+        else:
+            category = "needs-review"
+        return MeshReadinessRow(
+            device_id=device.id,
+            device_name=device.name,
+            host=device.host,
+            status="review",
+            blocker_category=category,
+            summary=summary,
+            next_actions=_probe_actions(category, device),
+            checked=probe.checked,
+            source="probe",
+        )
+
+    if status in {"offline", "blocked"}:
+        lower = probe.summary.lower()
+        if "approval" in lower and "tailscale" in lower:
+            category = "tailscale-approval-required"
+        elif "permission denied" in lower or "auth denied" in lower:
+            category = "ssh-auth-denied"
+        elif "timed out" in lower or "timeout" in lower or "connection timed out" in lower:
+            category = "offline-or-timeout"
+        elif status == "offline" and "offline" not in lower:
+            category = "offline-or-timeout"
+        elif _missing_codex_hint(probe, device):
+            category = "missing-codex"
+        else:
+            category = "blocked"
+        if status == "offline":
+            row_status = "offline"
+        else:
+            row_status = "blocked"
+        return MeshReadinessRow(
+            device_id=device.id,
+            device_name=device.name,
+            host=device.host,
+            status=row_status,
+            blocker_category=category,
+            summary=summary,
+            next_actions=_probe_actions(category, device),
+            checked=probe.checked,
+            source="probe",
+        )
+
+    return MeshReadinessRow(
+        device_id=device.id,
+        device_name=device.name,
+        host=device.host,
+        status="unknown",
+        blocker_category="needs-review",
+        summary=probe.summary or "No usable readiness data",
+        next_actions=_probe_actions("needs-review", device),
+        checked=probe.checked,
+        source="probe",
+    )
+
+
+def mesh_readiness_report(
+    devices: tuple[DeviceRecord, ...],
+    probes: Mapping[str, DeviceProbe] | None = None,
+) -> MeshReadinessReport:
+    probe_map: Mapping[str, DeviceProbe] = probes or {}
+    rows = [
+        _row_from_device_probe(device, probe_map.get(device.id))
+        for device in devices
+    ]
+    return MeshReadinessReport(generated=now(), rows=tuple(rows))
 
 
 def slugify(value: str) -> str:
@@ -612,6 +917,9 @@ def rsync_project_command(project_path: Path, device: DeviceRecord) -> tuple[str
     )
 
 
+TEAM_CHAT_FILE = "team-chat.md"
+
+
 def remote_team_dir(run_id: str) -> str:
     return f"~/.config/codex-gui/team/{slugify(run_id)}"
 
@@ -635,19 +943,70 @@ def rsync_team_results_command(team_dir: Path, device: DeviceRecord, run_id: str
     )
 
 
+def rsync_team_chat_command(team_dir: Path, device: DeviceRecord, run_id: str) -> tuple[str, ...]:
+    target_dir = remote_team_dir(run_id) + "/out/"
+    return (
+        *rsync_base_args(device),
+        str(team_dir / "out" / TEAM_CHAT_FILE),
+        f"{device.target()}:{target_dir}",
+    )
+
+
+def rsync_team_chat_pull_command(team_dir: Path, device: DeviceRecord, run_id: str) -> tuple[str, ...]:
+    target_path = f"{remote_team_dir(run_id)}/out/{TEAM_CHAT_FILE}"
+    local_dir = team_dir / "collected" / slugify(device.name)
+    return (
+        *rsync_base_args(device),
+        f"{device.target()}:{remote_path_expr(target_path)}",
+        str(local_dir) + "/",
+    )
+
+
+def remote_file_sha256sum_command(device: DeviceRecord, remote_path: str) -> tuple[str, ...]:
+    path_expr = remote_path_expr(remote_path)
+    remote = (
+        f"if [ -f {path_expr} ]; then "
+        f"sha256sum {path_expr} | awk '{{print $1}}'; "
+        f"else printf 'missing\\n'; fi"
+    )
+    return (*device.ssh_prefix(), remote)
+
+
 def agent_shell_script(device: DeviceRecord, run_id: str, lane_slug: str) -> str:
     remote_dir = remote_team_dir(run_id)
     prompt_path = f"{remote_dir}/lanes/{slugify(lane_slug)}.md"
     final_path = f"{remote_dir}/out/{slugify(lane_slug)}.final.txt"
     status_path = f"{remote_dir}/out/{slugify(lane_slug)}.status.txt"
+    chat_path = remote_path_expr(f"{remote_dir}/out/{TEAM_CHAT_FILE}")
+    lane_slug_safe = shlex.quote(slugify(lane_slug))
+    lane_device_safe = shlex.quote(device.name)
     return (
+        f"append_team_chat() {{ "
+        "message=$1; "
+        "if [ -n \"$message\" ]; then "
+        f"printf '[%s] %s (%s): %s\\n' \"$(date '+%Y-%m-%d %H:%M:%S')\" {lane_slug_safe} {lane_device_safe} \"$message\" >> {chat_path}; "
+        "fi; "
+        "} && "
         f"mkdir -p {remote_path_expr(remote_dir + '/out')} && "
         f"cd {remote_path_expr(device.project_root)} && "
+        "append_team_chat \"started\" && "
         f"prompt=$(cat {remote_path_expr(prompt_path)}) && "
         f"printf 'Remote Codex lane: %s\\n' {shlex.quote(slugify(lane_slug))} && "
-        f"{remote_path_expr(device.codex_bin)} -C {remote_path_expr(device.project_root)} "
+        "role_profile=$(printf '%s\\n' \"$prompt\" | sed -n 's/^Role preset: //p' | head -n 1) && "
+        "role_focus=$(printf '%s\\n' \"$prompt\" | sed -n 's/^Role focus: //p' | head -n 1) && "
+        "role_boundary=$(printf '%s\\n' \"$prompt\" | sed -n 's/^Role boundary: //p' | head -n 1) && "
+        "if [ -n \"$role_profile\" ]; then printf 'Role preset: %s\\n' \"$role_profile\"; fi && "
+        "if [ -n \"$role_focus\" ]; then printf 'Role focus: %s\\n' \"$role_focus\"; fi && "
+        "if [ -n \"$role_boundary\" ]; then printf 'Role boundary: %s\\n' \"$role_boundary\"; fi && "
+        f"if [ -n \"$role_profile\" ]; then "
+        f"  {remote_path_expr(device.codex_bin)} -p \"$role_profile\" -C {remote_path_expr(device.project_root)} "
         f"exec --skip-git-repo-check --output-last-message {remote_path_expr(final_path)} \"$prompt\"; "
+        "else "
+        f"  {remote_path_expr(device.codex_bin)} -C {remote_path_expr(device.project_root)} "
+        f"exec --skip-git-repo-check --output-last-message {remote_path_expr(final_path)} \"$prompt\"; "
+        "fi; "
         "status=$?; "
+        "append_team_chat \"complete status=$status finished=$(date -Is)\"; "
         f"printf 'lane=%s\\nstatus=%s\\nfinished=%s\\n' {shlex.quote(slugify(lane_slug))} \"$status\" \"$(date -Is)\" > {remote_path_expr(status_path)}; "
         "exit \"$status\""
     )
@@ -670,6 +1029,11 @@ def team_prompt(
     run_id: str,
     device: DeviceRecord,
     teammates: tuple[str, ...],
+    role_id: str = "",
+    role_title: str = "",
+    role_profile: str = "",
+    role_focus: str = "",
+    role_boundary: str = "",
 ) -> str:
     teammate_text = "\n".join(f"- {item}" for item in teammates) if teammates else "- none"
     remote_dir = remote_team_dir(run_id)
@@ -677,6 +1041,10 @@ def team_prompt(
         "Use $best-upfront-codex.",
         "",
         f"You are the {lane_title} lane in a distributed Codex Control team.",
+        *(() if not role_id and not role_title else (f"Assigned role: {role_title or role_id}",)),
+        *(() if not role_profile else (f"Role preset: {role_profile}",)),
+        *(() if not role_focus else (f"Role focus: {role_focus}",)),
+        *(() if not role_boundary else (f"Role boundary: {role_boundary}",)),
         f"Main focus: {focus}",
         f"Assigned device: {device.name} ({device.target()}:{device.port})",
         f"Project root: {device.project_root}",
@@ -684,7 +1052,9 @@ def team_prompt(
         "Team protocol:",
         f"- Read `{remote_dir}/team-ledger.md` before acting.",
         f"- Read any existing files under `{remote_dir}/out/` as teammate handoffs.",
+        f"- Use `{remote_dir}/out/team-chat.md` as the live role-to-role communication stream.",
         f"- Keep work scoped to `{device.project_root}` unless the ledger explicitly says otherwise.",
+        f"- Keep the stream current: append concise progress updates to `{remote_dir}/out/team-chat.md` as blockers are resolved and milestones are met.",
         f"- Write your final handoff to `{remote_dir}/out/{slugify(lane_slug)}.handoff.md`.",
         "- Include changed files, commands run, risks, and exact next handoff needs.",
         "- Do not store secrets, tokens, passwords, or sudo codes.",
