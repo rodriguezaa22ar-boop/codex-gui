@@ -106,6 +106,26 @@ bash scripts/atlas-builder-fast.sh shell
 bash scripts/atlas-builder-fast.sh command "systemctl --user status"
 ```
 
+## Builder Ops Commander
+
+Use one entry point for day-to-day builder operations:
+
+```bash
+bash scripts/atlas-builder-ops.sh
+bash scripts/atlas-builder-ops.sh status
+bash scripts/atlas-builder-ops.sh shell
+bash scripts/atlas-builder-ops.sh command "systemctl --user status"
+bash scripts/atlas-builder-ops.sh root
+bash scripts/atlas-builder-ops.sh monitor
+```
+
+One-phrase compatibility:
+
+```bash
+fab status      # or: builder status
+fab shell       # or: builder shell
+```
+
 Set host/user defaults once per workstation:
 
 ```bash
