@@ -633,6 +633,46 @@ def remote_path_expr(path: str) -> str:
     return shlex.quote(clean)
 
 
+def _codex_probe_candidates(device: DeviceRecord) -> tuple[str, ...]:
+    explicit = (device.codex_bin or "").strip()
+    candidates: list[str] = []
+    if explicit and "/" in explicit:
+        candidates.append(remote_path_expr(explicit))
+    candidates.extend([
+        '"$HOME"/.npm-global/bin/codex',
+        '"$HOME"/.local/bin/codex',
+        '"/usr/local/bin/codex"',
+        '"/usr/bin/codex"',
+    ])
+    return tuple(candidates)
+
+
+def _codex_resolver_script(device: DeviceRecord) -> str:
+    candidates = " ".join(list(_codex_probe_candidates(device)) + ['"$(command -v codex 2>/dev/null)"'])
+    return "\n".join([
+        "resolve_codex() {",
+        f"  for candidate in {candidates}; do",
+        "    if [ -n \"$candidate\" ] && [ -x \"$candidate\" ]; then",
+        "      printf '%s' \"$candidate\"",
+        "      return 0",
+        "    fi",
+        "  done",
+        "  return 1",
+        "}",
+    ])
+
+
+def _codex_launcher_expression(device: DeviceRecord) -> str:
+    return "\n".join([
+        _codex_resolver_script(device),
+        "CODEX_BIN=\"$(resolve_codex)\"",
+        "if [ -z \"$CODEX_BIN\" ]; then",
+        "  printf 'codex executable not found\\n'",
+        "  exit 127",
+        "fi",
+    ])
+
+
 def load_devices(path: Path) -> tuple[DeviceRecord, ...]:
     if not path.exists():
         return ()
@@ -725,13 +765,14 @@ def memory_markdown(memories: tuple[MemoryItem, ...]) -> str:
 
 
 def ssh_test_command(device: DeviceRecord) -> tuple[str, ...]:
-    return (*device.ssh_prefix(), f"{remote_path_expr(device.codex_bin)} --version && pwd")
+    return (*device.ssh_prefix(), f"{_codex_launcher_expression(device)} && $CODEX_BIN --version && pwd")
 
 
 def ssh_launch_command(device: DeviceRecord, prompt_path: str = "~/.config/codex-gui/memory.md") -> tuple[str, ...]:
     remote = (
         f"cd {remote_path_expr(device.project_root)} && "
-        f"{remote_path_expr(device.codex_bin)} -C {remote_path_expr(device.project_root)} "
+        f"{_codex_launcher_expression(device)} && "
+        f"$CODEX_BIN -C {remote_path_expr(device.project_root)} "
         f"\"Use the Codex Control portable memory at {prompt_path} and continue the active project.\""
     )
     return (*device.ssh_prefix(), remote)
@@ -739,14 +780,14 @@ def ssh_launch_command(device: DeviceRecord, prompt_path: str = "~/.config/codex
 
 def device_probe_script(device: DeviceRecord) -> str:
     project_expr = remote_path_expr(device.project_root)
-    codex_expr = remote_path_expr(device.codex_bin)
     return "\n".join([
         "set -u",
         "export PATH=\"$HOME/.local/bin:$HOME/.npm-global/bin:$PATH\"",
+        _codex_launcher_expression(device),
         "printf 'CODEX_PROBE=1\\n'",
         "printf 'HOSTNAME=%s\\n' \"$(hostname 2>/dev/null || printf unknown)\"",
         "printf 'UNAME=%s\\n' \"$(uname -srmo 2>/dev/null || uname -a 2>/dev/null || printf unknown)\"",
-        f"codex_out=$({codex_expr} --version 2>&1)",
+        "codex_out=$($CODEX_BIN --version 2>&1)",
         "codex_code=$?",
         "codex_one_line=$(printf '%s' \"$codex_out\" | tr '\\n' ' ' | sed 's/[[:space:]]\\+/ /g')",
         "printf 'CODEX_EXIT=%s\\n' \"$codex_code\"",
@@ -999,10 +1040,12 @@ def agent_shell_script(device: DeviceRecord, run_id: str, lane_slug: str) -> str
         "if [ -n \"$role_focus\" ]; then printf 'Role focus: %s\\n' \"$role_focus\"; fi && "
         "if [ -n \"$role_boundary\" ]; then printf 'Role boundary: %s\\n' \"$role_boundary\"; fi && "
         f"if [ -n \"$role_profile\" ]; then "
-        f"  {remote_path_expr(device.codex_bin)} -p \"$role_profile\" -C {remote_path_expr(device.project_root)} "
+        f"  {_codex_launcher_expression(device)} && "
+        f"  $CODEX_BIN -p \"$role_profile\" -C {remote_path_expr(device.project_root)} "
         f"exec --skip-git-repo-check --output-last-message {remote_path_expr(final_path)} \"$prompt\"; "
         "else "
-        f"  {remote_path_expr(device.codex_bin)} -C {remote_path_expr(device.project_root)} "
+        f"  {_codex_launcher_expression(device)} && "
+        f"  $CODEX_BIN -C {remote_path_expr(device.project_root)} "
         f"exec --skip-git-repo-check --output-last-message {remote_path_expr(final_path)} \"$prompt\"; "
         "fi; "
         "status=$?; "

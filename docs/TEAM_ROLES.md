@@ -130,6 +130,16 @@ The commander can commit directly to `main` only for integration, docs, release
 notes, and small coordination changes. Worker devices should not free-edit
 `main`.
 
+## Orchestration + Push Protocol
+
+The authoritative 4-device workflow is now documented in
+`docs/MULTI_DEVICE_ORCHESTRATION.md`.
+
+Quick rule:
+
+- Workers: branch, scope, test, commit, push lane branch.
+- Commander: pull main, review lane, run integration checks, merge, run full checks, push main.
+
 ## Standard Worker Loop
 
 Every worker starts with:
