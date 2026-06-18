@@ -147,6 +147,44 @@ export ATLAS_BUILDER_USER=ao
 export ATLAS_BUILDER_SESSION=atlas-builder
 ```
 
+## Headless Team Ops (Commander)
+
+Run the full atlas team lifecycle from terminal using the same role model as the GUI:
+
+```bash
+python3 codex_team_ops.py discover --json
+python3 codex_team_ops.py check --json
+python3 codex_team_ops.py roles --json
+python3 codex_team_ops.py prepare --check --json
+python3 codex_team_ops.py sync --json
+python3 codex_team_ops.py launch --json
+python3 codex_team_ops.py collect --json
+```
+
+The same command set is available as a short script:
+
+```bash
+bash scripts/codex-team-ops.sh discover
+bash scripts/codex-team-ops.sh prepare --check
+bash scripts/codex-team-ops.sh status
+bash scripts/codex-team-ops.sh launch --sync
+
+# installed script shortcut after pip install:
+codex-team-ops discover
+```
+
+Role defaults in the default naming model:
+
+- `atlas-ubuntu` (local): Commander / Integrator
+- `atlas-builder`: Core Systems Engineer
+- `atlas-main`: Product / GTK UX Engineer
+- `atlas-cockpit`: Verifier / Release Engineer
+
+Runbook references:
+
+- [Multi-device orchestration](docs/MULTI_DEVICE_ORCHESTRATION.md)
+- [Team roles](docs/TEAM_ROLES.md)
+
 ## Install
 
 From a clone:

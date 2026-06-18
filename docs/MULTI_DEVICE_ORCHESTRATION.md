@@ -43,6 +43,30 @@ python3 -m unittest tests.test_devices
 
 Do not start a team run while a lane is blocked.
 
+## 2b) Commander headless flow (for non-GUI sessions)
+
+Use this when `builder`/`main`/`cockpit` sessions are already running and you need
+a terminal-native control flow:
+
+```bash
+cd ~/Projects/codex-gui
+python3 codex_team_ops.py discover --json
+python3 codex_team_ops.py check --json
+python3 codex_team_ops.py prepare --check --json
+python3 codex_team_ops.py sync --json
+python3 codex_team_ops.py launch --sync --json
+python3 codex_team_ops.py collect --json
+```
+
+You can also use the launcher script:
+
+```bash
+bash scripts/codex-team-ops.sh status
+```
+
+`discover` and `prepare` both read and update `~/.config/codex-gui/devices.json`. Keep
+`~/.config/codex-gui/team/` clean across attempts to make failure recovery visible.
+
 ## 3) Run workflow (4-device team)
 
 On the Mesh page:
