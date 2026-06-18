@@ -45,6 +45,33 @@ Defaults:
 - poll interval: `4s`
 - endpoint: `/api/metrics`
 
+## Atlas Builder Full Access
+
+Use the commander helper for direct shell, command, and privileged actions on atlas-builder:
+
+```bash
+bash scripts/atlas-builder-full-access.sh
+```
+
+Examples:
+
+```bash
+# interactive shell
+bash scripts/atlas-builder-full-access.sh atlas-builder ao
+
+# run one remote command
+bash scripts/atlas-builder-full-access.sh atlas-builder ao command "systemctl --user status"
+
+# open root shell (password required on builder)
+bash scripts/atlas-builder-full-access.sh atlas-builder ao sudo
+
+# run one privileged command
+bash scripts/atlas-builder-full-access.sh atlas-builder ao sudo "journalctl -u sshd -n 80"
+
+# open monitor fast path
+bash scripts/atlas-builder-full-access.sh atlas-builder ao monitor
+```
+
 ## Install
 
 From a clone:
