@@ -19,6 +19,32 @@ Or directly:
 python3 codex_gui.py
 ```
 
+## Atlas Builder Web Monitor
+
+Launch the web monitor from this machine (SSH-capable commander node):
+
+```bash
+bash scripts/run-atlas-builder-monitor.sh \
+  --host atlas-builder \
+  --user ao \
+  --bind 127.0.0.1 \
+  --port 9760
+```
+
+Open in browser:
+
+```text
+http://127.0.0.1:9760
+```
+
+Defaults:
+
+- host: `atlas-builder`
+- user: `ao`
+- port: `9760`
+- poll interval: `4s`
+- endpoint: `/api/metrics`
+
 ## Install
 
 From a clone:
