@@ -117,6 +117,9 @@ bash scripts/atlas-builder-ops.sh shell
 bash scripts/atlas-builder-ops.sh command "systemctl --user status"
 bash scripts/atlas-builder-ops.sh root
 bash scripts/atlas-builder-ops.sh monitor
+
+# Reduce noisy startup output when running commands
+bash scripts/atlas-builder-ops.sh --quiet status
 ```
 
 One-phrase compatibility:

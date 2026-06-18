@@ -4,7 +4,7 @@ set -euo pipefail
 usage() {
   cat <<'EOF'
 Usage:
-  scripts/atlas-builder-full-access.sh [--host atlas-builder] [--user ao] [--session atlas-builder] [shell|command|sudo|tmux|tmux-root|monitor] [payload]
+  scripts/atlas-builder-full-access.sh [--host atlas-builder] [--user ao] [--session atlas-builder] [--quiet] [shell|command|sudo|tmux|tmux-root|monitor] [payload]
 
 Modes:
   shell      Open interactive shell (default)
@@ -13,6 +13,7 @@ Modes:
   tmux       Attach to a persistent tmux session on builder
   tmux-root  Attach to tmux with automatic root shell
   monitor    Open atlas-builder web monitor launcher
+  --quiet    Filter noisy shell-init output lines (declare -x) in remote command output
 
 Examples:
   # legacy positional form
@@ -37,12 +38,21 @@ PAYLOAD=()
 
 HOST_SET=0
 USER_SET=0
+QUIET=0
 
 ssh_common=(
   -o BatchMode=yes
   -o ConnectTimeout=12
   -o StrictHostKeyChecking=accept-new
 )
+
+run_ssh_command() {
+  if [[ "$QUIET" -eq 1 ]]; then
+    ssh "${ssh_common[@]}" "$TARGET" "$@" | sed -u '/^declare -x /d'
+  else
+    ssh "${ssh_common[@]}" "$TARGET" "$@"
+  fi
+}
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -57,6 +67,10 @@ while [[ $# -gt 0 ]]; do
     --session)
       TMUX_SESSION="${2:-}"
       shift 2
+      ;;
+    --quiet)
+      QUIET=1
+      shift
       ;;
     --help|-h)
       usage
@@ -106,13 +120,17 @@ case "$ACTION" in
     exec ssh "${ssh_common[@]}" "$TARGET"
     ;;
   command)
-    exec ssh "${ssh_common[@]}" "$TARGET" "${PAYLOAD[@]}"
+    run_ssh_command "${PAYLOAD[@]}"
     ;;
   sudo)
     if [[ ${#PAYLOAD[@]} -eq 0 ]]; then
       exec ssh "${ssh_common[@]}" "$TARGET" 'sudo -s'
     else
-      exec ssh "${ssh_common[@]}" "$TARGET" sudo "${PAYLOAD[@]}"
+      if [[ "$QUIET" -eq 1 ]]; then
+        run_ssh_command sudo "${PAYLOAD[@]}"
+      else
+        exec ssh "${ssh_common[@]}" "$TARGET" sudo "${PAYLOAD[@]}"
+      fi
     fi
     ;;
   tmux)

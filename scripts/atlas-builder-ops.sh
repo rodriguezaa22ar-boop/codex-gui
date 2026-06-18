@@ -13,6 +13,12 @@ if [[ "${1:-}" == "fab" || "${1:-}" == "builder" ]]; then
   shift
 fi
 
+QUIET=0
+if [[ "${1:-}" == "--quiet" ]]; then
+  QUIET=1
+  shift
+fi
+
 ACTION="${1:-status}"
 shift || true
 
@@ -56,7 +62,7 @@ EOF
 usage() {
   cat <<'EOF'
 Usage:
-  scripts/atlas-builder-ops.sh [status|shell|command|root|tmux|tmux-root|monitor|help] [payload]
+  scripts/atlas-builder-ops.sh [--quiet] [status|shell|command|root|tmux|tmux-root|monitor|help] [payload]
 
 Aliases:
   fab
@@ -74,8 +80,13 @@ Modes:
 EOF
 }
 
+RUN_PREFIX=()
+if [[ "$QUIET" -eq 1 ]]; then
+  RUN_PREFIX+=(--quiet)
+fi
+
 run_full() {
-  bash "${SCRIPT_DIR}/atlas-builder-full-access.sh" --host "$HOST" --user "$USER" --session "$SESSION" "$@"
+  bash "${SCRIPT_DIR}/atlas-builder-full-access.sh" "${RUN_PREFIX[@]}" --host "$HOST" --user "$USER" --session "$SESSION" "$@"
 }
 
 case "$ACTION" in
