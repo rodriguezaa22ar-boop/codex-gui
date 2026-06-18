@@ -102,6 +102,7 @@ def _status_code(status: str) -> int:
 
 
 def _collect_setup_report(args: argparse.Namespace):
+    _ensure_repo_on_path()
     from codex_setup import build_setup_report  # local import to keep launcher behavior consistent
 
     project = _project_path(args.project)
@@ -174,6 +175,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.self_check:
         return _self_check(args)
 
+    _ensure_repo_on_path()
     project, report = _collect_setup_report(args)
     status = _status_code(report.status)
     _log_smoke_report(project, report, status)
