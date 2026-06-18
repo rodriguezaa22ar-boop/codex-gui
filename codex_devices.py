@@ -1021,12 +1021,29 @@ def agent_shell_script(device: DeviceRecord, run_id: str, lane_slug: str) -> str
     chat_path = remote_path_expr(f"{remote_dir}/out/{TEAM_CHAT_FILE}")
     lane_slug_safe = shlex.quote(slugify(lane_slug))
     lane_device_safe = shlex.quote(device.name)
+    run_id_safe = shlex.quote(run_id)
     return (
+        f"ensure_team_chat() {{ "
+        f"if [ ! -s {chat_path} ]; then "
+        f"{{ printf '# Codex Team Chat\\n\\n'; "
+        f"printf 'Team: %s\\n' {run_id_safe}; "
+        "printf 'Started: %s\\n' \"$(date -Is)\"; "
+        "printf '\\nInstructions: concise team updates, blockers, and next steps.\\n\\n'; "
+        f"}} > {chat_path} || true; "
+        f"chmod 600 {chat_path} 2>/dev/null || true; "
+        "fi; "
+        "return 0; "
+        "} && "
         f"append_team_chat() {{ "
         "message=$1; "
         "if [ -n \"$message\" ]; then "
-        f"printf '[%s] %s (%s): %s\\n' \"$(date '+%Y-%m-%d %H:%M:%S')\" {lane_slug_safe} {lane_device_safe} \"$message\" >> {chat_path}; "
+        "ensure_team_chat; "
+        f"if ! printf '[%s] %s (%s): %s\\n' \"$(date '+%Y-%m-%d %H:%M:%S')\" {lane_slug_safe} {lane_device_safe} \"$message\" >> {chat_path}; then "
+        "printf 'team chat write failed\\n' >&2; "
         "fi; "
+        f"chmod 600 {chat_path} 2>/dev/null || true; "
+        "fi; "
+        "return 0; "
         "} && "
         f"mkdir -p {remote_path_expr(remote_dir + '/out')} && "
         f"cd {remote_path_expr(device.project_root)} && "
