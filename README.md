@@ -89,6 +89,13 @@ One command for persistent root access:
 bash scripts/atlas-builder-fast.sh
 ```
 
+Preferred one-phrase launchers:
+
+```bash
+builder    # same as above
+fab        # backward-compatible alias phrase
+```
+
 Optional quick overrides:
 
 ```bash

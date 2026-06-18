@@ -10,6 +10,11 @@ HOST="${ATLAS_BUILDER_HOST:-atlas-builder}"
 USER="${ATLAS_BUILDER_USER:-ao}"
 SESSION="${ATLAS_BUILDER_SESSION:-atlas-builder}"
 
+# support legacy one-word launch selectors
+if [[ "${1:-}" == "fab" || "${1:-}" == "builder" ]]; then
+  shift
+fi
+
 if [[ "$#" -eq 0 ]]; then
   set -- tmux-root
 fi
