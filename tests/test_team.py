@@ -127,16 +127,18 @@ class CodexTeamTests(unittest.TestCase):
 
     def test_named_atlas_devices_get_stable_separate_roles(self) -> None:
         self.assertEqual(team_role_for_device("atlas-builder", "atlas-builder.tailnet").id, "backend-builder")
-        self.assertEqual(team_role_for_device("atlas-ubuntu", "atlas-ubuntu.tailnet").id, "verifier")
-        self.assertEqual(team_role_for_device("atlas-cockpit", "atlas-cockpit.tailnet").id, "ui-polish")
+        self.assertEqual(team_role_for_device("atlas-ubuntu", "atlas-ubuntu.tailnet").id, "coordinator")
+        self.assertEqual(team_role_for_device("atlas-main", "atlas-main.tailnet").id, "ui-polish")
+        self.assertEqual(team_role_for_device("atlas-cockpit", "atlas-cockpit.tailnet").id, "verifier")
         self.assertEqual(team_role_for_device("This Device Test", "localhost").id, "coordinator")
 
     def test_team_roles_markdown_documents_boundaries(self) -> None:
         text = team_roles_markdown()
 
-        self.assertIn("Backend Builder", text)
+        self.assertIn("Core Systems Engineer", text)
+        self.assertIn("Product / GTK UX Engineer", text)
         self.assertIn("Boundary:", text)
-        self.assertIn("Verifier", text)
+        self.assertIn("Verifier / Release Engineer", text)
 
 
 if __name__ == "__main__":
