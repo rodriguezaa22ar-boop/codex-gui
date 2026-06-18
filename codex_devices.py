@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import shlex
 import time
 from dataclasses import asdict, dataclass, replace
@@ -204,7 +205,15 @@ def _missing_codex_hint(probe: DeviceProbe, device: DeviceRecord) -> bool:
     return False
 
 
-def _probe_actions(category: str, device: DeviceRecord) -> tuple[str, ...]:
+TAILSCALE_APPROVAL_RE = re.compile(r"https://login\.tailscale\.com/a/[A-Za-z0-9_-]+")
+
+
+def tailscale_approval_url(text: str) -> str:
+    match = TAILSCALE_APPROVAL_RE.search(text)
+    return match.group(0) if match else ""
+
+
+def _probe_actions(category: str, device: DeviceRecord, approval_url: str = "") -> tuple[str, ...]:
     if category == "ready-saved":
         return ("Run Check Fleet to refresh this saved status before assigning team work.",)
     if category == "local-ready":
@@ -222,6 +231,11 @@ def _probe_actions(category: str, device: DeviceRecord) -> tuple[str, ...]:
             "Rerun Check Fleet once installed.",
         )
     if category == "tailscale-approval-required":
+        if approval_url:
+            return (
+                f"Open Tailscale approval link: {approval_url}",
+                "Wait for auth to complete, then rerun Check Fleet.",
+            )
         return (
             "Open your Tailscale approval link in this device's browser.",
             "Wait for auth to complete, then rerun Check Fleet.",
@@ -352,6 +366,7 @@ def _row_from_device_probe(device: DeviceRecord, probe: DeviceProbe | None) -> M
             category = "missing-codex"
         else:
             category = "blocked"
+        approval_url = tailscale_approval_url(probe.raw) if category == "tailscale-approval-required" else ""
         if status == "offline":
             row_status = "offline"
         else:
@@ -363,7 +378,7 @@ def _row_from_device_probe(device: DeviceRecord, probe: DeviceProbe | None) -> M
             status=row_status,
             blocker_category=category,
             summary=summary,
-            next_actions=_probe_actions(category, device),
+            next_actions=_probe_actions(category, device, approval_url),
             checked=probe.checked,
             source="probe",
         )

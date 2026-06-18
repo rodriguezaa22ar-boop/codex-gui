@@ -34,6 +34,7 @@ from codex_devices import (
     ssh_launch_command,
     ssh_test_command,
     tailscale_status_command,
+    tailscale_approval_url,
     team_prompt,
     update_device_from_probe,
     upsert_device,
@@ -332,6 +333,7 @@ class DeviceMeshTests(unittest.TestCase):
 
         self.assertEqual(probe.status, "blocked")
         self.assertEqual(probe.summary, "Tailscale SSH approval required")
+        self.assertEqual(tailscale_approval_url(output), "https://login.tailscale.com/a/example")
 
     def test_probe_parser_classifies_plain_ssh_permission_denied(self) -> None:
         device = DeviceRecord(id="builder", name="Builder", host="atlas-builder.tailnet")
@@ -376,7 +378,7 @@ class DeviceMeshTests(unittest.TestCase):
         assert row is not None
         self.assertEqual(row.status, "blocked")
         self.assertEqual(row.blocker_category, "tailscale-approval-required")
-        self.assertTrue(any("Tailscale" in action for action in row.next_actions))
+        self.assertTrue(any("https://login.tailscale.com/a/example" in action for action in row.next_actions))
 
     def test_mesh_readiness_report_detects_stale_checkout(self) -> None:
         device = DeviceRecord(id="three", name="Builder", host="atlas-builder.tailnet", project_root="~/Projects/codex-gui")
