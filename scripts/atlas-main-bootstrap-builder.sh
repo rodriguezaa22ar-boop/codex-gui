@@ -4,8 +4,6 @@ set -euo pipefail
 REMOTE_HOST="${REMOTE_HOST:-atlas-builder}"
 REMOTE_USER="${REMOTE_USER:-ao}"
 REMOTE_TARGET="${REMOTE_USER}@${REMOTE_HOST}"
-REPO_REMOTE="git@github.com:rodriguezaa22ar-boop/codex-gui.git"
-REPO_HTTPS="https://github.com/rodriguezaa22ar-boop/codex-gui.git"
 
 remote_payload() {
   cat <<'REMOTE'
@@ -16,16 +14,17 @@ export GIT_TERMINAL_PROMPT=0
 REMOTE_SSH="git@github.com:rodriguezaa22ar-boop/codex-gui.git"
 REMOTE_HTTPS="https://github.com/rodriguezaa22ar-boop/codex-gui.git"
 
-repo_remote_url() {
-  if git ls-remote "$REMOTE_SSH" HEAD >/dev/null 2>&1; then
-    printf '%s\n' "$REMOTE_SSH"
-  else
-    printf '%s\n' "$REMOTE_HTTPS"
-  fi
-}
-
 mkdir -p "$HOME/Projects"
 cd "$HOME/Projects"
+
+configure_origin() {
+  if GIT_SSH_COMMAND="ssh -o BatchMode=yes -o ConnectTimeout=8 -o StrictHostKeyChecking=accept-new" \
+    git ls-remote "$REMOTE_SSH" main >/dev/null 2>&1; then
+    git remote set-url origin "$REMOTE_SSH"
+  else
+    git remote set-url origin "$REMOTE_HTTPS"
+  fi
+}
 
 if ! command -v git >/dev/null 2>&1; then
   if command -v nix-shell >/dev/null 2>&1; then
@@ -35,22 +34,22 @@ export PATH="$HOME/.local/bin:$PATH"
 export GIT_TERMINAL_PROMPT=0
 REMOTE_SSH="git@github.com:rodriguezaa22ar-boop/codex-gui.git"
 REMOTE_HTTPS="https://github.com/rodriguezaa22ar-boop/codex-gui.git"
-
-repo_remote_url() {
-  if git ls-remote "$REMOTE_SSH" HEAD >/dev/null 2>&1; then
-    printf '%s\n' "$REMOTE_SSH"
-  else
-    printf '%s\n' "$REMOTE_HTTPS"
-  fi
-}
-
 mkdir -p "$HOME/Projects"
 cd "$HOME/Projects"
+configure_origin() {
+  if GIT_SSH_COMMAND="ssh -o BatchMode=yes -o ConnectTimeout=8 -o StrictHostKeyChecking=accept-new" \
+    git ls-remote "$REMOTE_SSH" main >/dev/null 2>&1; then
+    git remote set-url origin "$REMOTE_SSH"
+  else
+    git remote set-url origin "$REMOTE_HTTPS"
+  fi
+}
 if [ ! -d codex-gui/.git ]; then
-  git clone "$(repo_remote_url)" codex-gui
+  git clone "$REMOTE_SSH" codex-gui || git clone "$REMOTE_HTTPS" codex-gui
 fi
+
 cd codex-gui
-git remote set-url origin "$(repo_remote_url)" || true
+configure_origin
 git fetch origin main
 git checkout main
 git pull --ff-only origin main
@@ -63,11 +62,11 @@ NIXREMOTE
 fi
 
 if [ ! -d codex-gui/.git ]; then
-  git clone "$(repo_remote_url)" codex-gui
+  git clone "$REMOTE_SSH" codex-gui || git clone "$REMOTE_HTTPS" codex-gui
 fi
 
 cd codex-gui
-git remote set-url origin "$(repo_remote_url)" || true
+configure_origin
 git fetch origin main
 git checkout main
 git pull --ff-only origin main

@@ -15,11 +15,17 @@ mkdir -p ~/Projects
 cd ~/Projects
 
 if [ ! -d codex-gui/.git ]; then
-  git clone git@github.com:rodriguezaa22ar-boop/codex-gui.git codex-gui
+  git clone git@github.com:rodriguezaa22ar-boop/codex-gui.git codex-gui || \
+    git clone https://github.com/rodriguezaa22ar-boop/codex-gui.git codex-gui
 fi
 
 cd ~/Projects/codex-gui
-git remote set-url origin git@github.com:rodriguezaa22ar-boop/codex-gui.git
+if GIT_SSH_COMMAND="ssh -o BatchMode=yes -o ConnectTimeout=8 -o StrictHostKeyChecking=accept-new" \
+  git ls-remote git@github.com:rodriguezaa22ar-boop/codex-gui.git main >/dev/null 2>&1; then
+  git remote set-url origin git@github.com:rodriguezaa22ar-boop/codex-gui.git
+else
+  git remote set-url origin https://github.com/rodriguezaa22ar-boop/codex-gui.git
+fi
 git fetch origin main
 git checkout main
 git pull --ff-only origin main
