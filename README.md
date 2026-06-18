@@ -56,8 +56,11 @@ bash scripts/atlas-builder-full-access.sh
 Examples:
 
 ```bash
-# interactive shell
+# interactive shell (legacy positional form)
 bash scripts/atlas-builder-full-access.sh atlas-builder ao
+
+# interactive shell (explicit host/user flags)
+bash scripts/atlas-builder-full-access.sh --host atlas-builder --user ao shell
 
 # run one remote command
 bash scripts/atlas-builder-full-access.sh atlas-builder ao command "systemctl --user status"
@@ -70,6 +73,12 @@ bash scripts/atlas-builder-full-access.sh atlas-builder ao sudo "journalctl -u s
 
 # open monitor fast path
 bash scripts/atlas-builder-full-access.sh atlas-builder ao monitor
+
+# open persistent tmux session (keeps shell alive across reconnects)
+bash scripts/atlas-builder-full-access.sh atlas-builder ao tmux
+
+# open persistent root tmux session
+bash scripts/atlas-builder-full-access.sh atlas-builder ao tmux-root
 ```
 
 ## Install
