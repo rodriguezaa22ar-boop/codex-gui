@@ -2727,6 +2727,16 @@ class CodexControl(Gtk.Application):
         action_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
         for label, icon_name, handler, primary in [
             ("Run Max", "media-playback-start-symbolic", self.on_run_embedded, True),
+        ]:
+            button = self.make_button(label, icon_name)
+            button.add_css_class("primary" if primary else "secondary")
+            button.connect("clicked", handler)
+            action_row.append(button)
+        panel.append(action_row)
+
+        secondary_actions = Gtk.Expander(label="Operator actions")
+        secondary_action_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        for label, icon_name, handler, primary in [
             ("Prepare Auto", "document-new-symbolic", self.on_prepare_autopilot, False),
             ("Track Auto", "view-refresh-symbolic", self.on_track_autopilot, False),
             ("Review", "edit-find-symbolic", lambda button: self.on_run_action_button(button, "review"), False),
@@ -2735,8 +2745,9 @@ class CodexControl(Gtk.Application):
             button = self.make_button(label, icon_name)
             button.add_css_class("primary" if primary else "secondary")
             button.connect("clicked", handler)
-            action_row.append(button)
-        panel.append(action_row)
+            secondary_action_row.append(button)
+        secondary_actions.set_child(secondary_action_row)
+        panel.append(secondary_actions)
         self.render_operator_brief()
         return panel
 
