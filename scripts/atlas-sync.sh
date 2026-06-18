@@ -14,7 +14,7 @@ Modes:
 Options:
   --branch     Git branch to pull from origin (default: current local branch, fallback main)
   --repo       Local repo path (default: repository root)
-  --node       Add explicit remote node (repeatable; default: atlas-main, atlas-builder)
+  --node       Add explicit remote node (repeatable; default: atlas-main, atlas-builder, atlas-cockpit)
   --user       SSH user for remote nodes without @userhost notation (default: ao)
   --dry-run    Print actions without applying remote changes
   --help       Show this help.
@@ -23,7 +23,7 @@ Examples:
   scripts/atlas-sync.sh
   scripts/atlas-sync.sh --branch lane/core-systems
   scripts/atlas-sync.sh --local --branch main
-  scripts/atlas-sync.sh --remote --node atlas-main --node atlas-builder --user ao
+  scripts/atlas-sync.sh --remote --node atlas-main --node atlas-builder --node atlas-cockpit --user ao
 USAGE
 }
 
@@ -35,13 +35,17 @@ MODE="all"
 REMOTE_USER="${ATLAS_SYNC_USER:-ao}"
 DRY_RUN=false
 NODES=()
-TARGET_NODES=(atlas-main atlas-builder)
+TARGET_NODES=(atlas-main atlas-builder atlas-cockpit)
 
 normalize_node() {
   local node="$1"
   case "$node" in
     main)
       echo "atlas-main"
+      return
+      ;;
+    cockpit)
+      echo "atlas-cockpit"
       return
       ;;
     builder)
