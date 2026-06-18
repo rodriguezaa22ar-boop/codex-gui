@@ -155,15 +155,21 @@ case "$ACTION" in
     ;;
   tmux)
     require_interactive
+    prev_quiet="$QUIET"
+    QUIET=1
     run_ssh_interactive \
       "command -v tmux >/dev/null 2>&1 || { echo 'tmux is required for this mode' >&2; exit 1; }; \
       exec tmux new-session -A -s \"${TMUX_SESSION}\""
+    QUIET="$prev_quiet"
     ;;
   tmux-root)
     require_interactive
+    prev_quiet="$QUIET"
+    QUIET=1
     run_ssh_interactive \
       "command -v tmux >/dev/null 2>&1 || { echo 'tmux is required for this mode' >&2; exit 1; }; \
       exec tmux new-session -A -s \"${TMUX_SESSION}\" 'sudo -s'"
+    QUIET="$prev_quiet"
     ;;
   monitor)
     exec bash scripts/run-atlas-builder-monitor.sh --host "$HOST" --user "$USER"
