@@ -65,6 +65,14 @@ run_ssh_command() {
   fi
 }
 
+run_ssh_interactive() {
+  if [[ "$QUIET" -eq 1 ]]; then
+    ssh -t "${ssh_common[@]}" "$TARGET" "$@" | sed -u '/^declare -x /d'
+  else
+    ssh -t "${ssh_common[@]}" "$TARGET" "$@"
+  fi
+}
+
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --host)
@@ -147,13 +155,13 @@ case "$ACTION" in
     ;;
   tmux)
     require_interactive
-    exec ssh "${ssh_common[@]}" "$TARGET" \
+    run_ssh_interactive \
       "command -v tmux >/dev/null 2>&1 || { echo 'tmux is required for this mode' >&2; exit 1; }; \
       exec tmux new-session -A -s \"${TMUX_SESSION}\""
     ;;
   tmux-root)
     require_interactive
-    exec ssh "${ssh_common[@]}" "$TARGET" \
+    run_ssh_interactive \
       "command -v tmux >/dev/null 2>&1 || { echo 'tmux is required for this mode' >&2; exit 1; }; \
       exec tmux new-session -A -s \"${TMUX_SESSION}\" 'sudo -s'"
     ;;
