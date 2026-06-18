@@ -46,10 +46,12 @@ from codex_team import (
     inspect_team_run,
     latest_team_run_dir,
     load_bus_report,
+    team_lane_status_counts,
     write_role_bootstrap,
     write_team_summary,
     team_operator_summary,
     team_role_for_device,
+    team_run_dirs,
     role_profile_hint,
 )
 
@@ -484,6 +486,217 @@ def _serialize_run_status(run: Any) -> dict[str, Any]:
     }
 
 
+def _ready_trusted_count(devices: tuple[DeviceRecord, ...], report: MeshReadinessReport) -> int:
+    return sum(
+        1 for device in devices
+        if _is_trusted(device)
+        and (row := report.by_device(device.id)) is not None
+        and row.is_ready
+    )
+
+
+def _doctor_lane_counts(run: Any | None) -> dict[str, int]:
+    counts = {
+        "total": 0,
+        "collected": 0,
+        "finished": 0,
+        "prepared": 0,
+        "failed": 0,
+    }
+    if run is None:
+        return counts
+    counts.update(team_lane_status_counts(run))
+    counts["total"] = run.lane_count
+    counts["collected"] = run.collected_count
+    return counts
+
+
+def _doctor_bus_health(run: Any | None, bus_report: Any | None) -> dict[str, Any]:
+    if run is None:
+        return {
+            "status": "not_started",
+            "path": "",
+            "synced": 0,
+            "failed": 0,
+            "stale": 0,
+            "targets": 0,
+            "failures": 0,
+        }
+    if bus_report is None:
+        return {
+            "status": "not_synced",
+            "path": str(run.team_dir / "out" / "handoff-bus.md"),
+            "synced": 0,
+            "failed": 0,
+            "stale": 0,
+            "targets": 0,
+            "failures": 0,
+        }
+    failures = len(bus_report.failures)
+    if bus_report.failed_count or bus_report.stale_count or failures:
+        status = "repair"
+    elif bus_report.targets or bus_report.sent:
+        status = "healthy"
+    else:
+        status = "not_synced"
+    return {
+        "status": status,
+        "path": bus_report.bus_path,
+        "synced": bus_report.synced_count,
+        "failed": bus_report.failed_count,
+        "stale": bus_report.stale_count,
+        "targets": len(bus_report.targets),
+        "failures": failures,
+    }
+
+
+def _doctor_fleet_blockers(
+    devices: tuple[DeviceRecord, ...],
+    report: MeshReadinessReport,
+) -> list[dict[str, Any]]:
+    if not devices:
+        return [{
+            "scope": "fleet",
+            "category": "no-devices",
+            "status": "blocked",
+            "summary": "No saved mesh devices were found.",
+            "next_actions": ["Run `codex-team-ops discover` or add mesh devices before preparing a team."],
+        }]
+
+    device_map = {device.id: device for device in devices}
+    blockers: list[dict[str, Any]] = []
+    for row in report.rows:
+        device = device_map.get(row.device_id)
+        if row.is_ready and (device is None or _is_trusted(device)):
+            continue
+        if row.is_ready:
+            category = "untrusted-device"
+            status = "blocked"
+            summary = "Device is ready but not trusted for team lanes."
+            next_actions = ["Review the saved device record before assigning team work."]
+        else:
+            category = row.blocker_category
+            status = row.status
+            summary = row.summary
+            next_actions = list(row.next_actions)
+        blockers.append({
+            "scope": "fleet",
+            "device_id": row.device_id,
+            "device_name": row.device_name,
+            "category": category,
+            "status": status,
+            "summary": summary,
+            "next_actions": next_actions,
+        })
+    return blockers
+
+
+def _doctor_run_blockers(run: Any | None, bus_report: Any | None, inspect_error: str = "") -> list[dict[str, Any]]:
+    blockers: list[dict[str, Any]] = []
+    if inspect_error:
+        blockers.append({
+            "scope": "run",
+            "category": "inspect-failed",
+            "status": "blocked",
+            "summary": inspect_error,
+            "next_actions": ["Inspect the latest team run manifest and repair unreadable run artifacts."],
+        })
+        return blockers
+    if run is not None:
+        for lane in run.lanes:
+            if lane.status != "failed":
+                continue
+            blockers.append({
+                "scope": "run",
+                "lane_slug": lane.lane_slug,
+                "device_name": lane.device_name,
+                "category": "lane-failed",
+                "status": lane.status,
+                "summary": lane.detail,
+                "next_actions": ["Inspect lane output, repair the failure, then collect the team run again."],
+            })
+    if bus_report is None:
+        return blockers
+    for target in bus_report.targets:
+        if not target.is_failure and target.status != "stale":
+            continue
+        blockers.append({
+            "scope": "bus",
+            "lane_slug": target.lane_slug,
+            "device_name": target.device_name,
+            "category": "handoff-bus",
+            "status": target.status,
+            "summary": target.detail,
+            "next_actions": ["Repair the bus target and sync the handoff bus again."],
+        })
+    if not bus_report.targets:
+        for failure in bus_report.failures:
+            blockers.append({
+                "scope": "bus",
+                "category": "handoff-bus",
+                "status": "failed",
+                "summary": failure,
+                "next_actions": ["Repair the bus failure and sync the handoff bus again."],
+            })
+    return blockers
+
+
+def build_team_doctor_report(
+    devices: tuple[DeviceRecord, ...],
+    *,
+    team_root: Path | None = None,
+) -> dict[str, Any]:
+    root = TEAM_DIR if team_root is None else team_root
+    readiness = team_readiness(devices)
+    ready_devices = _ready_trusted_count(devices, readiness)
+    assignments = build_team_assignments(devices)
+    run_dirs = team_run_dirs(root)
+    latest_path = latest_team_run_dir(root)
+    if latest_path is None:
+        latest_path = load_last_run()
+
+    run = None
+    inspect_error = ""
+    if latest_path is not None:
+        try:
+            run = inspect_team_run(latest_path)
+        except Exception as exc:  # noqa: BLE001
+            inspect_error = f"{latest_path}: {exc}"
+
+    bus_report = load_bus_report(run.team_dir) if run is not None else None
+    saved_runs = len(run_dirs) if run_dirs else (1 if latest_path is not None else 0)
+    operator = team_operator_summary(
+        run,
+        bus_report,
+        ready_devices=ready_devices,
+        saved_runs=saved_runs,
+        assignment_count=len(assignments),
+    )
+    blockers = [
+        *_doctor_fleet_blockers(devices, readiness),
+        *_doctor_run_blockers(run, bus_report, inspect_error),
+    ]
+    status = "blocked" if inspect_error else operator.status
+    next_action = "Inspect Run" if inspect_error else operator.next_action
+    actionable = status != "blocked" and (ready_devices > 0 or run is not None)
+
+    return {
+        "schema": "codex-team-ops-doctor/v1",
+        "actionable": actionable,
+        "status": status,
+        "summary": operator.headline,
+        "next_action": next_action,
+        "ready_device_count": ready_devices,
+        "device_count": readiness.total,
+        "saved_run_count": saved_runs,
+        "latest_run_id": run.run_id if run is not None else "",
+        "latest_run_path": str(run.team_dir if run is not None else latest_path or ""),
+        "lane_counts": _doctor_lane_counts(run),
+        "bus_health": _doctor_bus_health(run, bus_report),
+        "blockers": blockers,
+    }
+
+
 def _resolve_team_dir(team_root: Path, run_id: str | None = None) -> Path:
     if run_id:
         candidate = team_root / run_id
@@ -586,6 +799,13 @@ def cmd_status(args: argparse.Namespace) -> int:
     print(f"next: {operator.next_action} | {operator.lane_text} | {operator.bus_text}")
     for lane in run.lanes:
         print(f"- {lane.device_name}: {lane.status} :: {lane.detail}")
+    return 0
+
+
+def cmd_doctor(args: argparse.Namespace) -> int:
+    devices = load_devices(DEVICES_FILE)
+    payload = build_team_doctor_report(devices)
+    print(json.dumps(payload, indent=2, sort_keys=True))
     return 0
 
 
@@ -727,6 +947,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     status = subparsers.add_parser("status", help="Show latest team run status")
     status.set_defaults(func=cmd_status)
     status.add_argument("--run-id", default="")
+
+    doctor = subparsers.add_parser("doctor", help="Emit fleet and latest team run doctor JSON")
+    doctor.set_defaults(func=cmd_doctor)
 
     sync = subparsers.add_parser("sync", help="Sync team package to selected devices")
     sync.set_defaults(func=cmd_sync)
