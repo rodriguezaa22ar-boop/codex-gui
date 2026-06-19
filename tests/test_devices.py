@@ -343,6 +343,66 @@ class DeviceMeshTests(unittest.TestCase):
         self.assertEqual(probe.status, "blocked")
         self.assertEqual(probe.summary, "SSH auth denied")
 
+    def test_mesh_readiness_report_categorizes_ssh_resolution_failure(self) -> None:
+        device = DeviceRecord(id="builder", name="Builder", host="atlas-builder.tailnet")
+        probe = parse_probe_output(
+            device,
+            "ssh: Could not resolve hostname atlas-builder.tailnet: Name or service not known",
+            255,
+            timestamp=123,
+        )
+
+        report = mesh_readiness_report((device,), {device.id: probe})
+        row = report.by_device(device.id)
+
+        self.assertIsNotNone(row)
+        assert row is not None
+        self.assertEqual(probe.status, "blocked")
+        self.assertEqual(probe.summary, "SSH host cannot be resolved")
+        self.assertEqual(row.status, "blocked")
+        self.assertEqual(row.blocker_category, "ssh-host-unresolved")
+        self.assertEqual(row.action_priority, 15)
+        self.assertTrue(any("Tailnet Discover" in action for action in row.next_actions))
+
+    def test_mesh_readiness_report_categorizes_refused_ssh_service(self) -> None:
+        device = DeviceRecord(id="builder", name="Builder", host="atlas-builder.tailnet", port=2222)
+        probe = parse_probe_output(
+            device,
+            "ssh: connect to host atlas-builder.tailnet port 2222: Connection refused",
+            255,
+            timestamp=123,
+        )
+
+        report = mesh_readiness_report((device,), {device.id: probe})
+        row = report.by_device(device.id)
+
+        self.assertIsNotNone(row)
+        assert row is not None
+        self.assertEqual(probe.status, "blocked")
+        self.assertEqual(probe.summary, "SSH connection refused")
+        self.assertEqual(row.blocker_category, "ssh-connection-refused")
+        self.assertTrue(any("port 2222" in action for action in row.next_actions))
+
+    def test_mesh_readiness_report_categorizes_unreachable_ssh_host(self) -> None:
+        device = DeviceRecord(id="builder", name="Builder", host="atlas-builder.tailnet")
+        probe = parse_probe_output(
+            device,
+            "ssh: connect to host atlas-builder.tailnet port 22: No route to host",
+            255,
+            timestamp=123,
+        )
+
+        report = mesh_readiness_report((device,), {device.id: probe})
+        row = report.by_device(device.id)
+
+        self.assertIsNotNone(row)
+        assert row is not None
+        self.assertEqual(probe.status, "offline")
+        self.assertEqual(probe.summary, "SSH host unreachable")
+        self.assertEqual(row.status, "offline")
+        self.assertEqual(row.blocker_category, "ssh-host-unreachable")
+        self.assertTrue(any("Tailscale" in action for action in row.next_actions))
+
     def test_mesh_readiness_report_categorizes_missing_codex(self) -> None:
         device = DeviceRecord(
             id="codex-missing",

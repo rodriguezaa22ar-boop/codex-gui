@@ -209,10 +209,33 @@ def _missing_codex_hint(probe: DeviceProbe, device: DeviceRecord) -> bool:
     return False
 
 
+def _ssh_probe_hint_category(probe: DeviceProbe) -> str:
+    haystack = f"{probe.summary} {probe.raw}".lower()
+    if (
+        "host cannot be resolved" in haystack
+        or "could not resolve hostname" in haystack
+        or "name or service not known" in haystack
+        or "temporary failure in name resolution" in haystack
+        or "nodename nor servname provided" in haystack
+    ):
+        return "ssh-host-unresolved"
+    if "host key verification failed" in haystack or "remote host identification has changed" in haystack:
+        return "ssh-host-key-unverified"
+    if "connection refused" in haystack:
+        return "ssh-connection-refused"
+    if "host unreachable" in haystack or "no route to host" in haystack or "network is unreachable" in haystack:
+        return "ssh-host-unreachable"
+    if "connection closed" in haystack or "connection reset by peer" in haystack:
+        return "ssh-connection-closed"
+    return ""
+
+
 def _readiness_action_priority(status: str, category: str) -> int:
     if status == "blocked":
-        if category in {"tailscale-approval-required", "ssh-auth-denied"}:
+        if category in {"tailscale-approval-required", "ssh-auth-denied", "ssh-host-key-unverified"}:
             return 10
+        if category in {"ssh-host-unresolved", "ssh-connection-refused", "ssh-host-unreachable", "ssh-connection-closed"}:
+            return 15
         if category == "missing-codex":
             return 20
         return 25
@@ -266,6 +289,36 @@ def _probe_actions(category: str, device: DeviceRecord, approval_url: str = "") 
         return (
             "Fix SSH key auth for this machine on the launcher and target device.",
             "Rerun Check Fleet after trust/auth is updated.",
+        )
+    if category == "ssh-host-unresolved":
+        return (
+            "Verify the saved host or MagicDNS name for this device.",
+            "Run Tailnet Discover to refresh device records before assigning work.",
+            "Rerun Check Fleet after the host resolves.",
+        )
+    if category == "ssh-host-key-unverified":
+        return (
+            "Verify the target device identity before changing known_hosts.",
+            "Update the stale SSH host key entry only after identity is confirmed.",
+            "Rerun Check Fleet after host key trust is repaired.",
+        )
+    if category == "ssh-connection-refused":
+        return (
+            "Start or enable SSH/Tailscale SSH on the target device.",
+            f"Verify port {device.port} is correct for {device.host}.",
+            "Rerun Check Fleet after SSH accepts connections.",
+        )
+    if category == "ssh-host-unreachable":
+        return (
+            "Verify this device is online in Tailscale and reachable from the launcher.",
+            "Check local network or Tailscale routing before assigning work.",
+            "Rerun Check Fleet.",
+        )
+    if category == "ssh-connection-closed":
+        return (
+            "Verify SSH/Tailscale SSH is accepting sessions on the target device.",
+            "Check remote login shell or startup failures before assigning work.",
+            "Rerun Check Fleet.",
         )
     if category == "offline-or-timeout":
         return (
@@ -385,6 +438,8 @@ def _row_from_device_probe(device: DeviceRecord, probe: DeviceProbe | None) -> M
             category = "tailscale-approval-required"
         elif "permission denied" in lower or "auth denied" in lower:
             category = "ssh-auth-denied"
+        elif ssh_category := _ssh_probe_hint_category(probe):
+            category = ssh_category
         elif "timed out" in lower or "timeout" in lower or "connection timed out" in lower:
             category = "offline-or-timeout"
         elif status == "offline" and "offline" not in lower:
@@ -900,12 +955,23 @@ def classify_probe_failure(text: str, returncode: int) -> tuple[str, str]:
         return "blocked", "Tailscale SSH approval required"
     if "permission denied" in lower:
         return "blocked", "SSH auth denied"
-    if "could not resolve hostname" in lower or "name or service not known" in lower:
+    if (
+        "could not resolve hostname" in lower
+        or "name or service not known" in lower
+        or "temporary failure in name resolution" in lower
+        or "nodename nor servname provided" in lower
+    ):
         return "blocked", "SSH host cannot be resolved"
+    if "host key verification failed" in lower or "remote host identification has changed" in lower:
+        return "blocked", "SSH host key unverified"
+    if "no route to host" in lower or "network is unreachable" in lower:
+        return "offline", "SSH host unreachable"
     if "connection timed out" in lower or "operation timed out" in lower or returncode == 124:
         return "offline", "SSH probe timed out"
     if "connection refused" in lower:
         return "blocked", "SSH connection refused"
+    if "connection closed" in lower or "connection reset by peer" in lower:
+        return "blocked", "SSH connection closed"
     return "blocked", clean or "probe failed"
 
 
