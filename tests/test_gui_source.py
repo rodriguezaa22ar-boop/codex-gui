@@ -53,6 +53,17 @@ class GuiSourceTests(unittest.TestCase):
         self.assertIn("_mesh_freshness_label", ast.unparse(render_device_list))
         self.assertIn("top.append(freshness)", ast.unparse(render_device_list))
 
+    def test_mesh_operator_chips_use_team_doctor_report(self) -> None:
+        source = Path("codex_gui.py").read_text(encoding="utf-8")
+        tree = ast.parse(source)
+
+        current_doctor = _method_named(tree, "current_team_doctor_report")
+        refresh_chips = _method_named(tree, "refresh_mesh_operator_chips")
+        self.assertIn("build_team_doctor_report", ast.unparse(current_doctor))
+        self.assertIn("mesh_doctor_lane_text", ast.unparse(refresh_chips))
+        self.assertIn("mesh_doctor_bus_text", ast.unparse(refresh_chips))
+        self.assertIn("blocker", ast.unparse(refresh_chips))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -187,6 +187,7 @@ from codex_team import (
     write_team_summary,
     write_team_chat_entry,
 )
+from codex_team_ops import build_team_doctor_report
 from codex_visual import visual_system_css
 from codex_workstation import (
     ActionFeedback,
@@ -4189,11 +4190,54 @@ class CodexControl(Gtk.Application):
             assignment_count=assignment_count,
         )
 
+    def current_team_doctor_report(self) -> dict[str, Any]:
+        return build_team_doctor_report(self.devices)
+
+    def mesh_doctor_lane_text(self, report: dict[str, Any]) -> str:
+        counts = report.get("lane_counts", {})
+        total = int(counts.get("total") or 0)
+        if not total:
+            return "no lanes"
+        collected = int(counts.get("collected") or 0)
+        finished = int(counts.get("finished") or 0)
+        failed = int(counts.get("failed") or 0)
+        text = f"{collected} collected / {finished} finished"
+        if failed:
+            text += f" / {failed} failed"
+        return text
+
+    def mesh_doctor_bus_text(self, report: dict[str, Any]) -> str:
+        bus = report.get("bus_health", {})
+        targets = int(bus.get("targets") or 0)
+        if targets:
+            return (
+                f"{int(bus.get('synced') or 0)} synced / "
+                f"{int(bus.get('failed') or 0)} failed / "
+                f"{int(bus.get('stale') or 0)} stale of {targets}"
+            )
+        status = str(bus.get("status") or "not_started")
+        return status.replace("_", " ")
+
     def refresh_mesh_operator_chips(self, readiness: MeshReadinessReport) -> None:
         if not hasattr(self, "mesh_next_action_label"):
             return
-        operator = self.current_team_operator_summary()
-        ready = readiness.ready_count
+        try:
+            doctor = self.current_team_doctor_report()
+        except Exception:  # noqa: BLE001
+            operator = self.current_team_operator_summary()
+            ready = readiness.ready_count
+            lane_text = operator.lane_text
+            bus_text = operator.bus_text
+            status = operator.status
+            next_action = operator.next_action
+            blockers = 0
+        else:
+            ready = int(doctor.get("ready_device_count") or readiness.ready_count)
+            lane_text = self.mesh_doctor_lane_text(doctor)
+            bus_text = self.mesh_doctor_bus_text(doctor)
+            status = str(doctor.get("status") or "review")
+            next_action = str(doctor.get("next_action") or "Check Fleet")
+            blockers = len(doctor.get("blockers") or [])
         self.set_chip(
             self.mesh_ready_count_label,
             f"{ready} ready",
@@ -4201,17 +4245,20 @@ class CodexControl(Gtk.Application):
         )
         self.set_chip(
             self.mesh_lane_count_label,
-            operator.lane_text,
-            self.chip_css_for_status(operator.status),
+            lane_text,
+            self.chip_css_for_status(status),
         )
         self.set_chip(
             self.mesh_bus_health_label,
-            operator.bus_text,
-            self.chip_css_for_status(operator.status),
+            bus_text,
+            self.chip_css_for_status(status),
         )
+        next_text = f"Next: {next_action}"
+        if blockers:
+            next_text += f" ({blockers} blocker{'s' if blockers != 1 else ''})"
         self.set_chip(
             self.mesh_next_action_label,
-            f"Next: {operator.next_action}",
+            next_text,
             "mode-pill",
         )
 
