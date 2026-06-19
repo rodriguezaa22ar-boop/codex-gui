@@ -1,6 +1,6 @@
 # Atlas Team Commander Session
 
-Date: 2026-06-18
+Date: 2026-06-19
 Project: codex-gui
 
 ## Active Commander
@@ -58,5 +58,35 @@ git pull --ff-only origin main
 
 ## Priority Right Now
 
-- Keep this session role-split enforced while the team pushes forward.
+- Keep fleet state coherent across `atlas-ubuntu`, `atlas-builder`,
+  `atlas-main`, and `atlas-cockpit`.
+- Preserve `atlas-main` local product-lane work instead of overwriting it.
+- Keep `atlas-builder` on backend/core systems only.
+- Keep `atlas-cockpit` on verification/release only.
 - Commander remains responsible for final integration and branch hygiene.
+
+## Fleet Baseline Right Now
+
+- `atlas-ubuntu`: `d731ecf`
+- `atlas-builder`: `d731ecf`
+- `atlas-cockpit`: `d731ecf`
+- `atlas-main`: `fdd206a` plus local uncommitted `codex_gui.py` work
+
+Important:
+
+- `atlas-cockpit` GitHub SSH auth has been repaired and direct `git pull` now works.
+- `atlas-main` is the active product lane. Do not auto-reset or force-pull it.
+
+## Active Work Split
+
+- `atlas-builder`
+  - branch: `lane/core-systems`
+  - target: backend readiness and orchestration hardening
+
+- `atlas-main`
+  - branch: `lane/product-pulse`
+  - target: finish launch-console readiness pulse and related source tests
+
+- `atlas-cockpit`
+  - branch: `lane/release-verify`
+  - target: fresh verification, docs accuracy, install/launch proof
