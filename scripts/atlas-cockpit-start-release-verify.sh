@@ -110,7 +110,11 @@ if [[ -f "$PID_FILE" ]] && kill -0 "$(cat "$PID_FILE" 2>/dev/null)" 2>/dev/null;
   kill "$(cat "$PID_FILE")" 2>/dev/null || true
 fi
 
-nohup bash "$SCRIPT_PATH" --run-codex >"$LOG_FILE" 2>&1 </dev/null &
+if command -v script >/dev/null 2>&1; then
+  nohup script -qefc "bash '$SCRIPT_PATH' --run-codex" "$LOG_FILE" >/dev/null 2>&1 </dev/null &
+else
+  nohup bash "$SCRIPT_PATH" --run-codex >"$LOG_FILE" 2>&1 </dev/null &
+fi
 echo "$!" >"$PID_FILE"
 
 cat <<EOF
