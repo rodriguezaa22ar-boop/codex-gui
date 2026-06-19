@@ -56,9 +56,12 @@ python3 codex_team_ops.py --json prepare --check
 python3 codex_team_ops.py --json sync
 python3 codex_team_ops.py --json launch --sync
 python3 codex_team_ops.py --json collect
-python3 codex_team_ops.py --json doctor
+python3 codex_team_ops.py --json doctor --check
 python3 codex_team_ops.py --json summary
 ```
+
+Use `doctor --check` when you need live mesh readiness in the doctor JSON. Use
+plain `doctor` for a saved-state report that does not touch remote devices.
 
 You can also use the launcher script:
 

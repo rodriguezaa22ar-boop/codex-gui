@@ -102,6 +102,11 @@ def _safe_text(value: object) -> str:
     return str(value or "").strip()
 
 
+def _short_error(exc: BaseException) -> str:
+    text = str(exc).strip() or exc.__class__.__name__
+    return text.replace("\n", " ").strip()[:240]
+
+
 def _is_local_host(host: str) -> bool:
     return _safe_text(host).lower() in {"localhost", "127.0.0.1", "::1"}
 
@@ -680,15 +685,34 @@ def _doctor_run_blockers(run: Any | None, bus_report: Any | None, inspect_error:
     return blockers
 
 
+def _doctor_probe_blockers(probe_error: str = "") -> list[dict[str, Any]]:
+    if not probe_error:
+        return []
+    return [{
+        "scope": "fleet",
+        "category": "fleet-probe-failed",
+        "status": "blocked",
+        "summary": probe_error,
+        "next_actions": [
+            "Run `codex-team-ops check` to capture the exact device probe failure.",
+            "Repair the unreachable or timing-out device, then rerun `codex-team-ops doctor --check`.",
+        ],
+    }]
+
+
 def build_team_doctor_report(
     devices: tuple[DeviceRecord, ...],
     *,
     team_root: Path | None = None,
+    probes: Mapping[str, DeviceProbe] | None = None,
+    probe_mode: str = "saved",
+    probe_error: str = "",
 ) -> dict[str, Any]:
     root = TEAM_DIR if team_root is None else team_root
-    readiness = team_readiness(devices)
+    probe_map = probes or {}
+    readiness = team_readiness(devices, probe_map)
     ready_devices = _ready_trusted_count(devices, readiness)
-    assignments = build_team_assignments(devices)
+    assignments = build_team_assignments(devices, probe_map)
     run_dirs = team_run_dirs(root)
     latest_path = latest_team_run_dir(root)
     if latest_path is None:
@@ -714,11 +738,17 @@ def build_team_doctor_report(
         summary_reviewed=summary_reviewed,
     )
     blockers = [
+        *_doctor_probe_blockers(probe_error),
         *_doctor_fleet_blockers(devices, readiness),
         *_doctor_run_blockers(run, bus_report, inspect_error),
     ]
-    status = "blocked" if inspect_error else operator.status
-    next_action = "Inspect Run" if inspect_error else operator.next_action
+    status = "blocked" if (inspect_error or probe_error) else operator.status
+    if probe_error:
+        next_action = "Check Fleet"
+    elif inspect_error:
+        next_action = "Inspect Run"
+    else:
+        next_action = operator.next_action
     actionable = status != "blocked" and (ready_devices > 0 or run is not None)
 
     return {
@@ -727,8 +757,19 @@ def build_team_doctor_report(
         "status": status,
         "summary": operator.headline,
         "next_action": next_action,
+        "probe_mode": probe_mode,
+        "checked_device_count": len(probe_map),
         "ready_device_count": ready_devices,
         "device_count": readiness.total,
+        "readiness": {
+            "summary": readiness.summary,
+            "ready": readiness.ready_count,
+            "blocked": readiness.blocked_count,
+            "review": readiness.review_count,
+            "offline": readiness.offline_count,
+            "total": readiness.total,
+            "generated": readiness.generated,
+        },
         "saved_run_count": saved_runs,
         "latest_run_id": run.run_id if run is not None else "",
         "latest_run_path": str(run.team_dir if run is not None else latest_path or ""),
@@ -846,7 +887,23 @@ def cmd_status(args: argparse.Namespace) -> int:
 
 def cmd_doctor(args: argparse.Namespace) -> int:
     devices = load_devices(DEVICES_FILE)
-    payload = build_team_doctor_report(devices)
+    probes: dict[str, DeviceProbe] = {}
+    probe_mode = "saved"
+    probe_error = ""
+    if args.check and devices:
+        probe_mode = "checked"
+        try:
+            devices, probes = check_devices(devices)
+        except Exception as exc:  # noqa: BLE001
+            probe_mode = "error"
+            probe_error = f"fleet probe failed: {_short_error(exc)}"
+
+    payload = build_team_doctor_report(
+        devices,
+        probes=probes,
+        probe_mode=probe_mode,
+        probe_error=probe_error,
+    )
     print(json.dumps(payload, indent=2, sort_keys=True))
     return 0
 
@@ -1039,6 +1096,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
     doctor = subparsers.add_parser("doctor", help="Emit fleet and latest team run doctor JSON")
     doctor.set_defaults(func=cmd_doctor)
+    doctor.add_argument("--check", action="store_true", help="Probe saved devices before emitting the doctor report")
 
     summary = subparsers.add_parser("summary", help="Write and review a team run summary")
     summary.set_defaults(func=cmd_summary)

@@ -159,9 +159,12 @@ python3 codex_team_ops.py --json prepare --check
 python3 codex_team_ops.py --json sync
 python3 codex_team_ops.py --json launch
 python3 codex_team_ops.py --json collect
-python3 codex_team_ops.py --json doctor
+python3 codex_team_ops.py --json doctor --check
 python3 codex_team_ops.py --json summary
 ```
+
+Use plain `doctor` when you want a saved-state report only; add `--check` when
+the report should probe saved devices first and include fresh readiness counts.
 
 The same command set is available as a short script:
 
