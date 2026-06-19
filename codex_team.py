@@ -276,6 +276,10 @@ def team_role_by_id(role_id: str) -> TeamRole:
 
 
 def team_role_for_device(name: str, host: str, index: int = 0) -> TeamRole:
+    name_identity = name.lower()
+    for role in TEAM_ROLES:
+        if role.match_terms and any(term in name_identity for term in role.match_terms):
+            return role
     identity = f"{name} {host}".lower()
     for role in TEAM_ROLES:
         if role.match_terms and any(term in identity for term in role.match_terms):

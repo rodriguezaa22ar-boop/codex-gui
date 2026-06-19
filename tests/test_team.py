@@ -497,6 +497,7 @@ class CodexTeamTests(unittest.TestCase):
         self.assertEqual(team_role_for_device("atlas-ubuntu", "atlas-ubuntu.tailnet").id, "coordinator")
         self.assertEqual(team_role_for_device("atlas-main", "atlas-main.tailnet").id, "ui-polish")
         self.assertEqual(team_role_for_device("atlas-cockpit", "atlas-cockpit.tailnet").id, "verifier")
+        self.assertEqual(team_role_for_device("atlas-cockpit", "localhost").id, "verifier")
         self.assertEqual(team_role_for_device("This Device Test", "localhost").id, "coordinator")
 
     def test_team_roles_markdown_documents_boundaries(self) -> None:
