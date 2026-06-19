@@ -60,6 +60,9 @@ python3 codex_team_ops.py --json doctor
 python3 codex_team_ops.py --json summary
 ```
 
+`doctor` includes sanitized readiness rows for each saved device; it does not
+emit raw SSH or probe output.
+
 You can also use the launcher script:
 
 ```bash

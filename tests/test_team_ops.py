@@ -351,6 +351,13 @@ class TeamOpsTests(unittest.TestCase):
             self.assertEqual(payload["lane_counts"]["total"], 0)
             self.assertEqual(payload["bus_health"]["status"], "not_started")
             self.assertEqual(payload["blockers"], [])
+            self.assertEqual(len(payload["readiness"]["rows"]), 1)
+            row = payload["readiness"]["rows"][0]
+            self.assertEqual(row["device_id"], "atlas-builder-1")
+            self.assertEqual(row["status"], "ready")
+            self.assertEqual(row["blocker_category"], "ready-saved")
+            self.assertEqual(row["source"], "saved")
+            self.assertTrue(row["trusted"])
         finally:
             team_ops.CONFIG_DIR = original_config
             team_ops.DEVICES_FILE = original_devices
@@ -413,11 +420,49 @@ class TeamOpsTests(unittest.TestCase):
             self.assertEqual(payload["ready_device_count"], 1)
             self.assertEqual(payload["readiness"]["ready"], 1)
             self.assertEqual(payload["blockers"], [])
+            row = payload["readiness"]["rows"][0]
+            self.assertEqual(row["device_id"], "atlas-builder-1")
+            self.assertEqual(row["source"], "probe")
+            self.assertEqual(row["status"], "ready")
+            self.assertNotIn("raw", row)
         finally:
             team_ops.CONFIG_DIR = original_config
             team_ops.DEVICES_FILE = original_devices
             team_ops.TEAM_DIR = original_team
             team_ops.LAST_TEAM_RUN_FILE = original_last
+
+    def test_doctor_readiness_rows_exclude_raw_probe_output(self) -> None:
+        ctx = self._with_workspace()
+        device = DeviceRecord(
+            id="atlas-builder-1",
+            name="atlas-builder",
+            host="atlas-builder",
+            user="ao",
+            status="blocked",
+        )
+        probe = DeviceProbe(
+            device_id=device.id,
+            status="blocked",
+            summary="SSH auth denied",
+            raw="PRIVATE_RAW_PROBE_OUTPUT",
+            returncode=255,
+            checked=123,
+        )
+
+        payload = team_ops.build_team_doctor_report(
+            (device,),
+            team_root=ctx.team_dir,
+            probes={device.id: probe},
+            probe_mode="checked",
+        )
+
+        row = payload["readiness"]["rows"][0]
+        self.assertEqual(row["device_id"], device.id)
+        self.assertEqual(row["status"], "blocked")
+        self.assertEqual(row["blocker_category"], "ssh-auth-denied")
+        self.assertEqual(row["checked"], 123)
+        self.assertNotIn("raw", row)
+        self.assertNotIn("PRIVATE_RAW_PROBE_OUTPUT", json.dumps(payload))
 
     def test_doctor_check_reports_probe_errors(self) -> None:
         ctx = self._with_workspace()
