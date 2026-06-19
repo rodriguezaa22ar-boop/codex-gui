@@ -164,6 +164,19 @@ class GuiSourceTests(unittest.TestCase):
         self.assertIn("preview.requirement_text", text)
         self.assertIn("chip_flow", text)
 
+    def test_palette_page_surfaces_readiness_summary_and_clamped_preview(self) -> None:
+        source = Path("codex_gui.py").read_text(encoding="utf-8")
+        tree = ast.parse(source)
+
+        build_palette = _method_named(tree, "build_palette_page")
+        render_palette = _method_named(tree, "render_action_palette")
+
+        self.assertIn("palette_readiness_label", ast.unparse(build_palette))
+        self.assertIn("set_lines(4)", ast.unparse(build_palette))
+        self.assertIn("Pango.EllipsizeMode.MIDDLE", ast.unparse(build_palette))
+        self.assertIn("palette_readiness_label", ast.unparse(render_palette))
+        self.assertIn("need setup", ast.unparse(render_palette))
+
     def test_quality_rows_surface_exit_and_duration_metadata(self) -> None:
         source = Path("codex_gui.py").read_text(encoding="utf-8")
         tree = ast.parse(source)
@@ -176,6 +189,29 @@ class GuiSourceTests(unittest.TestCase):
         self.assertIn("duration_ms", text)
         self.assertIn("set_tooltip_text(item.command_text())", text)
         self.assertIn("chip_flow", text)
+
+    def test_quality_page_surfaces_pass_fail_counts(self) -> None:
+        source = Path("codex_gui.py").read_text(encoding="utf-8")
+        tree = ast.parse(source)
+
+        build_quality = _method_named(tree, "build_quality_page")
+        render_quality = _method_named(tree, "render_quality_gate")
+
+        self.assertIn("quality_page_pass_label", ast.unparse(build_quality))
+        self.assertIn("quality_page_fail_label", ast.unparse(build_quality))
+        self.assertIn("pass_count", ast.unparse(render_quality))
+        self.assertIn("fail_count", ast.unparse(render_quality))
+
+    def test_mesh_launch_console_surfaces_decision_copy(self) -> None:
+        source = Path("codex_gui.py").read_text(encoding="utf-8")
+        tree = ast.parse(source)
+
+        build_mesh = _method_named(tree, "build_mesh_page")
+        render_console = _method_named(tree, "render_mesh_launch_console")
+
+        self.assertIn("mesh_launch_console_decision_label", ast.unparse(build_mesh))
+        self.assertIn("Decision:", ast.unparse(render_console))
+        self.assertIn("blocked/offline", ast.unparse(render_console))
 
     def test_workstation_pages_have_stateful_next_step_banners(self) -> None:
         source = Path("codex_gui.py").read_text(encoding="utf-8")

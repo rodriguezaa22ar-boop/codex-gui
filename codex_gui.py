@@ -2093,6 +2093,8 @@ class CodexControl(Gtk.Application):
         for group, count in action_groups():
             self.flow_append(groups, self.chip_label(f"{group} {count}", "chip"))
         summary.append(groups)
+        self.palette_readiness_label = self.label("Readiness: calculating actions", "action-preview-detail", wrap=True)
+        summary.append(self.palette_readiness_label)
         box.append(summary)
 
         self.palette_next_step_banner = self.next_step_banner(
@@ -2149,6 +2151,8 @@ class CodexControl(Gtk.Application):
         self.palette_preview_summary_label = self.label("Select an action to preview its effect.", "action-preview-detail", wrap=True)
         self.palette_preview_requirements_label = self.label("Ready", "action-preview-detail", wrap=True)
         self.palette_preview_command_label = self.label("-", "action-preview-command", wrap=True)
+        self.palette_preview_command_label.set_lines(4)
+        self.palette_preview_command_label.set_ellipsize(Pango.EllipsizeMode.MIDDLE)
         preview.append(self.palette_preview_summary_label)
         preview.append(self.palette_preview_requirements_label)
         preview.append(self.palette_preview_command_label)
@@ -2385,10 +2389,14 @@ class CodexControl(Gtk.Application):
         self.quality_page_summary_label.set_hexpand(True)
         self.quality_page_score_label = self.chip_label("not run", "chip")
         self.quality_page_status_label = self.chip_label("idle", "chip")
+        self.quality_page_pass_label = self.chip_label("0 pass", "chip")
+        self.quality_page_fail_label = self.chip_label("0 fail", "chip")
         header.append(self.quality_page_summary_label)
         quality_chip_flow = self.flow_row()
         self.flow_append(quality_chip_flow, self.quality_page_score_label)
         self.flow_append(quality_chip_flow, self.quality_page_status_label)
+        self.flow_append(quality_chip_flow, self.quality_page_pass_label)
+        self.flow_append(quality_chip_flow, self.quality_page_fail_label)
         header.append(quality_chip_flow)
         summary.append(header)
         self.quality_page_detail_label = self.label("Plan is ready. Run Gate to create a report.", "quality-check-detail", wrap=True)
@@ -3947,9 +3955,11 @@ class CodexControl(Gtk.Application):
         self.mesh_launch_console_status_label = self.label("No team staged", "muted", wrap=True)
         self.mesh_launch_console_meta_label = self.label("0 lanes", "muted", wrap=True)
         self.mesh_launch_console_prompt_label = self.label("Mission preview unavailable", "muted", wrap=True)
+        self.mesh_launch_console_decision_label = self.label("Decision: check fleet before launch", "next-step-detail", wrap=True)
         launch_header.append(self.mesh_launch_console_status_label)
         launch_header.append(self.mesh_launch_console_meta_label)
         launch_header.append(self.mesh_launch_console_prompt_label)
+        launch_header.append(self.mesh_launch_console_decision_label)
         launch_console.append(launch_header)
         self.mesh_launch_stage_chips: dict[str, Gtk.Label] = {}
         stage_flow = self.flow_row()
@@ -4623,6 +4633,18 @@ class CodexControl(Gtk.Application):
             )
         if hasattr(self, "mesh_launch_console_prompt_label"):
             self.mesh_launch_console_prompt_label.set_text(f"Mission: {prompt_preview}")
+        if hasattr(self, "mesh_launch_console_decision_label"):
+            blocked = readiness.blocked_count + readiness.offline_count
+            if not assignments:
+                decision = "Decision: no launchable lanes; check fleet or add a trusted ready device."
+            elif not prepared:
+                decision = f"Decision: prepare {len(assignments)} lane(s) across {len(self.ready_mesh_devices())} ready device(s)."
+            elif blocked:
+                decision = f"Decision: review {blocked} blocked/offline device(s) before launch."
+            else:
+                decision = f"Decision: {operator.next_action}; handoff bus {operator.bus_text}."
+            self.mesh_launch_console_decision_label.set_text(decision)
+            self.mesh_launch_console_decision_label.set_tooltip_text(decision)
         self.refresh_mesh_launch_stage_strip(run_status, prepared=prepared, operator=operator)
         if not assignments:
             row = Gtk.ListBoxRow()
@@ -7053,6 +7075,12 @@ class CodexControl(Gtk.Application):
         plan = self.current_quality_plan()
         self.quality_plan = plan
         report = self.active_quality_report(plan)
+        if report is not None and not self.quality_running:
+            pass_count = sum(1 for check in report.checks if check.status == "passed")
+            fail_count = sum(1 for check in report.checks if check.status == "failed")
+        else:
+            pass_count = 0
+            fail_count = 0
         if self.quality_running:
             summary = f"Running {len(plan.checks)} quality checks..."
             status = "running"
@@ -7095,6 +7123,16 @@ class CodexControl(Gtk.Application):
             self.quality_page_summary_label.set_text(summary)
             self.set_chip(self.quality_page_score_label, score, self.chip_css_for_status(status))
             self.set_chip(self.quality_page_status_label, status, self.chip_css_for_status(status))
+            self.set_chip(
+                self.quality_page_pass_label,
+                f"{pass_count} pass",
+                "chip-strong" if pass_count else "chip",
+            )
+            self.set_chip(
+                self.quality_page_fail_label,
+                f"{fail_count} fail",
+                "chip-danger" if fail_count else "chip",
+            )
         if hasattr(self, "quality_page_detail_label"):
             self.quality_page_detail_label.set_text(detail)
         if hasattr(self, "quality_next_step_banner"):
@@ -8001,6 +8039,24 @@ class CodexControl(Gtk.Application):
                 self.render_action_list(self.palette_list, ranked[:80])
         finally:
             self.rendering_actions = False
+        if hasattr(self, "palette_readiness_label"):
+            context = self.palette_context()
+            visible = ranked[:80]
+            previews = [
+                build_palette_preview(
+                    action,
+                    context,
+                    self.command_for_palette_action(action.id),
+                    prompt_redacted=bool(self.selected_prompt()),
+                )
+                for action in visible
+            ]
+            ready = sum(1 for preview in previews if preview.ready)
+            needs = len(previews) - ready
+            query_text = self.action_query.strip() or "all actions"
+            self.palette_readiness_label.set_text(
+                f"{ready} ready | {needs} need setup | showing {len(visible)} for {query_text}"
+            )
         self.update_action_detail()
 
     def update_action_detail(self) -> None:
