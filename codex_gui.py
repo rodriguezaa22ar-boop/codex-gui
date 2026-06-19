@@ -1516,6 +1516,13 @@ class CodexControl(Gtk.Application):
             self.mesh_filter_mode = "all"
         self.mesh_team_only = bool(self.config.get("mesh_team_only", False))
         self.focus_mode = bool(self.config.get("focus_mode", False))
+        self.mesh_live_refresh = bool(self.config.get("mesh_live_refresh", True))
+        try:
+            self.mesh_live_refresh_seconds = max(10, min(300, int(self.config.get("mesh_live_refresh_seconds", 30))))
+        except (TypeError, ValueError):
+            self.mesh_live_refresh_seconds = 30
+        self.mesh_live_refresh_busy = False
+        self.mesh_live_refresh_timer_id = 0
         self.window: Gtk.ApplicationWindow | None = None
         self.status_label: Gtk.Label | None = None
         self.stack: Gtk.Stack | None = None
@@ -1661,6 +1668,7 @@ class CodexControl(Gtk.Application):
         self.install_actions()
         self.refresh_all()
         self.apply_focus_mode()
+        self.ensure_mesh_live_refresh_timer()
         GLib.idle_add(self.on_run_setup_check)
         self.save_current_state()
 
@@ -3820,6 +3828,15 @@ class CodexControl(Gtk.Application):
         stream.add_css_class("team-stream-panel")
         self.mesh_team_chat_status_label = self.label("No team stream yet", "muted", wrap=True)
         stream.append(self.mesh_team_chat_status_label)
+        live_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        live_row.append(self.label("Live refresh", "muted"))
+        self.mesh_live_refresh_switch = Gtk.Switch()
+        self.mesh_live_refresh_switch.set_active(self.mesh_live_refresh)
+        self.mesh_live_refresh_switch.connect("state-set", self.on_mesh_live_refresh_toggled)
+        live_row.append(self.mesh_live_refresh_switch)
+        self.mesh_live_refresh_label = self.label(f"every {self.mesh_live_refresh_seconds}s", "muted")
+        live_row.append(self.mesh_live_refresh_label)
+        stream.append(live_row)
         self.mesh_chat_view = self.code_text_view(editable=False)
         self.mesh_team_chat_buffer = self.mesh_chat_view.get_buffer()
         chat_scroll = Gtk.ScrolledWindow()
@@ -4302,6 +4319,8 @@ class CodexControl(Gtk.Application):
             self.set_text(self.mesh_team_chat_buffer, "No team run loaded.\nPrepare a team to begin a shared stream.")
             if hasattr(self, "mesh_team_chat_status_label"):
                 self.mesh_team_chat_status_label.set_text("No team run loaded")
+            if hasattr(self, "mesh_live_refresh_label"):
+                self.mesh_live_refresh_label.set_text(f"{'on' if self.mesh_live_refresh else 'off'} | no team loaded")
             return
         text = read_team_chat(self.mesh_team_dir).strip()
         if not text:
@@ -4311,19 +4330,65 @@ class CodexControl(Gtk.Application):
             self.mesh_team_chat_status_label.set_text(
                 f"{self.mesh_team_run_id} | stream active | {len(self.mesh_team_assignments)} lane(s)"
             )
+        if hasattr(self, "mesh_live_refresh_label"):
+            self.mesh_live_refresh_label.set_text(f"{'on' if self.mesh_live_refresh else 'off'} | every {self.mesh_live_refresh_seconds}s")
 
-    def on_refresh_team_chat(self, _button: Gtk.Button) -> None:
+    def finish_team_chat_refresh(self, status_text: str = "") -> bool:
+        self.mesh_live_refresh_busy = False
+        self.render_mesh_team_chat()
+        self.render_mesh_detail()
+        if status_text:
+            self.set_status(status_text)
+        return False
+
+    def refresh_team_chat_async(self, *, status_text: str = "Team stream refreshed", quiet: bool = False) -> None:
         if self.mesh_team_dir is None or not self.mesh_team_run_id:
             self.render_mesh_team_chat()
-            self.set_status("No team stream to refresh", "warn")
+            if not quiet:
+                self.set_status("No team stream to refresh", "warn")
+            return
+        if self.mesh_live_refresh_busy:
+            if not quiet:
+                self.set_status("Team stream refresh already running", "warn")
             return
 
+        team_dir = self.mesh_team_dir
+        run_id = self.mesh_team_run_id
+        self.mesh_live_refresh_busy = True
+
         def worker() -> None:
-            self.collect_team_chat_from_devices(self.mesh_team_dir, self.mesh_team_run_id)
-            GLib.idle_add(self.render_mesh_team_chat)
+            try:
+                self.collect_team_chat_from_devices(team_dir, run_id)
+            finally:
+                GLib.idle_add(self.finish_team_chat_refresh, "" if quiet else status_text)
 
         threading.Thread(target=worker, daemon=True).start()
-        self.set_status("Refreshing team stream")
+        if not quiet:
+            self.set_status("Refreshing team stream")
+
+    def on_refresh_team_chat(self, _button: Gtk.Button) -> None:
+        self.refresh_team_chat_async(status_text="Team stream refreshed")
+
+    def on_mesh_live_refresh_toggled(self, _switch: Gtk.Switch, state: bool) -> bool:
+        self.mesh_live_refresh = bool(state)
+        self.ensure_mesh_live_refresh_timer()
+        self.save_current_state()
+        self.render_mesh_team_chat()
+        self.set_status(f"Mesh live refresh {'enabled' if self.mesh_live_refresh else 'disabled'}")
+        return False
+
+    def ensure_mesh_live_refresh_timer(self) -> None:
+        if self.mesh_live_refresh_timer_id:
+            return
+        self.mesh_live_refresh_timer_id = GLib.timeout_add_seconds(
+            self.mesh_live_refresh_seconds,
+            self.on_mesh_live_refresh_tick,
+        )
+
+    def on_mesh_live_refresh_tick(self) -> bool:
+        if self.mesh_live_refresh:
+            self.refresh_team_chat_async(status_text="Team stream auto-refresh", quiet=True)
+        return True
 
     def on_sync_team_chat(self, _button: Gtk.Button) -> None:
         if self.mesh_team_dir is None or not self.mesh_team_assignments:
@@ -7263,6 +7328,8 @@ class CodexControl(Gtk.Application):
             "focus_mode": self.focus_mode,
             "mesh_filter_mode": self.mesh_filter_mode,
             "mesh_team_only": self.mesh_team_only,
+            "mesh_live_refresh": self.mesh_live_refresh,
+            "mesh_live_refresh_seconds": self.mesh_live_refresh_seconds,
             "layout": layout_to_config(self.current_layout_state()),
         })
 
