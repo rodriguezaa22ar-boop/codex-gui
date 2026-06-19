@@ -2095,6 +2095,14 @@ class CodexControl(Gtk.Application):
         summary.append(groups)
         box.append(summary)
 
+        self.palette_next_step_banner = self.next_step_banner(
+            "Select a command",
+            "Search narrows to ready actions first; Execute runs the highlighted action.",
+            "Execute",
+            self.on_execute_selected_action,
+        )
+        box.append(self.palette_next_step_banner)
+
         paned = self.configure_paned(Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL), "palette", 540)
 
         self.palette_list = Gtk.ListBox()
@@ -2385,6 +2393,13 @@ class CodexControl(Gtk.Application):
         summary.append(header)
         self.quality_page_detail_label = self.label("Plan is ready. Run Gate to create a report.", "quality-check-detail", wrap=True)
         summary.append(self.quality_page_detail_label)
+        self.quality_next_step_banner = self.next_step_banner(
+            "Run the gate",
+            "The current plan is ready; run checks before handing this workstation state to another lane.",
+            "Run Gate",
+            self.on_run_quality_gate,
+        )
+        summary.append(self.quality_next_step_banner)
         box.append(summary)
 
         paned = self.configure_paned(Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL), "quality", 470)
@@ -3698,6 +3713,50 @@ class CodexControl(Gtk.Application):
         label.set_tooltip_text(text)
         return label
 
+    def next_step_banner(
+        self,
+        title: str,
+        detail: str,
+        action_label: str,
+        handler: Callable[[Gtk.Button], None],
+    ) -> Gtk.Box:
+        banner = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        banner.add_css_class("next-step-banner")
+        copy = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=3)
+        copy.set_hexpand(True)
+        title_label = self.label(title, "next-step-title", wrap=True)
+        detail_label = self.label(detail, "next-step-detail", wrap=True)
+        copy.append(title_label)
+        copy.append(detail_label)
+        button = self.make_button(action_label, "go-next-symbolic")
+        button.add_css_class("primary")
+        button.connect("clicked", handler)
+        banner.append(copy)
+        banner.append(button)
+        banner.title_label = title_label
+        banner.detail_label = detail_label
+        banner.action_button = button
+        return banner
+
+    def update_next_step_banner(
+        self,
+        banner: Gtk.Widget,
+        title: str,
+        detail: str,
+        action_label: str | None = None,
+    ) -> None:
+        title_label = getattr(banner, "title_label", None)
+        detail_label = getattr(banner, "detail_label", None)
+        action_button = getattr(banner, "action_button", None)
+        if title_label is not None:
+            title_label.set_text(title)
+            title_label.set_tooltip_text(title)
+        if detail_label is not None:
+            detail_label.set_text(detail)
+            detail_label.set_tooltip_text(detail)
+        if action_label is not None and action_button is not None:
+            self.set_button_text(action_button, action_label)
+
     def build_terminal_widget(self) -> Gtk.Widget:
         if Vte is None:
             box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
@@ -3870,6 +3929,13 @@ class CodexControl(Gtk.Application):
         team.add_css_class("team-panel")
         self.mesh_team_status_label = self.label("No team package yet", "muted", wrap=True)
         team.append(self.mesh_team_status_label)
+        self.mesh_next_step_banner = self.next_step_banner(
+            "Probe the fleet",
+            "Run Check Fleet to confirm which trusted devices can accept Codex lanes.",
+            "Check Fleet",
+            self.on_check_fleet,
+        )
+        team.append(self.mesh_next_step_banner)
         launch_console = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
         launch_console.add_css_class("workflow-panel")
         launch_header = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
@@ -4345,6 +4411,19 @@ class CodexControl(Gtk.Application):
             next_text,
             "mode-pill",
         )
+        if hasattr(self, "mesh_next_step_banner"):
+            detail = (
+                f"{readiness.ready_count} ready of {readiness.total} device(s). "
+                f"{lane_text}; bus {bus_text}."
+            )
+            if blockers:
+                detail += f" Resolve {blockers} blocker{'s' if blockers != 1 else ''} before launch."
+            self.update_next_step_banner(
+                self.mesh_next_step_banner,
+                next_action,
+                detail,
+                "Check Fleet",
+            )
 
     def render_mesh_detail(self) -> None:
         if not hasattr(self, "mesh_summary_label"):
@@ -6907,16 +6986,32 @@ class CodexControl(Gtk.Application):
             status = "running"
             score = "running"
             detail = f"Project: {plan.project} | checks: {len(plan.checks)} | report pending"
+            next_title = "Gate running"
+            next_detail = "Checks are in progress; wait for the report before copying a handoff."
+            next_action = "Run Gate"
         elif report is not None:
             summary = report.summary()
             status = report.status
             score = f"score {report.score}"
             detail = f"Report saved at {QUALITY_FILE} | checks: {len(report.checks)} | project: {report.project}"
+            failed = [check.label for check in report.checks if check.status == "failed"]
+            if failed:
+                next_title = "Fix failing checks"
+                next_detail = "Failed: " + ", ".join(failed[:3])
+                if len(failed) > 3:
+                    next_detail += f", +{len(failed) - 3} more"
+            else:
+                next_title = "Report is clean"
+                next_detail = "Copy the report into the lane handoff or rerun after additional edits."
+            next_action = "Run Gate"
         else:
             summary = plan.summary()
             status = "ready"
             score = "not run"
             detail = f"Plan: {len(plan.checks)} check(s) | project: {plan.project} | report not run"
+            next_title = "Run the gate"
+            next_detail = "The current plan is ready; run checks before handing this workstation state to another lane."
+            next_action = "Run Gate"
         if hasattr(self, "quality_status_label"):
             self.quality_status_label.set_text(summary)
         if hasattr(self, "quality_signal_label"):
@@ -6927,6 +7022,8 @@ class CodexControl(Gtk.Application):
             self.set_chip(self.quality_page_status_label, status, self.chip_css_for_status(status))
         if hasattr(self, "quality_page_detail_label"):
             self.quality_page_detail_label.set_text(detail)
+        if hasattr(self, "quality_next_step_banner"):
+            self.update_next_step_banner(self.quality_next_step_banner, next_title, next_detail, next_action)
         if hasattr(self, "quality_compact_list"):
             self.render_quality_check_rows(self.quality_compact_list, compact=True)
         if hasattr(self, "quality_page_list"):
@@ -7896,6 +7993,13 @@ class CodexControl(Gtk.Application):
                 self.palette_preview_command_label.set_text("-")
             if hasattr(self, "palette_compact_preview_label"):
                 self.palette_compact_preview_label.set_text("Preview: select an action")
+            if hasattr(self, "palette_next_step_banner"):
+                self.update_next_step_banner(
+                    self.palette_next_step_banner,
+                    "Select a command",
+                    "Search narrows to ready actions first; Execute runs the highlighted action.",
+                    "Execute",
+                )
             self.render_palette_history(None)
             return
         command = self.command_for_palette_action(action.id)
@@ -7919,6 +8023,14 @@ class CodexControl(Gtk.Application):
             command_hint = f" | {preview.command_text}" if preview.command_text else ""
             self.palette_compact_preview_label.set_text(
                 f"Preview: {preview.surface} | {preview.status} | {preview.risk}{command_hint}"
+            )
+        if hasattr(self, "palette_next_step_banner"):
+            title = f"Ready: {action.title}" if preview.ready else f"Needs setup: {action.title}"
+            self.update_next_step_banner(
+                self.palette_next_step_banner,
+                title,
+                f"{preview.surface} | {preview.risk} | {preview.requirement_text()}",
+                "Execute",
             )
         self.render_palette_history(action)
 

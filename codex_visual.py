@@ -72,6 +72,9 @@ REQUIRED_SELECTORS = (
     ".action-history",
     ".action-history-title",
     ".chip-flow",
+    ".next-step-banner",
+    ".next-step-title",
+    ".next-step-detail",
     ".device-mesh",
     ".device-row",
     ".mesh-detail",
@@ -258,6 +261,23 @@ button:hover {
   background: transparent;
   border-top: 1px solid #20313d;
   padding-top: 9px;
+}
+
+.next-step-banner {
+  background: @cc_panel_alt;
+  border: 1px solid @cc_border_strong;
+  border-left: 3px solid @cc_accent;
+  border-radius: 8px;
+  padding: 10px;
+}
+
+.next-step-title {
+  color: @cc_text;
+  font-weight: 800;
+}
+
+.next-step-detail {
+  color: @cc_muted;
 }
 
 .mesh-summary-actions {

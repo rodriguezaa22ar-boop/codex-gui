@@ -158,6 +158,28 @@ class GuiSourceTests(unittest.TestCase):
         self.assertIn("set_tooltip_text(item.command_text())", text)
         self.assertIn("chip_flow", text)
 
+    def test_workstation_pages_have_stateful_next_step_banners(self) -> None:
+        source = Path("codex_gui.py").read_text(encoding="utf-8")
+        tree = ast.parse(source)
+
+        next_step = _method_named(tree, "next_step_banner")
+        update_next_step = _method_named(tree, "update_next_step_banner")
+        build_palette = _method_named(tree, "build_palette_page")
+        build_mesh = _method_named(tree, "build_mesh_page")
+        build_quality = _method_named(tree, "build_quality_page")
+        render_palette = _method_named(tree, "render_palette_preview")
+        refresh_mesh = _method_named(tree, "refresh_mesh_operator_chips")
+        render_quality = _method_named(tree, "render_quality_gate")
+
+        self.assertIn("next-step-banner", ast.unparse(next_step))
+        self.assertIn("set_button_text", ast.unparse(update_next_step))
+        self.assertIn("palette_next_step_banner", ast.unparse(build_palette))
+        self.assertIn("mesh_next_step_banner", ast.unparse(build_mesh))
+        self.assertIn("quality_next_step_banner", ast.unparse(build_quality))
+        self.assertIn("update_next_step_banner", ast.unparse(render_palette))
+        self.assertIn("update_next_step_banner", ast.unparse(refresh_mesh))
+        self.assertIn("update_next_step_banner", ast.unparse(render_quality))
+
 
 if __name__ == "__main__":
     unittest.main()
