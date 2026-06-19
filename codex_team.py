@@ -197,10 +197,10 @@ def team_operator_summary(
         bus_text += f" of {bus_total}"
     elif legacy_failures:
         bus_text += f" | {legacy_failures} failure(s)"
-    if bus_report.failed_count or bus_report.stale_count or legacy_failures:
-        return TeamOperatorSummary(run_status.summary_line(), "Repair Bus", "blocked", lane_text, bus_text)
     if summary_reviewed and collected:
         return TeamOperatorSummary(run_status.summary_line(), "Prepare Team", "ready", lane_text, bus_text)
+    if bus_report.failed_count or bus_report.stale_count or legacy_failures:
+        return TeamOperatorSummary(run_status.summary_line(), "Repair Bus", "blocked", lane_text, bus_text)
     if prepared == lane_count and lane_count:
         return TeamOperatorSummary(run_status.summary_line(), "Launch Team", "ready", lane_text, bus_text)
     if collected >= lane_count and lane_count:

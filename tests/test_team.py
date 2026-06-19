@@ -436,6 +436,41 @@ class CodexTeamTests(unittest.TestCase):
         self.assertEqual(legacy_summary.next_action, "Repair Bus")
         self.assertIn("failure", legacy_summary.bus_text)
 
+    def test_team_operator_summary_closes_reviewed_stale_bus_run(self) -> None:
+        run_status = TeamRunStatus(
+            run_id="team-one",
+            team_dir=Path("/tmp/team-one"),
+            project="/work/codex-gui",
+            created="2026-06-18T12:00:00-07:00",
+            assignments=(),
+            lanes=(
+                TeamLaneStatus("backend", "Backend", "atlas-builder", "backend", "collected", "handoff"),
+                TeamLaneStatus("ui", "UI", "atlas-main", "ui", "prepared", "waiting"),
+            ),
+        )
+        bus = TeamBusReport(
+            run_id="team-one",
+            team_dir="/tmp/team-one",
+            bus_path="/tmp/team-one/out/handoff-bus.md",
+            sent=1,
+            failures=(),
+            generated="2026-06-18T12:10:00-07:00",
+            generated_epoch=1710000000,
+            targets=(
+                TeamBusTargetStatus("backend", "atlas-builder", "atlas-builder", "synced", "ok"),
+                TeamBusTargetStatus("ui", "atlas-main", "atlas-main", "stale", "checksum mismatch"),
+            ),
+        )
+
+        blocked = team_operator_summary(run_status, bus, summary_reviewed=False)
+        reviewed = team_operator_summary(run_status, bus, summary_reviewed=True)
+
+        self.assertEqual(blocked.next_action, "Repair Bus")
+        self.assertEqual(blocked.status, "blocked")
+        self.assertEqual(reviewed.next_action, "Prepare Team")
+        self.assertEqual(reviewed.status, "ready")
+        self.assertIn("stale", reviewed.bus_text)
+
     def test_write_and_load_bus_report_with_targets(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             team_dir = Path(tmp) / "team-one"
