@@ -1938,6 +1938,12 @@ class CodexControl(Gtk.Application):
             label.add_css_class(css)
         return label
 
+    def muted_meta_label(self, text: str) -> Gtk.Label:
+        label = self.label(text, "muted")
+        label.set_ellipsize(Pango.EllipsizeMode.MIDDLE)
+        label.set_tooltip_text(text)
+        return label
+
     def make_dropdown(self, values: list[tuple[str, str]], active_id: str) -> Gtk.DropDown:
         labels = [label for _item_id, label in values]
         dropdown = Gtk.DropDown.new(Gtk.StringList.new(labels), None)
@@ -3656,6 +3662,9 @@ class CodexControl(Gtk.Application):
     def chip_label(self, text: str, css: str = "chip") -> Gtk.Label:
         label = Gtk.Label(label=text)
         label.add_css_class(css)
+        label.set_ellipsize(Pango.EllipsizeMode.END)
+        label.set_max_width_chars(24)
+        label.set_tooltip_text(text)
         return label
 
     def build_terminal_widget(self) -> Gtk.Widget:
@@ -6198,6 +6207,7 @@ class CodexControl(Gtk.Application):
 
     def set_chip(self, label: Gtk.Label, text: str, css: str) -> None:
         label.set_text(text)
+        label.set_tooltip_text(text)
         for item in ["chip", "chip-strong", "chip-danger", "mode-pill"]:
             label.remove_css_class(item)
         label.add_css_class(css)
