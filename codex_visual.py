@@ -245,6 +245,24 @@ button:hover {
   background: #1d2a35;
 }
 
+.command-grid button {
+  min-width: 0;
+}
+
+.command-grid label {
+  font-weight: 700;
+}
+
+.workflow-panel {
+  background: transparent;
+  border-top: 1px solid #20313d;
+  padding-top: 9px;
+}
+
+.mesh-summary-actions {
+  margin-top: 2px;
+}
+
 .primary {
   background: @cc_accent;
   color: #ffffff;

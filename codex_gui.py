@@ -25,7 +25,7 @@ import threading
 import warnings
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import gi
 
@@ -1760,11 +1760,51 @@ class CodexControl(Gtk.Application):
         image = Gtk.Image.new_from_icon_name(icon_name)
         image.set_pixel_size(15)
         text = Gtk.Label(label=label)
+        text.set_ellipsize(Pango.EllipsizeMode.END)
+        text.set_max_width_chars(16)
         button.text_label = text
         content.append(image)
         content.append(text)
         button.set_child(content)
         return button
+
+    def command_button(
+        self,
+        label: str,
+        handler: Callable[[Gtk.Button], None],
+        *,
+        primary: bool = False,
+        icon_name: str | None = None,
+        tooltip: str | None = None,
+    ) -> Gtk.Button:
+        button = self.make_button(label, icon_name)
+        button.add_css_class("primary" if primary else "secondary")
+        if tooltip:
+            button.set_tooltip_text(tooltip)
+        button.connect("clicked", handler)
+        return button
+
+    def command_grid(
+        self,
+        actions: list[tuple[str, Callable[[Gtk.Button], None], bool, str | None, str | None]],
+        *,
+        columns: int = 4,
+    ) -> Gtk.Grid:
+        grid = Gtk.Grid(column_spacing=8, row_spacing=8)
+        grid.add_css_class("command-grid")
+        grid.set_column_homogeneous(True)
+        grid.command_buttons = []
+        for index, (label, handler, primary, icon_name, tooltip) in enumerate(actions):
+            button = self.command_button(label, handler, primary=primary, icon_name=icon_name, tooltip=tooltip)
+            grid.command_buttons.append(button)
+            grid.attach(
+                button,
+                index % columns,
+                index // columns,
+                1,
+                1,
+            )
+        return grid
 
     def set_button_text(self, button: Gtk.Button, label: str) -> None:
         text_label = getattr(button, "text_label", None)
@@ -2305,6 +2345,8 @@ class CodexControl(Gtk.Application):
         header.append(self.quality_page_score_label)
         header.append(self.quality_page_status_label)
         summary.append(header)
+        self.quality_page_detail_label = self.label("Plan is ready. Run Gate to create a report.", "quality-check-detail", wrap=True)
+        summary.append(self.quality_page_detail_label)
         box.append(summary)
 
         paned = self.configure_paned(Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL), "quality", 470)
@@ -3243,6 +3285,8 @@ class CodexControl(Gtk.Application):
         panel.add_css_class("quality-gate")
         self.quality_status_label = self.label("No quality report yet", "muted", wrap=True)
         panel.append(self.quality_status_label)
+        self.quality_signal_label = self.label("Plan ready", "quality-check-detail", wrap=True)
+        panel.append(self.quality_signal_label)
 
         controls = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
         for label, handler, primary in [
@@ -3672,23 +3716,19 @@ class CodexControl(Gtk.Application):
         ]:
             top.append(chip)
         summary.append(top)
-        actions = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-        for label, handler, primary in [
-            ("Refresh", self.on_refresh_mesh, False),
-            ("Discover Tailnet", self.on_discover_tailnet, True),
-            ("Check Fleet", self.on_check_fleet, False),
-            ("Prepare Team", self.on_prepare_mesh_team, True),
-            ("Launch Team", self.on_launch_mesh_team, False),
-            ("Collect Team", self.on_collect_mesh_team, False),
-            ("Save Memory", self.on_save_memory, True),
-            ("Copy Memory", self.on_copy_memory, False),
-            ("Open Memory", self.on_open_memory, False),
-            ("Open Devices", self.on_open_devices, False),
-        ]:
-            button = Gtk.Button(label=label)
-            button.add_css_class("primary" if primary else "secondary")
-            button.connect("clicked", handler)
-            actions.append(button)
+        actions = self.command_grid([
+            ("Refresh", self.on_refresh_mesh, False, "view-refresh-symbolic", "Refresh mesh state."),
+            ("Discover", self.on_discover_tailnet, True, "network-workgroup-symbolic", "Import Tailnet devices."),
+            ("Check Fleet", self.on_check_fleet, False, "emblem-ok-symbolic", "Probe trusted devices."),
+            ("Prepare", self.on_prepare_mesh_team, True, "document-new-symbolic", "Create team lanes and prompts."),
+            ("Launch", self.on_launch_mesh_team, False, "media-playback-start-symbolic", "Launch prepared team lanes."),
+            ("Collect", self.on_collect_mesh_team, False, "folder-download-symbolic", "Collect remote lane outputs."),
+            ("Save Memory", self.on_save_memory, True, "document-save-symbolic", "Persist portable memory."),
+            ("Copy Memory", self.on_copy_memory, False, "edit-copy-symbolic", "Copy portable memory."),
+            ("Open Memory", self.on_open_memory, False, "folder-open-symbolic", "Open memory file."),
+            ("Open Devices", self.on_open_devices, False, "document-open-symbolic", "Open devices file."),
+        ], columns=5)
+        actions.add_css_class("mesh-summary-actions")
         summary.append(actions)
         box.append(summary)
 
@@ -3722,21 +3762,21 @@ class CodexControl(Gtk.Application):
         ]:
             form.append(self.form_row(label, widget))
         device_buttons = Gtk.Grid(column_spacing=8, row_spacing=8)
+        device_buttons.add_css_class("command-grid")
+        device_buttons.set_column_homogeneous(True)
         self.mesh_selected_device_buttons: list[Gtk.Button] = []
-        for index, (label, handler, primary) in enumerate([
-            ("New", self.on_new_device_form, False),
-            ("Add/Update", self.on_add_device, True),
-            ("Remove", self.on_remove_device, False),
-            ("Check", self.on_check_selected_device, True),
-            ("Check Visible", self.on_check_visible_devices, True),
-            ("Copy Test", self.on_copy_device_test, False),
-            ("Copy Launch", self.on_copy_device_launch, False),
-            ("Sync Memory", self.on_sync_memory_to_device, False),
-            ("Open Session", self.on_open_device_session, False),
+        for index, (label, handler, primary, icon_name, tooltip) in enumerate([
+            ("New", self.on_new_device_form, False, "list-add-symbolic", "Clear the device form."),
+            ("Add/Update", self.on_add_device, True, "document-save-symbolic", "Save this device record."),
+            ("Remove", self.on_remove_device, False, "edit-delete-symbolic", "Remove the selected device."),
+            ("Check", self.on_check_selected_device, True, "emblem-ok-symbolic", "Probe the selected device."),
+            ("Check Visible", self.on_check_visible_devices, True, "view-list-symbolic", "Probe devices matching current filters."),
+            ("Copy Test", self.on_copy_device_test, False, "edit-copy-symbolic", "Copy the selected device test command."),
+            ("Copy Launch", self.on_copy_device_launch, False, "utilities-terminal-symbolic", "Copy the selected device launch command."),
+            ("Sync Memory", self.on_sync_memory_to_device, False, "send-to-symbolic", "Push portable memory to the selected device."),
+            ("Open Session", self.on_open_device_session, False, "utilities-terminal-symbolic", "Open a terminal session for the selected device."),
         ]):
-            button = Gtk.Button(label=label)
-            button.add_css_class("primary" if primary else "secondary")
-            button.connect("clicked", handler)
+            button = self.command_button(label, handler, primary=primary, icon_name=icon_name, tooltip=tooltip)
             if label in {"Remove", "Check", "Copy Test", "Copy Launch", "Sync Memory", "Open Session"}:
                 button.set_tooltip_text("Select a device first.")
                 self.mesh_selected_device_buttons.append(button)
@@ -3787,33 +3827,45 @@ class CodexControl(Gtk.Application):
         team.add_css_class("team-panel")
         self.mesh_team_status_label = self.label("No team package yet", "muted", wrap=True)
         team.append(self.mesh_team_status_label)
-        team_buttons = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        team_actions = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        team_actions.add_css_class("workflow-panel")
+        team_actions.append(self.label("Team Workflow", "section"))
+        team_actions.append(self.label("Probe, prepare, launch, collect", "muted", wrap=True))
         self.mesh_prepared_team_buttons: list[Gtk.Button] = []
-        for label, handler, primary in [
-            ("Check", self.on_check_fleet, False),
-            ("Latest", self.on_load_latest_mesh_team, False),
-            ("Prepare", self.on_prepare_mesh_team, True),
-            ("Prepare Visible", self.on_prepare_visible_mesh_team, False),
-            ("Launch", self.on_launch_mesh_team, False),
-            ("Collect", self.on_collect_mesh_team, False),
-            ("Bus", self.on_sync_mesh_handoff_bus, False),
-            ("Verify Bus", self.on_verify_mesh_bus_integrity, False),
-            ("Repair Bus", self.on_retry_mesh_handoff_bus, False),
-            ("Preview Repair", self.on_preview_mesh_bus_repair, False),
-            ("Copy Bus Report", self.on_copy_mesh_team_bus_report, False),
-            ("Copy Role Bootstrap", self.on_copy_role_bootstrap, False),
-            ("Summary", self.on_copy_mesh_team_summary, False),
-            ("Broadcast Stream", self.on_sync_team_chat, False),
-            ("Open", self.on_open_mesh_team, False),
-        ]:
-            button = Gtk.Button(label=label)
-            button.add_css_class("primary" if primary else "secondary")
-            button.connect("clicked", handler)
-            if label not in {"Check", "Latest", "Prepare", "Prepare Visible"}:
-                button.set_tooltip_text("Prepare or load a team first.")
-                self.mesh_prepared_team_buttons.append(button)
-            team_buttons.append(button)
-        team.append(team_buttons)
+        team_buttons = self.command_grid([
+            ("Check", self.on_check_fleet, False, "emblem-ok-symbolic", "Probe trusted devices."),
+            ("Latest", self.on_load_latest_mesh_team, False, "document-open-recent-symbolic", "Load the latest saved team run."),
+            ("Prepare", self.on_prepare_mesh_team, True, "document-new-symbolic", "Create lanes for all ready trusted devices."),
+            ("Visible", self.on_prepare_visible_mesh_team, False, "view-filter-symbolic", "Create lanes from the visible ready set."),
+            ("Launch", self.on_launch_mesh_team, False, "media-playback-start-symbolic", "Launch prepared lanes."),
+            ("Collect", self.on_collect_mesh_team, False, "folder-download-symbolic", "Collect lane outputs."),
+        ], columns=6)
+        for button in getattr(team_buttons, "command_buttons", [])[4:]:
+            button.set_tooltip_text("Prepare or load a team first.")
+            self.mesh_prepared_team_buttons.append(button)
+        team_actions.append(team_buttons)
+        team.append(team_actions)
+
+        bus_actions = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        bus_actions.add_css_class("workflow-panel")
+        bus_actions.append(self.label("Handoff Bus", "section"))
+        bus_actions.append(self.label("Share artifacts and repair stale targets", "muted", wrap=True))
+        bus_buttons = self.command_grid([
+            ("Sync", self.on_sync_mesh_handoff_bus, False, "send-to-symbolic", "Sync handoff bus to team devices."),
+            ("Verify", self.on_verify_mesh_bus_integrity, False, "security-high-symbolic", "Verify local and remote bus hashes."),
+            ("Repair", self.on_retry_mesh_handoff_bus, False, "view-refresh-symbolic", "Retry failed or stale bus targets."),
+            ("Preview", self.on_preview_mesh_bus_repair, False, "document-preview-symbolic", "Copy a bus repair preview."),
+            ("Report", self.on_copy_mesh_team_bus_report, False, "edit-copy-symbolic", "Copy bus report JSON."),
+            ("Bootstrap", self.on_copy_role_bootstrap, False, "edit-copy-symbolic", "Copy role bootstrap handoff."),
+            ("Summary", self.on_copy_mesh_team_summary, False, "text-x-generic-symbolic", "Copy team summary."),
+            ("Stream", self.on_sync_team_chat, False, "mail-send-symbolic", "Broadcast the team stream."),
+            ("Open", self.on_open_mesh_team, False, "folder-open-symbolic", "Open the team run folder."),
+        ], columns=5)
+        for button in getattr(bus_buttons, "command_buttons", []):
+            button.set_tooltip_text(button.get_tooltip_text() or "Prepare or load a team first.")
+            self.mesh_prepared_team_buttons.append(button)
+        bus_actions.append(bus_buttons)
+        team.append(bus_actions)
         self.mesh_team_list = Gtk.ListBox()
         self.mesh_team_list.add_css_class("team-list")
         team_scroll = Gtk.ScrolledWindow()
@@ -6586,20 +6638,27 @@ class CodexControl(Gtk.Application):
             summary = f"Running {len(plan.checks)} quality checks..."
             status = "running"
             score = "running"
+            detail = f"Project: {plan.project} | checks: {len(plan.checks)} | report pending"
         elif report is not None:
             summary = report.summary()
             status = report.status
             score = f"score {report.score}"
+            detail = f"Report saved at {QUALITY_FILE} | checks: {len(report.checks)} | project: {report.project}"
         else:
             summary = plan.summary()
             status = "ready"
             score = "not run"
+            detail = f"Plan: {len(plan.checks)} check(s) | project: {plan.project} | report not run"
         if hasattr(self, "quality_status_label"):
             self.quality_status_label.set_text(summary)
+        if hasattr(self, "quality_signal_label"):
+            self.quality_signal_label.set_text(detail)
         if hasattr(self, "quality_page_summary_label"):
             self.quality_page_summary_label.set_text(summary)
             self.set_chip(self.quality_page_score_label, score, self.chip_css_for_status(status))
             self.set_chip(self.quality_page_status_label, status, self.chip_css_for_status(status))
+        if hasattr(self, "quality_page_detail_label"):
+            self.quality_page_detail_label.set_text(detail)
         if hasattr(self, "quality_compact_list"):
             self.render_quality_check_rows(self.quality_compact_list, compact=True)
         if hasattr(self, "quality_page_list"):
