@@ -3951,6 +3951,20 @@ class CodexControl(Gtk.Application):
         launch_header.append(self.mesh_launch_console_meta_label)
         launch_header.append(self.mesh_launch_console_prompt_label)
         launch_console.append(launch_header)
+        self.mesh_launch_stage_chips: dict[str, Gtk.Label] = {}
+        stage_flow = self.flow_row()
+        for stage_key, stage_label in [
+            ("check", "1 Check"),
+            ("prepare", "2 Prepare"),
+            ("sync", "3 Sync"),
+            ("launch", "4 Launch"),
+            ("collect", "5 Collect"),
+            ("review", "6 Review"),
+        ]:
+            chip = self.chip_label(stage_label, "chip")
+            self.mesh_launch_stage_chips[stage_key] = chip
+            self.flow_append(stage_flow, chip)
+        launch_console.append(stage_flow)
         self.mesh_launch_console_list = Gtk.ListBox()
         self.mesh_launch_console_list.add_css_class("team-list")
         launch_scroll = Gtk.ScrolledWindow()
@@ -4046,15 +4060,25 @@ class CodexControl(Gtk.Application):
         self.mesh_chat_entry.set_placeholder_text("Post team status, blockers, next step.")
         self.mesh_chat_entry.set_hexpand(True)
         self.mesh_chat_entry.connect("activate", self.on_post_team_chat)
-        post_chat = Gtk.Button(label="Post")
-        post_chat.connect("clicked", self.on_post_team_chat)
-        refresh_chat = Gtk.Button(label="Refresh")
-        refresh_chat.connect("clicked", self.on_refresh_team_chat)
-        copy_chat = Gtk.Button(label="Copy")
-        copy_chat.connect("clicked", self.on_copy_team_chat)
-        post_chat.add_css_class("primary")
-        refresh_chat.add_css_class("secondary")
-        copy_chat.add_css_class("secondary")
+        post_chat = self.command_button(
+            "Post",
+            self.on_post_team_chat,
+            primary=True,
+            icon_name="mail-send-symbolic",
+            tooltip="Post this update to the team stream.",
+        )
+        refresh_chat = self.command_button(
+            "Refresh",
+            self.on_refresh_team_chat,
+            icon_name="view-refresh-symbolic",
+            tooltip="Refresh the team stream from the loaded run.",
+        )
+        copy_chat = self.command_button(
+            "Copy",
+            self.on_copy_team_chat,
+            icon_name="edit-copy-symbolic",
+            tooltip="Copy the visible team stream.",
+        )
         chat_controls.append(self.mesh_chat_entry)
         chat_controls.append(post_chat)
         chat_controls.append(refresh_chat)
@@ -4077,9 +4101,12 @@ class CodexControl(Gtk.Application):
         self.memory_import_entry = Gtk.Entry()
         self.memory_import_entry.set_placeholder_text("Paste one memory line or key: value")
         self.memory_import_entry.set_hexpand(True)
-        import_button = Gtk.Button(label="Import")
-        import_button.add_css_class("secondary")
-        import_button.connect("clicked", self.on_import_memory)
+        import_button = self.command_button(
+            "Import",
+            self.on_import_memory,
+            icon_name="document-import-symbolic",
+            tooltip="Import the typed memory line into portable memory.",
+        )
         import_row.append(self.memory_import_entry)
         import_row.append(import_button)
         memory.append(import_row)
@@ -4509,10 +4536,50 @@ class CodexControl(Gtk.Application):
         has_team = self.mesh_team_dir is not None and bool(self.mesh_team_assignments) and bool(self.mesh_team_run_id)
         for button in getattr(self, "mesh_selected_device_buttons", []):
             button.set_sensitive(has_device)
-            button.set_tooltip_text("" if has_device else "Select a device first.")
+            if not has_device:
+                button.set_tooltip_text("Select a device first.")
         for button in getattr(self, "mesh_prepared_team_buttons", []):
             button.set_sensitive(has_team)
-            button.set_tooltip_text("" if has_team else "Prepare or load a team first.")
+            if not has_team:
+                button.set_tooltip_text("Prepare or load a team first.")
+
+    def refresh_mesh_launch_stage_strip(self, run_status=None, *, prepared: bool = False, operator=None) -> None:
+        if not hasattr(self, "mesh_launch_stage_chips"):
+            return
+        lane_count = len(getattr(run_status, "lanes", ()) or ())
+        collected = int(getattr(run_status, "collected_count", 0) or 0)
+        all_prepared = prepared and lane_count > 0 and all(
+            getattr(lane, "status", "") == "prepared" for lane in getattr(run_status, "lanes", ())
+        )
+        if prepared and lane_count == 0:
+            all_prepared = True
+        bus_report = self._team_bus_report() if prepared else None
+        bus_ready = bus_report is not None and not bus_report.failed_count and not bus_report.stale_count
+        failed = any(getattr(lane, "status", "") == "failed" for lane in getattr(run_status, "lanes", ()))
+        next_action = str(getattr(operator, "next_action", "") or "")
+        states = {
+            "check": len(self.ready_mesh_devices()) > 0,
+            "prepare": prepared,
+            "sync": bus_ready,
+            "launch": prepared and not all_prepared,
+            "collect": bool(lane_count and collected >= lane_count),
+            "review": next_action in {"Prepare Team"} and bool(collected),
+        }
+        labels = {
+            "check": "1 Check",
+            "prepare": "2 Prepare",
+            "sync": "3 Sync",
+            "launch": "4 Launch",
+            "collect": "5 Collect",
+            "review": "6 Review",
+        }
+        for key, chip in self.mesh_launch_stage_chips.items():
+            css = "chip-strong" if states.get(key) else "chip"
+            if failed and key in {"launch", "collect"}:
+                css = "chip-danger"
+            if next_action.lower().startswith(labels[key].split(maxsplit=1)[1].lower()):
+                css = "mode-pill"
+            self.set_chip(chip, labels[key], css)
 
     def render_mesh(self) -> None:
         self.render_device_list()
@@ -4556,6 +4623,7 @@ class CodexControl(Gtk.Application):
             )
         if hasattr(self, "mesh_launch_console_prompt_label"):
             self.mesh_launch_console_prompt_label.set_text(f"Mission: {prompt_preview}")
+        self.refresh_mesh_launch_stage_strip(run_status, prepared=prepared, operator=operator)
         if not assignments:
             row = Gtk.ListBoxRow()
             row.add_css_class("team-row")

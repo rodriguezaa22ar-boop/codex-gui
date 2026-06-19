@@ -86,18 +86,37 @@ class GuiSourceTests(unittest.TestCase):
 
         build_mesh = _method_named(tree, "build_mesh_page")
         render_console = _method_named(tree, "render_mesh_launch_console")
+        refresh_stage = _method_named(tree, "refresh_mesh_launch_stage_strip")
         render_team = _method_named(tree, "render_mesh_team")
 
         build_text = ast.unparse(build_mesh)
         render_text = ast.unparse(render_console)
         self.assertIn("Launch Console", build_text)
         self.assertIn("mesh_launch_console_list", build_text)
+        self.assertIn("mesh_launch_stage_chips", build_text)
         self.assertIn("on_sync_mesh_handoff_bus", build_text)
         self.assertIn("build_mesh_team_assignments", render_text)
+        self.assertIn("refresh_mesh_launch_stage_strip", render_text)
+        self.assertIn("chip-strong", ast.unparse(refresh_stage))
+        self.assertIn("chip-danger", ast.unparse(refresh_stage))
         self.assertIn("role_profile", render_text)
         self.assertIn("should_sync_project_to_device", render_text)
         self.assertIn("Expected: out/", render_text)
         self.assertIn("render_mesh_launch_console", ast.unparse(render_team))
+
+    def test_mesh_stream_and_memory_controls_use_command_buttons(self) -> None:
+        source = Path("codex_gui.py").read_text(encoding="utf-8")
+        tree = ast.parse(source)
+
+        build_mesh = _method_named(tree, "build_mesh_page")
+        text = ast.unparse(build_mesh)
+
+        self.assertIn("self.command_button('Post'", text)
+        self.assertIn("self.command_button('Refresh'", text)
+        self.assertIn("self.command_button('Copy'", text)
+        self.assertIn("self.command_button('Import'", text)
+        self.assertIn("mail-send-symbolic", text)
+        self.assertIn("document-import-symbolic", text)
 
     def test_chips_and_meta_labels_are_ellipsized_with_tooltips(self) -> None:
         source = Path("codex_gui.py").read_text(encoding="utf-8")

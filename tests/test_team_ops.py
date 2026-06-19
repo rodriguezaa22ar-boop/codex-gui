@@ -930,6 +930,66 @@ class TeamOpsTests(unittest.TestCase):
             team_ops.TEAM_DIR = original_team
             team_ops.LAST_TEAM_RUN_FILE = original_last
 
+    def test_doctor_json_treats_reviewed_prepared_run_as_closed(self) -> None:
+        ctx = self._with_workspace()
+        original_config = team_ops.CONFIG_DIR
+        original_devices = team_ops.DEVICES_FILE
+        original_team = team_ops.TEAM_DIR
+        original_last = team_ops.LAST_TEAM_RUN_FILE
+
+        team_ops.CONFIG_DIR = ctx.config_dir.parent
+        team_ops.DEVICES_FILE = ctx.devices
+        team_ops.TEAM_DIR = ctx.team_dir
+        team_ops.LAST_TEAM_RUN_FILE = ctx.last_run
+
+        try:
+            save_devices(ctx.devices, (
+                DeviceRecord(
+                    id="atlas-builder-1",
+                    name="atlas-builder",
+                    host="atlas-builder",
+                    user="ao",
+                    status="ready",
+                ),
+            ))
+            run_dir = ctx.team_dir / "team-reviewed-prepared"
+            out_dir = run_dir / "out"
+            out_dir.mkdir(parents=True, exist_ok=True)
+            manifest = {
+                "run_id": "team-reviewed-prepared",
+                "created": "2026-06-18T00:00:00-07:00",
+                "project": str(ctx.workspace),
+                "assignments": [
+                    {
+                        "lane_slug": "backend-builder-atlas-builder",
+                        "lane_title": "Core Systems Engineer",
+                        "device_name": "atlas-builder",
+                        "focus": "Backend",
+                    },
+                ],
+            }
+            (run_dir / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+            team_ops.mark_team_summary_reviewed(run_dir)
+
+            args = team_ops.parse_args(["--json", "doctor"])
+            with tempfile.TemporaryFile(mode="w+") as output:
+                with patch("sys.stdout", new=output):
+                    self.assertEqual(team_ops.cmd_doctor(args), 0)
+                    output.seek(0)
+                    payload = json.loads(output.read())
+
+            self.assertTrue(payload["summary_reviewed"])
+            self.assertEqual(payload["status"], "ready")
+            self.assertEqual(payload["next_action"], "Prepare Team")
+            self.assertEqual(payload["bus_health"]["status"], "reviewed")
+            self.assertEqual(payload["handoff_health"]["status"], "reviewed")
+            self.assertFalse(any(item["scope"] in {"run", "bus", "handoff"} for item in payload["blockers"]))
+        finally:
+            team_ops.CONFIG_DIR = original_config
+            team_ops.DEVICES_FILE = original_devices
+            team_ops.TEAM_DIR = original_team
+            team_ops.LAST_TEAM_RUN_FILE = original_last
+
     def test_cmd_roles_reports_assignments(self) -> None:
         ctx = self._with_workspace()
         original_config = team_ops.CONFIG_DIR

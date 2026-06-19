@@ -591,7 +591,7 @@ def _doctor_bus_health(
             "failures": 0,
         }
     if bus_report is None:
-        status = "reviewed" if summary_reviewed and run.collected_count else "not_synced"
+        status = "reviewed" if summary_reviewed else "not_synced"
         return {
             "status": status,
             "path": str(run.team_dir / "out" / "handoff-bus.md"),
@@ -602,7 +602,7 @@ def _doctor_bus_health(
             "failures": 0,
         }
     failures = len(bus_report.failures)
-    if summary_reviewed and run.collected_count:
+    if summary_reviewed:
         status = "reviewed"
     elif bus_report.failed_count or bus_report.stale_count or failures:
         status = "repair"
@@ -664,7 +664,7 @@ def _doctor_handoff_health(run: Any | None, *, summary_reviewed: bool = False) -
             "has_status": has_status,
         })
 
-    if summary_reviewed and present + missing:
+    if summary_reviewed:
         status = "reviewed"
     elif missing:
         status = "missing"
@@ -744,7 +744,7 @@ def _doctor_run_blockers(
             "next_actions": ["Inspect the latest team run manifest and repair unreadable run artifacts."],
         })
         return blockers
-    if run is not None and summary_reviewed and run.collected_count:
+    if run is not None and summary_reviewed:
         return blockers
     if run is not None:
         for lane in run.lanes:
@@ -790,7 +790,7 @@ def _doctor_handoff_blockers(
     *,
     summary_reviewed: bool = False,
 ) -> list[dict[str, Any]]:
-    if run is None or (summary_reviewed and run.collected_count):
+    if run is None or summary_reviewed:
         return []
 
     blockers: list[dict[str, Any]] = []

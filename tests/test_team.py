@@ -350,6 +350,10 @@ class CodexTeamTests(unittest.TestCase):
         synced_prepared = team_operator_summary(run_status, prepared_bus)
 
         self.assertEqual(synced_prepared.next_action, "Launch Team")
+        reviewed_prepared = team_operator_summary(run_status, prepared_bus, summary_reviewed=True)
+
+        self.assertEqual(reviewed_prepared.next_action, "Prepare Team")
+        self.assertEqual(reviewed_prepared.status, "ready")
 
         collected = TeamRunStatus(
             run_id=run_status.run_id,
