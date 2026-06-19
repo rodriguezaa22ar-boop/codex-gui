@@ -9,6 +9,24 @@ This is the source-of-truth runbook for running the team workflow across:
 
 Keep each Codex lane in a clean, scoped state and pull/push through Git.
 
+## Current Fleet State (2026-06-19)
+
+Active committed baseline:
+
+- `atlas-ubuntu` -> `b49c6db`
+- `atlas-builder` -> `b49c6db`
+- `atlas-main` -> `b49c6db` plus local uncommitted UI work
+- `atlas-cockpit` -> `b49c6db`
+
+Operational notes:
+
+- `atlas-cockpit` GitHub SSH auth has been repaired and can now `git pull` directly.
+- `atlas-main` currently has an in-progress UX slice in `codex_gui.py` and
+  `tests/test_gui_source.py` for a launch-console readiness pulse. Do not
+  overwrite those local edits from another node.
+- Commander should treat `atlas-main` as the active product lane until that
+  slice is either committed to a lane branch or deliberately discarded.
+
 ## 1) Device Roles and Mapping
 
 Use explicit host names in Tailnet discovery:
@@ -130,3 +148,69 @@ This repo currently includes:
 
 - Dynamic Codex launcher resolution for heterogeneous nodes (`~/.npm-global`, `~/.local`, `/usr/local/bin`, `/usr/bin`, PATH)
 - Updated mesh probe/launch scripts that no longer assume a fixed `~/.local/bin/codex` binary.
+
+## 6) Next commands by device
+
+### `atlas-ubuntu` commander
+
+```bash
+cd ~/Projects/codex-gui
+git pull --ff-only origin main
+python3 -m unittest discover -s tests
+python3 -m pytest -q
+```
+
+Then:
+
+- integrate worker branches
+- keep `main` clean
+- do not duplicate `atlas-main` local UX work on another node
+
+### `atlas-builder` core systems lane
+
+Use builder for backend-only work, not the current mesh UX pulse slice:
+
+```bash
+cd ~/Projects/codex-gui
+git fetch origin
+git checkout main
+git pull --ff-only origin main
+git checkout -B lane/core-systems
+python3 -m unittest discover -s tests
+```
+
+Preferred builder targets:
+
+- mesh doctor/report CLI
+- setup hardening for remote worker nodes
+- clearer SSH/Tailscale/Codex missing-state diagnostics
+
+### `atlas-main` product lane
+
+Preserve and finish the existing local pulse work first:
+
+```bash
+cd ~/Projects/codex-gui
+git status --short
+python3 -m unittest tests.test_gui_source -q
+python3 -m pytest -q
+```
+
+Then commit to a lane branch, not directly to `main`.
+
+### `atlas-cockpit` verifier lane
+
+```bash
+cd ~/Projects/codex-gui
+git checkout main
+git pull --ff-only origin main
+python3 -m unittest discover -s tests
+python3 -m pytest -q
+python3 codex_gui.py
+```
+
+Preferred cockpit targets:
+
+- install and launch verification
+- release checklist verification
+- doc accuracy against a fresh node

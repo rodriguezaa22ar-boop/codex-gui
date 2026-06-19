@@ -1,5 +1,5 @@
 ATLAS 4-DEVICE OPERATION SHEET
-Date: 2026-06-18
+Date: 2026-06-19
 
 Scope:
 - `atlas-ubuntu` (commander/integrator)
@@ -79,8 +79,20 @@ git push origin main
 8) EXPECTED READINESS
 - atlas-main: ready
 - atlas-builder: ready (headless SSH + codex + repo)
-- atlas-cockpit: ready when SSH key allowed and repo clean
+- atlas-cockpit: ready (SSH + GitHub pull repaired)
 - atlas-ubuntu: local commander
+
+9) CURRENT BASELINE
+- atlas-ubuntu: b49c6db
+- atlas-builder: b49c6db
+- atlas-main: b49c6db + local product-lane edits not yet committed
+- atlas-cockpit: b49c6db
+
+10) RIGHT NOW
+- Commander holds `main` steady.
+- Builder works backend/core systems only.
+- Main finishes the launch-console pulse UX slice.
+- Cockpit verifies install/docs/release behavior from the synced baseline.
 
 If any node fails readiness:
 - fix that node first, do not launch new team cycles until corrected.
