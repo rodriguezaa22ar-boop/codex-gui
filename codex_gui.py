@@ -1528,6 +1528,7 @@ class CodexControl(Gtk.Application):
             self.mesh_filter_mode = "all"
         self.mesh_team_only = bool(self.config.get("mesh_team_only", False))
         self.focus_mode = bool(self.config.get("focus_mode", False))
+        self.mesh_launch_console_blocked_only = bool(self.config.get("mesh_launch_console_blocked_only", False))
         self.mesh_live_refresh = bool(self.config.get("mesh_live_refresh", True))
         try:
             self.mesh_live_refresh_seconds = max(10, min(300, int(self.config.get("mesh_live_refresh_seconds", 30))))
@@ -3970,10 +3971,28 @@ class CodexControl(Gtk.Application):
         self.mesh_launch_console_meta_label = self.label("0 lanes", "muted", wrap=True)
         self.mesh_launch_console_prompt_label = self.label("Mission preview unavailable", "muted", wrap=True)
         self.mesh_launch_console_decision_label = self.label("Decision: check fleet before launch", "next-step-detail", wrap=True)
+        self.mesh_launch_blocker_timeline_label = self.label("Blocker timeline: none yet", "muted", wrap=True)
         launch_header.append(self.mesh_launch_console_status_label)
         launch_header.append(self.mesh_launch_console_meta_label)
         launch_header.append(self.mesh_launch_console_prompt_label)
         launch_header.append(self.mesh_launch_console_decision_label)
+        launch_header.append(self.mesh_launch_blocker_timeline_label)
+        launch_filters = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        self.mesh_launch_console_blocked_only_toggle = Gtk.ToggleButton(label="Blocked only")
+        self.mesh_launch_console_blocked_only_toggle.set_active(self.mesh_launch_console_blocked_only)
+        self.mesh_launch_console_blocked_only_toggle.connect(
+            "toggled",
+            self.on_launch_console_blocked_only_toggled,
+        )
+        launch_filters.append(self.mesh_launch_console_blocked_only_toggle)
+        recheck_blocked_button = self.command_button(
+            "Recheck Blocked",
+            self.on_recheck_launch_blocked_lanes,
+            icon_name="view-refresh-symbolic",
+            tooltip="Recheck only lanes that are blocked / not ready.",
+        )
+        launch_filters.append(recheck_blocked_button)
+        launch_header.append(launch_filters)
         launch_console.append(launch_header)
         self.mesh_launch_stage_chips: dict[str, Gtk.Label] = {}
         stage_flow = self.flow_row()
@@ -4620,6 +4639,7 @@ class CodexControl(Gtk.Application):
         readiness = mesh_readiness_report(self.devices, self.mesh_probe_records)
         prepared = bool(self.mesh_team_assignments and self.mesh_team_dir is not None and self.mesh_team_run_id)
         assignments = list(self.mesh_team_assignments) if prepared else self.build_mesh_team_assignments()
+        display_assignments = self._mesh_launch_console_display_assignments(assignments, readiness=readiness)
         operator = (
             self.current_team_operator_summary(run_status)
             if prepared
@@ -4665,6 +4685,15 @@ class CodexControl(Gtk.Application):
                 decision = f"Decision: {operator.next_action}; handoff bus {operator.bus_text}."
             self.mesh_launch_console_decision_label.set_text(decision)
             self.mesh_launch_console_decision_label.set_tooltip_text(decision)
+        if hasattr(self, "mesh_launch_blocker_timeline_label"):
+            timeline = self.mesh_launch_blocker_timeline_text(assignments, readiness=readiness)
+            if timeline:
+                timeline_text = f"Blocker timeline:\n{timeline}"
+                self.mesh_launch_blocker_timeline_label.set_text(timeline_text)
+                self.mesh_launch_blocker_timeline_label.set_tooltip_text(timeline)
+            else:
+                self.mesh_launch_blocker_timeline_label.set_text("Blocker timeline: ready")
+                self.mesh_launch_blocker_timeline_label.set_tooltip_text("All lanes are ready")
         self.refresh_mesh_launch_stage_strip(run_status, prepared=prepared, operator=operator)
         if not assignments:
             row = Gtk.ListBoxRow()
@@ -4725,6 +4754,55 @@ class CodexControl(Gtk.Application):
             detail_label.set_ellipsize(Pango.EllipsizeMode.END)
             detail_label.set_tooltip_text(detail)
             content.append(detail_label)
+            if reason is not None and readiness_row is not None and readiness_row.next_actions:
+                action_hint = f"Next: {readiness_row.next_actions[0]}"
+                next_action_label = self.label(action_hint, "muted", wrap=True)
+                next_action_label.set_lines(2)
+                next_action_label.set_ellipsize(Pango.EllipsizeMode.END)
+                next_action_label.set_tooltip_text("\n".join(readiness_row.next_actions))
+                content.append(next_action_label)
+            if device is not None:
+                action_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+                if readiness_row is not None and readiness_row.status != "ready":
+                    fix_tooltip = ""
+                    if readiness_row.next_actions:
+                        fix_tooltip = readiness_row.next_actions[0]
+                    elif reason is not None:
+                        fix_tooltip = reason
+                    fix_btn = self.make_button("Fix Now", "emblem-ok-symbolic")
+                    fix_btn.connect(
+                        "clicked",
+                        lambda _b, device_id=device.id: self.on_mesh_lane_fix_now(device_id),
+                    )
+                    if fix_tooltip:
+                        fix_btn.set_tooltip_text(f"Suggested fix: {fix_tooltip}")
+                    else:
+                        fix_btn.set_tooltip_text("Run the fastest likely unblock path for this lane.")
+                    action_row.append(fix_btn)
+                recheck = self.make_button("Recheck", "view-refresh-symbolic")
+                recheck.connect("clicked", lambda _b, device_id=device.id: self.on_recheck_lane(device_id))
+                recheck.set_tooltip_text("Collect a fresh probe for this device.")
+                action_row.append(recheck)
+                open_session = self.make_button("Open Session", "utilities-terminal-symbolic")
+                open_session.connect(
+                    "clicked",
+                    lambda _b, device_id=device.id: self.on_open_launch_console_session(device_id),
+                )
+                open_session.set_tooltip_text("Open a terminal session to this device.")
+                action_row.append(open_session)
+                copy_launch = self.make_button("Copy Launch", "edit-copy-symbolic")
+                copy_launch.connect(
+                    "clicked",
+                    lambda _b, target_device_id=device.id: self.copy_mesh_text(
+                        self.launch_console_command_copy(
+                            next((item for item in self.devices if item.id == target_device_id), device),
+                        ),
+                        f"Launch command copied for {device.name}",
+                    ),
+                )
+                copy_launch.set_tooltip_text("Copy command used to open this lane’s session.")
+                action_row.append(copy_launch)
+                content.append(action_row)
             row.set_child(content)
             self.mesh_launch_console_list.append(row)
 
@@ -4738,6 +4816,136 @@ class CodexControl(Gtk.Application):
                 lane_slug = assignment.get("lane_slug", "")
                 break
         return device.name, lane_slug or slugify(device.name)
+
+    def on_recheck_lane(self, device_id: str) -> None:
+        device = next((item for item in self.devices if item.id == device_id), None)
+        if device is None:
+            self.set_mesh_team_status("Device disappeared from roster", "warn")
+            self.set_status("Lane device missing", "warn")
+            return
+
+        self.set_mesh_team_status(f"Checking {device.name}...")
+
+        def worker() -> None:
+            probe = self.probe_mesh_device(device)
+            GLib.idle_add(self.apply_mesh_probe, device.id, probe)
+            GLib.idle_add(self.finish_mesh_check, device, probe.status)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def on_sync_launch_console_project(self, device_id: str) -> None:
+        device = next((item for item in self.devices if item.id == device_id), None)
+        if device is None:
+            self.set_mesh_team_status("Device disappeared from roster", "warn")
+            self.set_status("Lane device missing", "warn")
+            return
+        if self.is_local_mesh_device(device):
+            self.set_status("Local device already has project checkout")
+            self.set_mesh_team_status(f"Local lane target already available: {device.name}")
+            return
+
+        project_path = Path(self.selected_project()).expanduser()
+        if not project_path.exists():
+            self.set_status("Project path is not available", "warn")
+            self.set_mesh_team_status(f"Cannot sync project to {device.name}: missing local project path", "warn")
+            return
+
+        self.set_status(f"Syncing project to {device.name}")
+        self.set_mesh_team_status(f"Syncing project to {device.name}...")
+
+        def worker() -> None:
+            try:
+                result = run_cmd(list(rsync_project_command(project_path, device)), timeout=60)
+            except Exception as exc:  # noqa: BLE001
+                GLib.idle_add(
+                    self.set_mesh_team_status,
+                    f"Project sync failed for {device.name}: {exc}",
+                    "bad",
+                )
+                GLib.idle_add(self.set_status, f"Project sync failed for {device.name}: {exc}", "bad")
+                GLib.idle_add(self.render_mesh)
+                return
+            if result.returncode != 0:
+                detail = (result.stderr or result.stdout or "project sync failed").strip().splitlines()
+                message = detail[-1] if detail else "project sync failed"
+                GLib.idle_add(self.set_mesh_team_status, f"Project sync failed for {device.name}: {message}", "bad")
+                GLib.idle_add(self.set_status, f"Project sync failed for {device.name}: {message}", "bad")
+            else:
+                GLib.idle_add(self.set_mesh_team_status, f"Project synced to {device.name}")
+            GLib.idle_add(self.set_status, f"Project synced to {device.name}")
+            GLib.idle_add(self.render_mesh)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def on_open_launch_console_session(self, device_id: str) -> None:
+        device = next((item for item in self.devices if item.id == device_id), None)
+        if device is None:
+            self.set_mesh_team_status("Device disappeared from roster", "warn")
+            self.set_status("Lane device missing", "warn")
+            return
+
+        self.set_status(f"Opening session for {device.name}")
+        if self.is_local_mesh_device(device):
+            self.launch_external(["bash", "-i"], f"Codex {device.name}", stamp=False)
+            self.set_mesh_team_status(f"Opened local session for {device.name}")
+            return
+
+        self.launch_external(list(ssh_launch_command(device)), f"Codex {device.name}", stamp=False)
+        self.set_mesh_team_status(f"Opened session for {device.name}")
+
+    def launch_console_command_copy(self, device: DeviceRecord) -> str:
+        if self.is_local_mesh_device(device):
+            project_root = os.path.expanduser(device.project_root)
+            project = shlex.quote(project_root)
+            codex_bin = shlex.quote(device.codex_bin)
+            memory_path = shlex.quote(str(Path("~/.config/codex-gui/memory.md").expanduser()))
+            return (
+                f"cd {project} && "
+                f"{codex_bin} -C {project} "
+                f'\"Use the Codex Control portable memory at {memory_path} and continue the active project.\"'
+            )
+        return shell_join(list(ssh_launch_command(device)))
+
+    def on_mesh_lane_fix_now(self, device_id: str) -> None:
+        device = next((item for item in self.devices if item.id == device_id), None)
+        if device is None:
+            self.set_mesh_team_status("Device disappeared from roster", "warn")
+            self.set_status("Lane device missing", "warn")
+            return
+
+        row = self._mesh_ready_rows().get(device.id)
+        if row is None:
+            self.set_mesh_team_status("No readiness state for lane; rechecking now.")
+            self.on_recheck_lane(device.id)
+            return
+
+        if row.blocker_category == "missing-project":
+            self.set_mesh_team_status(f"Recommended fix: sync project to {device.name}.")
+            self.on_sync_launch_console_project(device.id)
+            return
+
+        if row.blocker_category == "missing-codex":
+            self.set_mesh_team_status(
+                f"Recommended fix: install codex on {device.name}, then run Check Fleet."
+            )
+            return
+
+        if row.blocker_category == "tailscale-approval-required":
+            link = ""
+            for item in row.next_actions:
+                if "Open Tailscale approval link:" in item:
+                    link = item.rsplit(":", 1)[-1].strip()
+                    break
+            if link:
+                self.copy_mesh_text(link, f"Tailscale approval link copied for {device.name}")
+                self.set_status(f"Approval link copied for {device.name}")
+            else:
+                self.set_status("Open approval link via row details, then recheck.")
+            self.on_recheck_lane(device.id)
+            return
+
+        self.set_mesh_team_status(f"Recommended fix: recheck readiness for {device.name}.")
+        self.on_recheck_lane(device.id)
 
     def _team_chat_path(self, run_dir: Path | None = None) -> Path:
         base = self.mesh_team_dir if run_dir is None else run_dir
@@ -4970,6 +5178,51 @@ class CodexControl(Gtk.Application):
             if lane and reason:
                 reasons[(lane, device)] = reason
         return reasons
+
+    def mesh_launch_blocker_timeline_text(
+        self,
+        assignments: list[dict[str, str]],
+        *,
+        readiness: MeshReadinessReport | None = None,
+    ) -> str:
+        readiness_rows = (readiness or mesh_readiness_report(self.devices, self.mesh_probe_records)).rows
+        row_by_device = {row.device_id: row for row in readiness_rows}
+        if not assignments:
+            return "No lanes available. Add ready trusted devices and run Check Fleet."
+
+        lines: list[str] = []
+        for index, assignment in enumerate(assignments, start=1):
+            lane = assignment.get("lane_title", "lane")
+            device_name = assignment.get("device_name", "device")
+            device = self.mesh_assignment_device(assignment)
+            if device is None:
+                lines.append(f"{index}. {lane} on {device_name}: missing device | action: check roster entry")
+                continue
+
+            row = row_by_device.get(device.id)
+            if row is None:
+                lines.append(
+                    f"{index}. {lane} on {device_name}: readiness unknown | action: run Check Fleet"
+                )
+                continue
+
+            when = human_time(row.checked)
+            if not self.trusted_mesh_device(device):
+                lines.append(
+                    f"{index}. {lane} on {device_name}: untrusted | checked {when} | action: trust or remove device"
+                )
+                continue
+            blocker = row.blocker_category or row.status
+            if row.status == "ready":
+                lines.append(f"{index}. {lane} on {device_name}: ready | checked {when}")
+                continue
+
+            next_action = row.next_actions[0] if row.next_actions else "Recheck readiness"
+            lines.append(f"{index}. {lane} on {device_name}: {blocker} | checked {when} | action: {next_action}")
+
+        if not lines:
+            return "All lanes ready to launch."
+        return "\n".join(lines)
 
     def _mesh_team_seed_devices(self) -> tuple[DeviceRecord, ...]:
         readiness = mesh_readiness_report(self.devices, self.mesh_probe_records)
@@ -7963,6 +8216,7 @@ class CodexControl(Gtk.Application):
             "focus_mode": self.focus_mode,
             "mesh_filter_mode": self.mesh_filter_mode,
             "mesh_team_only": self.mesh_team_only,
+            "mesh_launch_console_blocked_only": self.mesh_launch_console_blocked_only,
             "mesh_live_refresh": self.mesh_live_refresh,
             "mesh_live_refresh_seconds": self.mesh_live_refresh_seconds,
             "layout": layout_to_config(self.current_layout_state()),

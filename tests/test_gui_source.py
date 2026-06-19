@@ -104,6 +104,32 @@ class GuiSourceTests(unittest.TestCase):
         self.assertIn("Expected: out/", render_text)
         self.assertIn("render_mesh_launch_console", ast.unparse(render_team))
 
+    def test_mesh_launch_console_row_actions_include_recheck_sync_and_session(self) -> None:
+        source = Path("codex_gui.py").read_text(encoding="utf-8")
+        tree = ast.parse(source)
+
+        render_console = _method_named(tree, "render_mesh_launch_console")
+        sync_project_handler = _method_named(tree, "on_sync_launch_console_project")
+        open_session_handler = _method_named(tree, "on_open_launch_console_session")
+
+        render_text = ast.unparse(render_console)
+        self.assertIn("Open Session", render_text)
+        self.assertIn("on_open_launch_console_session", render_text)
+        self.assertIn("on_recheck_lane", render_text)
+        self.assertIn("Copy Launch", render_text)
+        self.assertIn("Fix Now", render_text)
+        self.assertIn("should_sync_project_to_device", render_text)
+        self.assertIn("utilities-terminal-symbolic", render_text)
+        self.assertIn("launch_console_command_copy", render_text)
+        self.assertIn("on_mesh_lane_fix_now", render_text)
+        self.assertIn("mesh_launch_blocker_timeline_text", render_text)
+
+        self.assertIn("def on_open_launch_console_session", ast.unparse(open_session_handler))
+        self.assertIn("is_local_mesh_device", ast.unparse(open_session_handler))
+        self.assertIn("ssh_launch_command", ast.unparse(open_session_handler))
+
+        self.assertIn("def on_sync_launch_console_project", ast.unparse(sync_project_handler))
+
     def test_mesh_stream_and_memory_controls_use_command_buttons(self) -> None:
         source = Path("codex_gui.py").read_text(encoding="utf-8")
         tree = ast.parse(source)
@@ -243,9 +269,25 @@ class GuiSourceTests(unittest.TestCase):
         render_console = _method_named(tree, "render_mesh_launch_console")
 
         self.assertIn("mesh_launch_console_decision_label", ast.unparse(build_mesh))
+        self.assertIn("mesh_launch_blocker_timeline_label", ast.unparse(build_mesh))
         self.assertIn("Decision:", ast.unparse(render_console))
         self.assertIn("launch blocked", ast.unparse(render_console))
         self.assertIn("_mesh_launch_blocking_reason_map", ast.unparse(render_console))
+        self.assertIn("on_recheck_lane", ast.unparse(render_console))
+        self.assertIn("on_mesh_lane_fix_now", ast.unparse(render_console))
+        self.assertIn("set_tooltip_text", ast.unparse(render_console))
+
+    def test_mesh_launch_blocker_timeline_method_exists(self) -> None:
+        source = Path("codex_gui.py").read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        render_console = _method_named(tree, "render_mesh_launch_console")
+        timeline = _method_named(tree, "mesh_launch_blocker_timeline_text")
+
+        self.assertIn("mesh_launch_blocker_timeline_label", ast.unparse(render_console))
+        self.assertIn("mesh_launch_blocker_timeline_text", ast.unparse(render_console))
+        self.assertIn("mesh_assignment_device", ast.unparse(timeline))
+        self.assertIn("mesh_readiness_report", ast.unparse(timeline))
+        self.assertIn("row.next_actions", ast.unparse(timeline))
 
     def test_workstation_pages_have_stateful_next_step_banners(self) -> None:
         source = Path("codex_gui.py").read_text(encoding="utf-8")
