@@ -4008,6 +4008,21 @@ class CodexControl(Gtk.Application):
         launch_header.append(self.mesh_launch_console_prompt_label)
         launch_header.append(self.mesh_launch_console_decision_label)
         launch_header.append(self.mesh_launch_blocker_timeline_label)
+        self.mesh_launch_pulse_label = self.label("Fleet pulse: readying status...", "muted", wrap=True)
+        launch_header.append(self.mesh_launch_pulse_label)
+        pulse_flow = self.flow_row()
+        self.mesh_launch_pulse_ready_chip = self.chip_label("0/0 ready", "chip")
+        self.mesh_launch_pulse_blocked_chip = self.chip_label("0 blocked", "chip")
+        self.mesh_launch_pulse_review_chip = self.chip_label("0 review", "chip")
+        self.mesh_launch_pulse_offline_chip = self.chip_label("0 offline", "chip")
+        for chip in [
+            self.mesh_launch_pulse_ready_chip,
+            self.mesh_launch_pulse_blocked_chip,
+            self.mesh_launch_pulse_review_chip,
+            self.mesh_launch_pulse_offline_chip,
+        ]:
+            self.flow_append(pulse_flow, chip)
+        launch_header.append(pulse_flow)
         launch_filters = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
         self.mesh_launch_console_blocked_only_toggle = Gtk.ToggleButton(label="Blocked only")
         self.mesh_launch_console_blocked_only_toggle.set_active(self.mesh_launch_console_blocked_only)
@@ -4730,6 +4745,32 @@ class CodexControl(Gtk.Application):
                 self.mesh_launch_blocker_timeline_label.set_text("Blocker timeline: ready")
                 self.mesh_launch_blocker_timeline_label.set_tooltip_text("All lanes are ready")
         self.refresh_mesh_launch_stage_strip(run_status, prepared=prepared, operator=operator)
+        if hasattr(self, "mesh_launch_pulse_label"):
+            ready_count, blocked_count, review_count, offline_count, untrusted_count, pulse_summary, pulse_detail = (
+                self._mesh_launch_readiness_pulse(assignments, readiness=readiness)
+            )
+            self.mesh_launch_pulse_label.set_text(pulse_summary)
+            self.mesh_launch_pulse_label.set_tooltip_text(pulse_detail)
+            self.set_chip(
+                self.mesh_launch_pulse_ready_chip,
+                f"{ready_count}/{len(assignments)} ready",
+                "chip-strong" if blocked_count == 0 and untrusted_count == 0 and offline_count == 0 else "chip",
+            )
+            self.set_chip(
+                self.mesh_launch_pulse_blocked_chip,
+                f"{blocked_count} blocked",
+                "chip-danger" if blocked_count else "chip",
+            )
+            self.set_chip(
+                self.mesh_launch_pulse_review_chip,
+                f"{review_count} review",
+                "chip-danger" if review_count else "chip",
+            )
+            self.set_chip(
+                self.mesh_launch_pulse_offline_chip,
+                f"{offline_count} offline",
+                "chip-danger" if offline_count else "chip",
+            )
         if not display_assignments:
             row = Gtk.ListBoxRow()
             row.add_css_class("team-row")
@@ -4927,6 +4968,89 @@ class CodexControl(Gtk.Application):
         if not blocked_filter:
             return ordered
         return [assignment for assignment in ordered if is_blocked(assignment)]
+
+    def _mesh_launch_readiness_pulse(
+        self,
+        assignments: list[dict[str, str]],
+        *,
+        readiness: MeshReadinessReport | None = None,
+        max_detail_lines: int = 5,
+    ) -> tuple[int, int, int, int, int, str, str]:
+        readiness = readiness or mesh_readiness_report(self.devices, self.mesh_probe_records)
+        row_by_device = {row.device_id: row for row in readiness.rows}
+        if not assignments:
+            return (0, 0, 0, 0, 0, "Fleet pulse: no lanes", "Prepare team lanes to evaluate launch readiness.")
+
+        ready_count = 0
+        review_count = 0
+        offline_count = 0
+        blocked_count = 0
+        untrusted_count = 0
+        detail_rows: list[str] = []
+
+        for assignment in assignments:
+            lane_title = assignment.get("lane_title", "Lane")
+            device_name = assignment.get("device_name", "device")
+            device = self.mesh_assignment_device(assignment)
+            if device is None:
+                blocked_count += 1
+                detail_rows.append(f"{lane_title} on {device_name}: missing device")
+                continue
+            if not self.trusted_mesh_device(device):
+                blocked_count += 1
+                untrusted_count += 1
+                detail_rows.append(f"{lane_title} on {device_name}: untrusted device")
+                continue
+            row = row_by_device.get(device.id)
+            if row is None:
+                blocked_count += 1
+                detail_rows.append(f"{lane_title} on {device_name}: readiness unknown")
+                continue
+            if row.status == "ready":
+                ready_count += 1
+            elif row.status == "offline":
+                blocked_count += 1
+                offline_count += 1
+                detail_rows.append(f"{lane_title} on {device_name}: offline")
+            elif row.status == "review":
+                blocked_count += 1
+                review_count += 1
+                detail_rows.append(
+                    f"{lane_title} on {device_name}: review required ({row.blocker_category or row.status})"
+                )
+            else:
+                blocked_count += 1
+                detail_rows.append(
+                    f"{lane_title} on {device_name}: {row.blocker_category or row.status}"
+                )
+
+        checked = [row.checked for row in row_by_device.values() if row.checked]
+        last_checked = human_time(max(checked)) if checked else "unknown"
+
+        if blocked_count == 0:
+            summary = f"Fleet pulse: all {ready_count}/{len(assignments)} lanes ready"
+            detail = f"Fleet pulse summary: all lanes ready | Last checked: {last_checked}"
+        else:
+            summary = (
+                f"Fleet pulse: {ready_count}/{len(assignments)} lanes ready "
+                f"| {blocked_count} blocked | {untrusted_count} untrusted | {offline_count} offline"
+            )
+            top_details = detail_rows[:max_detail_lines]
+            detail = (
+                f"Fleet pulse summary: {blocked_count} blocked | Last checked: {last_checked}\n"
+                + "\n".join(top_details)
+            )
+            if len(detail_rows) > max_detail_lines:
+                detail += f"\n+{len(detail_rows) - max_detail_lines} more issue(s)"
+        return (
+            ready_count,
+            blocked_count,
+            review_count,
+            offline_count,
+            untrusted_count,
+            summary,
+            detail,
+        )
 
     def _mesh_team_lane_for_selected_device(self) -> tuple[str, str]:
         device = self.selected_mesh_device()

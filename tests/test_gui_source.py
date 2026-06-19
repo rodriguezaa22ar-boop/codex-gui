@@ -103,6 +103,9 @@ class GuiSourceTests(unittest.TestCase):
         self.assertIn("should_sync_project_to_device", render_text)
         self.assertIn("Expected: out/", render_text)
         self.assertIn("render_mesh_launch_console", ast.unparse(render_team))
+        self.assertIn("mesh_launch_pulse_label", build_text)
+        self.assertIn("mesh_launch_pulse_ready_chip", build_text)
+        self.assertIn("_mesh_launch_readiness_pulse", ast.unparse(render_console))
 
     def test_mesh_launch_console_row_actions_include_recheck_sync_and_session(self) -> None:
         source = Path("codex_gui.py").read_text(encoding="utf-8")
@@ -329,6 +332,20 @@ class GuiSourceTests(unittest.TestCase):
         self.assertIn("on_recheck_launch_blocked_lanes", ast.unparse(build_mesh))
         self.assertIn("_mesh_launch_blocker_timeline_lines", ast.unparse(timeline))
         self.assertIn("row.next_actions", ast.unparse(blocked_lines))
+
+    def test_mesh_launch_readiness_pulse_helper(self) -> None:
+        source = Path("codex_gui.py").read_text(encoding="utf-8")
+        tree = ast.parse(source)
+
+        build_mesh = _method_named(tree, "build_mesh_page")
+        render_console = _method_named(tree, "render_mesh_launch_console")
+        pulse = _method_named(tree, "_mesh_launch_readiness_pulse")
+
+        self.assertIn("mesh_launch_pulse_ready_chip", ast.unparse(build_mesh))
+        self.assertIn("mesh_launch_pulse_offline_chip", ast.unparse(build_mesh))
+        self.assertIn("mesh_launch_pulse_label", ast.unparse(render_console))
+        self.assertIn("_mesh_launch_readiness_pulse", ast.unparse(render_console))
+        self.assertIn("human_time", ast.unparse(pulse))
 
     def test_workstation_pages_have_stateful_next_step_banners(self) -> None:
         source = Path("codex_gui.py").read_text(encoding="utf-8")
