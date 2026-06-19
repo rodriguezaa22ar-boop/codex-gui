@@ -621,6 +621,71 @@ def _doctor_bus_health(
     }
 
 
+def _doctor_handoff_health(run: Any | None, *, summary_reviewed: bool = False) -> dict[str, Any]:
+    if run is None:
+        return {
+            "status": "not_started",
+            "total": 0,
+            "present": 0,
+            "missing": 0,
+            "final_only": 0,
+            "pending": 0,
+            "lanes": [],
+        }
+
+    lanes: list[dict[str, Any]] = []
+    present = 0
+    missing = 0
+    final_only = 0
+    pending = 0
+    for lane in run.lanes:
+        has_handoff = bool(getattr(lane, "handoff_path", ""))
+        has_final = bool(getattr(lane, "final_path", ""))
+        has_status = bool(getattr(lane, "status_path", ""))
+        state = "present"
+        if has_handoff:
+            present += 1
+        elif has_final:
+            state = "final_only"
+            final_only += 1
+            missing += 1
+        elif has_status or lane.status in {"finished", "collected"}:
+            state = "missing"
+            missing += 1
+        else:
+            state = "pending"
+            pending += 1
+        lanes.append({
+            "lane_slug": lane.lane_slug,
+            "device_name": lane.device_name,
+            "status": lane.status,
+            "handoff": state,
+            "has_final": has_final,
+            "has_status": has_status,
+        })
+
+    if summary_reviewed and present + missing:
+        status = "reviewed"
+    elif missing:
+        status = "missing"
+    elif pending:
+        status = "pending"
+    elif present == run.lane_count and run.lane_count:
+        status = "complete"
+    else:
+        status = "not_started"
+
+    return {
+        "status": status,
+        "total": run.lane_count,
+        "present": present,
+        "missing": missing,
+        "final_only": final_only,
+        "pending": pending,
+        "lanes": lanes,
+    }
+
+
 def _doctor_fleet_blockers(
     devices: tuple[DeviceRecord, ...],
     report: MeshReadinessReport,
@@ -720,6 +785,39 @@ def _doctor_run_blockers(
     return blockers
 
 
+def _doctor_handoff_blockers(
+    run: Any | None,
+    *,
+    summary_reviewed: bool = False,
+) -> list[dict[str, Any]]:
+    if run is None or (summary_reviewed and run.collected_count):
+        return []
+
+    blockers: list[dict[str, Any]] = []
+    for lane in run.lanes:
+        if lane.handoff_path or lane.status in {"prepared", "failed"}:
+            continue
+        if not lane.final_path and not lane.status_path and lane.status not in {"finished", "collected"}:
+            continue
+        if lane.final_path:
+            summary = "Lane produced a final message but did not write the required handoff file."
+        else:
+            summary = "Lane has completion metadata but no required handoff file was collected."
+        blockers.append({
+            "scope": "handoff",
+            "lane_slug": lane.lane_slug,
+            "device_name": lane.device_name,
+            "category": "missing-handoff",
+            "status": "review",
+            "summary": summary,
+            "next_actions": [
+                f"Ask {lane.device_name} to write out/{lane.lane_slug}.handoff.md.",
+                "Collect Team again before syncing or reviewing the handoff bus.",
+            ],
+        })
+    return blockers
+
+
 def _doctor_probe_blockers(probe_error: str = "") -> list[dict[str, Any]]:
     if not probe_error:
         return []
@@ -785,6 +883,7 @@ def build_team_doctor_report(
 
     bus_report = load_bus_report(run.team_dir) if run is not None else None
     summary_reviewed = is_team_summary_reviewed(run.team_dir) if run is not None else False
+    handoff_health = _doctor_handoff_health(run, summary_reviewed=summary_reviewed)
     saved_runs = len(run_dirs) if run_dirs else (1 if latest_path is not None else 0)
     operator = team_operator_summary(
         run,
@@ -798,12 +897,16 @@ def build_team_doctor_report(
         *_doctor_probe_blockers(probe_error),
         *_doctor_fleet_blockers(devices, readiness),
         *_doctor_run_blockers(run, bus_report, inspect_error, summary_reviewed=summary_reviewed),
+        *_doctor_handoff_blockers(run, summary_reviewed=summary_reviewed),
     ]
     status = "blocked" if (inspect_error or probe_error) else operator.status
     if probe_error:
         next_action = "Check Fleet"
     elif inspect_error:
         next_action = "Inspect Run"
+    elif handoff_health["status"] == "missing" and status != "blocked":
+        status = "review"
+        next_action = "Review Summary"
     else:
         next_action = operator.next_action
     actionable = status != "blocked" and (ready_devices > 0 or run is not None)
@@ -834,6 +937,7 @@ def build_team_doctor_report(
         "summary_reviewed": summary_reviewed,
         "lane_counts": _doctor_lane_counts(run),
         "bus_health": _doctor_bus_health(run, bus_report, summary_reviewed=summary_reviewed),
+        "handoff_health": handoff_health,
         "blockers": blockers,
     }
 

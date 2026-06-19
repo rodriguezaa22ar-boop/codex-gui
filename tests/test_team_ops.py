@@ -758,6 +758,78 @@ class TeamOpsTests(unittest.TestCase):
             team_ops.TEAM_DIR = original_team
             team_ops.LAST_TEAM_RUN_FILE = original_last
 
+    def test_doctor_json_reports_missing_lane_handoff(self) -> None:
+        ctx = self._with_workspace()
+        original_config = team_ops.CONFIG_DIR
+        original_devices = team_ops.DEVICES_FILE
+        original_team = team_ops.TEAM_DIR
+        original_last = team_ops.LAST_TEAM_RUN_FILE
+
+        team_ops.CONFIG_DIR = ctx.config_dir.parent
+        team_ops.DEVICES_FILE = ctx.devices
+        team_ops.TEAM_DIR = ctx.team_dir
+        team_ops.LAST_TEAM_RUN_FILE = ctx.last_run
+
+        try:
+            save_devices(ctx.devices, (
+                DeviceRecord(
+                    id="atlas-builder-1",
+                    name="atlas-builder",
+                    host="atlas-builder",
+                    user="ao",
+                    status="ready",
+                ),
+            ))
+            run_dir = ctx.team_dir / "team-missing-handoff"
+            out_dir = run_dir / "out"
+            out_dir.mkdir(parents=True, exist_ok=True)
+            manifest = {
+                "run_id": "team-missing-handoff",
+                "created": "2026-06-18T00:00:00-07:00",
+                "project": str(ctx.workspace),
+                "assignments": [
+                    {
+                        "lane_slug": "backend-builder-atlas-builder",
+                        "lane_title": "Core Systems Engineer",
+                        "device_name": "atlas-builder",
+                        "focus": "Backend",
+                    },
+                ],
+            }
+            (run_dir / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+            (out_dir / "backend-builder-atlas-builder.status.txt").write_text(
+                "status=0\nfinished=2026-06-18T00:10:00-07:00\n",
+                encoding="utf-8",
+            )
+            (out_dir / "backend-builder-atlas-builder.final.txt").write_text(
+                "Final message without handoff",
+                encoding="utf-8",
+            )
+
+            args = team_ops.parse_args(["--json", "doctor"])
+            with tempfile.TemporaryFile(mode="w+") as output:
+                with patch("sys.stdout", new=output):
+                    self.assertEqual(team_ops.cmd_doctor(args), 0)
+                    output.seek(0)
+                    payload = json.loads(output.read())
+
+            self.assertTrue(payload["actionable"])
+            self.assertEqual(payload["status"], "review")
+            self.assertEqual(payload["next_action"], "Review Summary")
+            self.assertEqual(payload["handoff_health"]["status"], "missing")
+            self.assertEqual(payload["handoff_health"]["missing"], 1)
+            self.assertEqual(payload["handoff_health"]["final_only"], 1)
+            lane = payload["handoff_health"]["lanes"][0]
+            self.assertEqual(lane["lane_slug"], "backend-builder-atlas-builder")
+            self.assertEqual(lane["handoff"], "final_only")
+            self.assertTrue(any(item["category"] == "missing-handoff" for item in payload["blockers"]))
+            self.assertNotIn("Final message without handoff", json.dumps(payload))
+        finally:
+            team_ops.CONFIG_DIR = original_config
+            team_ops.DEVICES_FILE = original_devices
+            team_ops.TEAM_DIR = original_team
+            team_ops.LAST_TEAM_RUN_FILE = original_last
+
     def test_doctor_json_treats_reviewed_stale_bus_run_as_closed(self) -> None:
         ctx = self._with_workspace()
         original_config = team_ops.CONFIG_DIR
