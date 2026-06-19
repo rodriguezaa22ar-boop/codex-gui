@@ -159,6 +159,8 @@ python3 codex_team_ops.py --json prepare --check
 python3 codex_team_ops.py --json sync
 python3 codex_team_ops.py --json launch
 python3 codex_team_ops.py --json collect
+python3 codex_team_ops.py --json doctor
+python3 codex_team_ops.py --json summary
 ```
 
 The same command set is available as a short script:
