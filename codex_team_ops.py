@@ -220,6 +220,23 @@ def team_readiness(
     return mesh_readiness_report(devices, probes)
 
 
+def device_for_assignment(
+    devices: tuple[DeviceRecord, ...],
+    assignment: Mapping[str, str],
+) -> DeviceRecord | None:
+    device_id = assignment.get("device_id", "")
+    if device_id:
+        for device in devices:
+            if device.id == device_id:
+                return device
+    device_name = assignment.get("device_name", "").lower()
+    if device_name:
+        for device in devices:
+            if device.name.lower() == device_name:
+                return device
+    return None
+
+
 def build_team_assignments(
     devices: tuple[DeviceRecord, ...],
     probes: Mapping[str, DeviceProbe] | None = None,
@@ -365,7 +382,6 @@ def sync_mesh_team_package(
         return [f"local project missing: {local_project}"], [], bus_path
 
     devices = load_devices(DEVICES_FILE)
-    device_map = {item.id: item for item in devices}
     errors: list[str] = []
     targets: list[TeamBusTargetStatus] = []
 
@@ -384,7 +400,7 @@ def sync_mesh_team_package(
         record_target(assignment, "failed", detail, target)
 
     for assignment in assignments:
-        device = device_map.get(assignment.get("device_id", ""))
+        device = device_for_assignment(devices, assignment)
         if device is None:
             record_error(
                 assignment,
@@ -455,12 +471,11 @@ def sync_mesh_team_package(
 
 def launch_team_sessions(run_id: str, assignments: list[dict[str, str]]) -> tuple[list[tuple[str, int]], list[str]]:
     devices = load_devices(DEVICES_FILE)
-    device_map = {item.id: item for item in devices}
     launched: list[tuple[str, int]] = []
     errors: list[str] = []
 
     for assignment in assignments:
-        device = device_map.get(assignment.get("device_id", ""))
+        device = device_for_assignment(devices, assignment)
         if device is None:
             errors.append(f"{assignment.get('device_name', 'device')}: missing device record")
             continue
@@ -482,12 +497,11 @@ def collect_team_results(
     assignments: list[dict[str, str]],
 ) -> tuple[int, list[str]]:
     devices = load_devices(DEVICES_FILE)
-    device_map = {item.id: item for item in devices}
     collected = 0
     errors: list[str] = []
 
     for assignment in assignments:
-        device = device_map.get(assignment.get("device_id", ""))
+        device = device_for_assignment(devices, assignment)
         if device is None:
             errors.append(f"{assignment.get('device_name', 'device')}: missing device record")
             continue
@@ -509,7 +523,7 @@ def collect_team_results(
             errors.append(f"{device.name}: {detail[-1] if detail else 'rsync failed'}")
 
     for assignment in assignments:
-        device = device_map.get(assignment.get("device_id", ""))
+        device = device_for_assignment(devices, assignment)
         if device is None or _is_local_host(device.host):
             continue
         try:

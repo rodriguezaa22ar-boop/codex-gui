@@ -313,6 +313,74 @@ class TeamOpsTests(unittest.TestCase):
             team_ops.TEAM_DIR = original_team
             team_ops.LAST_TEAM_RUN_FILE = original_last
 
+    def test_cmd_sync_resolves_stale_device_id_by_name(self) -> None:
+        ctx = self._with_workspace()
+        original_config = team_ops.CONFIG_DIR
+        original_devices = team_ops.DEVICES_FILE
+        original_team = team_ops.TEAM_DIR
+        original_last = team_ops.LAST_TEAM_RUN_FILE
+
+        team_ops.CONFIG_DIR = ctx.config_dir.parent
+        team_ops.DEVICES_FILE = ctx.devices
+        team_ops.TEAM_DIR = ctx.team_dir
+        team_ops.LAST_TEAM_RUN_FILE = ctx.last_run
+
+        try:
+            device = DeviceRecord(
+                id="new-local-id",
+                name="atlas-ubuntu",
+                host="localhost",
+                user="ao",
+                status="ready",
+                project_root=str(ctx.workspace),
+            )
+            save_devices(ctx.devices, (device,))
+            assignment = {
+                "device_id": "stale-local-id",
+                "device_name": "atlas-ubuntu",
+                "lane_slug": "coordinator-atlas-ubuntu",
+                "lane_title": "Commander / Integrator",
+                "focus": "Coordinate",
+                "target": "ao@localhost:22",
+            }
+            self.assertEqual(team_ops.device_for_assignment((device,), assignment), device)
+
+            run_dir = ctx.team_dir / "team-stale-id"
+            (run_dir / "lanes").mkdir(parents=True)
+            (run_dir / "manifest.json").write_text(json.dumps({
+                "run_id": "team-stale-id",
+                "created": "2026-06-18T00:00:00-07:00",
+                "project": str(ctx.workspace),
+                "assignments": [assignment],
+            }), encoding="utf-8")
+
+            args = team_ops.parse_args([
+                "--json",
+                "sync",
+                "--run-id",
+                "team-stale-id",
+                "--project-root",
+                str(ctx.workspace),
+            ])
+            with tempfile.TemporaryFile(mode="w+") as output:
+                with patch("sys.stdout", new=output):
+                    self.assertEqual(team_ops.cmd_sync(args), 0)
+                    output.seek(0)
+                    payload = json.loads(output.read())
+
+            self.assertEqual(payload["synced"], 1)
+            self.assertEqual(payload["errors"], [])
+            report = load_bus_report(run_dir)
+            self.assertIsNotNone(report)
+            assert report is not None
+            self.assertEqual(report.targets[0].device_name, "atlas-ubuntu")
+            self.assertEqual(report.targets[0].status, "local")
+        finally:
+            team_ops.CONFIG_DIR = original_config
+            team_ops.DEVICES_FILE = original_devices
+            team_ops.TEAM_DIR = original_team
+            team_ops.LAST_TEAM_RUN_FILE = original_last
+
     def test_doctor_json_guides_ready_fleet_without_run(self) -> None:
         ctx = self._with_workspace()
         original_config = team_ops.CONFIG_DIR
