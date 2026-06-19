@@ -59,6 +59,13 @@ REQUIRED_SELECTORS = (
     ".nav-more",
     ".page",
     ".panel",
+    ".launch-cockpit",
+    ".workflow-strip",
+    ".workflow-stage",
+    ".workflow-stage-title",
+    ".workflow-stage-value",
+    ".workflow-stage-detail",
+    ".launch-hero-actions",
     ".operator-console",
     ".terminal-panel",
     ".composer",
@@ -176,6 +183,51 @@ window {
   border: 1px solid @cc_border;
   border-radius: 8px;
   padding: 10px;
+}
+
+.launch-cockpit {
+  background: @cc_panel;
+  border: 1px solid @cc_accent_edge;
+  border-radius: 10px;
+  padding: 12px;
+}
+
+.launch-hero-actions {
+  margin-top: 4px;
+}
+
+.command-grid button {
+  min-height: 38px;
+}
+
+.workflow-strip {
+  background: transparent;
+}
+
+.workflow-strip flowboxchild {
+  padding: 0;
+}
+
+.workflow-stage {
+  background: @cc_row;
+  border: 1px solid @cc_border;
+  border-radius: 8px;
+  padding: 10px;
+  min-width: 180px;
+}
+
+.workflow-stage-title {
+  color: @cc_muted;
+  font-weight: 700;
+}
+
+.workflow-stage-value {
+  color: @cc_text;
+  font-weight: 800;
+}
+
+.workflow-stage-detail {
+  color: @cc_muted;
 }
 
 .operator-console {
@@ -327,6 +379,13 @@ button:hover {
 
 .chip-flow {
   background: transparent;
+}
+
+.power-banner {
+  background: @cc_panel_deep;
+  border: 1px solid @cc_accent_edge;
+  border-radius: 10px;
+  padding: 16px;
 }
 
 .chip-flow flowboxchild {

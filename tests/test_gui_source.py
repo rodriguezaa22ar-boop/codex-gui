@@ -134,6 +134,23 @@ class GuiSourceTests(unittest.TestCase):
         self.assertIn("set_tooltip_text", ast.unparse(set_chip))
         self.assertIn("button.set_tooltip_text(label)", ast.unparse(make_button))
 
+    def test_launch_workbench_prioritizes_guided_run_flow(self) -> None:
+        source = Path("codex_gui.py").read_text(encoding="utf-8")
+        tree = ast.parse(source)
+
+        build_launch = _method_named(tree, "build_launch_page")
+        build_operator = _method_named(tree, "build_operator_console")
+        build_mission = _method_named(tree, "build_mission_panel")
+        refresh_focus = _method_named(tree, "refresh_workbench_focus")
+
+        self.assertIn("build_power_banner", ast.unparse(build_launch))
+        self.assertIn("operator_next_step_banner", ast.unparse(build_operator))
+        self.assertIn("command_grid", ast.unparse(build_operator))
+        self.assertIn("mission_project_chip", ast.unparse(build_mission))
+        self.assertIn("mission_validation_label", ast.unparse(build_mission))
+        self.assertIn("composer_summary_label", source)
+        self.assertIn("prompt_summary_text", ast.unparse(refresh_focus))
+
     def test_dense_chip_rows_use_wrapping_flowbox(self) -> None:
         source = Path("codex_gui.py").read_text(encoding="utf-8")
         tree = ast.parse(source)
