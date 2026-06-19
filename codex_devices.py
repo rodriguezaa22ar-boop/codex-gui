@@ -343,16 +343,45 @@ def _probe_actions(category: str, device: DeviceRecord, approval_url: str = "") 
 
 def _row_from_device_probe(device: DeviceRecord, probe: DeviceProbe | None) -> MeshReadinessRow:
     if probe is None:
-        if device.status in {"ready", "ok", "prepared", "launched", "done", "passed"}:
-            category = "local-ready" if _is_local_host(device.host) else "ready-saved"
+        if _is_local_host(device.host):
+            if device.status in {"ready", "ok", "prepared", "launched", "done", "passed"}:
+                category = "local-ready"
+                return MeshReadinessRow(
+                    device_id=device.id,
+                    device_name=device.name,
+                    host=device.host,
+                    status="ready",
+                    blocker_category=category,
+                    action_priority=_readiness_action_priority("ready", category),
+                    summary="Saved device state is ready.",
+                    next_actions=_probe_actions(category, device),
+                    checked=0,
+                    source="saved",
+                )
             return MeshReadinessRow(
                 device_id=device.id,
                 device_name=device.name,
                 host=device.host,
-                status="ready",
+                status="review",
+                blocker_category="needs-probe",
+                action_priority=_readiness_action_priority("review", "needs-probe"),
+                summary=f"No probe data yet. Last note: {device.note or 'no note'}",
+                next_actions=_probe_actions("needs-probe", device),
+                checked=0,
+                source="saved",
+            )
+        if device.status in {"ready", "ok", "prepared", "launched", "done", "passed"}:
+            category = "needs-probe"
+            status = "review"
+            summary = f"No probe data yet. Last note: {device.note or 'no note'}"
+            return MeshReadinessRow(
+                device_id=device.id,
+                device_name=device.name,
+                host=device.host,
+                status=status,
                 blocker_category=category,
-                action_priority=_readiness_action_priority("ready", category),
-                summary="Saved device state is ready.",
+                action_priority=_readiness_action_priority(status, category),
+                summary=summary,
                 next_actions=_probe_actions(category, device),
                 checked=0,
                 source="saved",
@@ -378,6 +407,7 @@ def _row_from_device_probe(device: DeviceRecord, probe: DeviceProbe | None) -> M
             action_priority=_readiness_action_priority("review", "needs-probe"),
             summary=f"No probe data yet. Last note: {device.note or 'no note'}",
             next_actions=_probe_actions("needs-probe", device),
+            checked=0,
             source="saved",
         )
 

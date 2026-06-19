@@ -74,6 +74,7 @@ from codex_devices import (
     DeviceRecord,
     DeviceProbe,
     MemoryItem,
+    MeshReadinessRow,
     MeshReadinessReport,
     devices_from_tailscale_status_json,
     import_memory_text,
@@ -4914,6 +4915,31 @@ class CodexControl(Gtk.Application):
             if self.trusted_mesh_device(device) and (row := readiness.by_device(device.id)) is not None and row.status == "ready"
         )
 
+    def _mesh_ready_rows(self) -> dict[str, MeshReadinessRow]:
+        return {row.device_id: row for row in mesh_readiness_report(self.devices, self.mesh_probe_records).rows}
+
+    def _mesh_launch_guard(self, assignments: list[dict[str, str]]) -> tuple[bool, list[str], list[str]]:
+        rows = self._mesh_ready_rows()
+        blocked: list[str] = []
+        ready: list[str] = []
+        for assignment in assignments:
+            device = self.mesh_assignment_device(assignment)
+            if device is None:
+                blocked.append(f"{assignment.get('lane_title', 'lane')} | {assignment.get('device_name', 'device')} missing device")
+                continue
+            row = rows.get(device.id)
+            if row is None:
+                blocked.append(f"{assignment['lane_title']} | {assignment.get('device_name', 'device')} missing readiness")
+                continue
+            if row.status != "ready":
+                blocked.append(f"{assignment['lane_title']} | {assignment.get('device_name', 'device')} not ready ({row.status})")
+                continue
+            if not self.trusted_mesh_device(device):
+                blocked.append(f"{assignment['lane_title']} | {assignment.get('device_name', 'device')} untrusted")
+                continue
+            ready.append(assignment['lane_title'])
+        return (len(blocked) == 0 and bool(ready), ready, blocked)
+
     def _mesh_team_seed_devices(self) -> tuple[DeviceRecord, ...]:
         readiness = mesh_readiness_report(self.devices, self.mesh_probe_records)
         if self.mesh_team_only or self.mesh_filter_mode != "all":
@@ -6045,6 +6071,22 @@ class CodexControl(Gtk.Application):
             return
         assert self.mesh_team_dir is not None
         assignments = list(self.mesh_team_assignments)
+        if not assignments:
+            self.set_mesh_team_status("No team lanes staged. Run Prepare Team first.", "warn")
+            self.set_status("No team lanes to launch", "warn")
+            return
+        launch_ready, _, blocked = self._mesh_launch_guard(assignments)
+        if not launch_ready:
+            detail = "; ".join(blocked[:2])
+            self.set_mesh_team_status(
+                "Cannot launch: " + ("; ".join(blocked[:2]) if blocked else "run contains non-ready lanes."),
+                "bad",
+            )
+            if detail:
+                self.set_status(f"Launch blocked: {detail}", "bad")
+            else:
+                self.set_status("Launch blocked by mesh readiness", "bad")
+            return
         team_dir = self.mesh_team_dir
         run_id = self.mesh_team_run_id
         self.set_mesh_team_status(f"Syncing project and team package {run_id} to {len(assignments)} device(s)...")

@@ -398,7 +398,7 @@ class TeamOpsTests(unittest.TestCase):
                 DeviceRecord(
                     id="atlas-builder-1",
                     name="atlas-builder",
-                    host="atlas-builder",
+                    host="localhost",
                     user="ao",
                     status="ready",
                 ),
@@ -423,9 +423,52 @@ class TeamOpsTests(unittest.TestCase):
             row = payload["readiness"]["rows"][0]
             self.assertEqual(row["device_id"], "atlas-builder-1")
             self.assertEqual(row["status"], "ready")
-            self.assertEqual(row["blocker_category"], "ready-saved")
+            self.assertEqual(row["blocker_category"], "local-ready")
             self.assertEqual(row["source"], "saved")
             self.assertTrue(row["trusted"])
+        finally:
+            team_ops.CONFIG_DIR = original_config
+            team_ops.DEVICES_FILE = original_devices
+            team_ops.TEAM_DIR = original_team
+            team_ops.LAST_TEAM_RUN_FILE = original_last
+
+    def test_doctor_requires_fresh_probe_for_remote_ready_devices(self) -> None:
+        ctx = self._with_workspace()
+        original_config = team_ops.CONFIG_DIR
+        original_devices = team_ops.DEVICES_FILE
+        original_team = team_ops.TEAM_DIR
+        original_last = team_ops.LAST_TEAM_RUN_FILE
+
+        team_ops.CONFIG_DIR = ctx.config_dir.parent
+        team_ops.DEVICES_FILE = ctx.devices
+        team_ops.TEAM_DIR = ctx.team_dir
+        team_ops.LAST_TEAM_RUN_FILE = ctx.last_run
+
+        try:
+            save_devices(ctx.devices, (
+                DeviceRecord(
+                    id="atlas-builder-1",
+                    name="atlas-builder",
+                    host="atlas-builder",
+                    user="ao",
+                    status="ready",
+                ),
+            ))
+
+            args = team_ops.parse_args(["--json", "doctor"])
+            with tempfile.TemporaryFile(mode="w+") as output:
+                with patch("sys.stdout", new=output):
+                    self.assertEqual(team_ops.cmd_doctor(args), 0)
+                    output.seek(0)
+                    payload = json.loads(output.read())
+
+            self.assertFalse(payload["actionable"])
+            self.assertEqual(payload["next_action"], "Check Fleet")
+            self.assertEqual(payload["ready_device_count"], 0)
+            self.assertEqual(len(payload["readiness"]["rows"]), 1)
+            row = payload["readiness"]["rows"][0]
+            self.assertEqual(row["status"], "review")
+            self.assertEqual(row["blocker_category"], "needs-probe")
         finally:
             team_ops.CONFIG_DIR = original_config
             team_ops.DEVICES_FILE = original_devices
@@ -741,7 +784,7 @@ class TeamOpsTests(unittest.TestCase):
             self.assertFalse(payload["actionable"])
             self.assertEqual(payload["status"], "blocked")
             self.assertEqual(payload["next_action"], "Repair Bus")
-            self.assertEqual(payload["ready_device_count"], 1)
+            self.assertEqual(payload["ready_device_count"], 0)
             self.assertEqual(payload["latest_run_id"], "team-doctor")
             self.assertEqual(Path(payload["latest_run_path"]), run_dir)
             self.assertEqual(payload["lane_counts"]["total"], 2)

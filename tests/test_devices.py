@@ -482,16 +482,24 @@ class DeviceMeshTests(unittest.TestCase):
         self.assertEqual(row.status, "review")
 
     def test_mesh_readiness_report_uses_saved_ready_status_without_probe(self) -> None:
-        device = DeviceRecord(id="four", name="Saved Ready", host="atlas-main.tailnet", status="ready")
+        local = DeviceRecord(id="four", name="Saved Local", host="localhost", status="ready")
+        remote = DeviceRecord(id="five", name="Saved Remote", host="atlas-main.tailnet", status="ready")
 
-        report = mesh_readiness_report((device,), {})
-        row = report.by_device(device.id)
+        local_report = mesh_readiness_report((local,), {})
+        local_row = local_report.by_device(local.id)
+        self.assertIsNotNone(local_row)
+        assert local_row is not None
+        self.assertEqual(local_row.status, "ready")
+        self.assertIn(local_row.blocker_category, {"ready-saved", "local-ready"})
+        self.assertEqual(local_row.action_priority, 90)
 
-        self.assertIsNotNone(row)
-        assert row is not None
-        self.assertEqual(row.status, "ready")
-        self.assertIn(row.blocker_category, {"ready-saved", "local-ready"})
-        self.assertEqual(row.action_priority, 90)
+        remote_report = mesh_readiness_report((remote,), {})
+        remote_row = remote_report.by_device(remote.id)
+        self.assertIsNotNone(remote_row)
+        assert remote_row is not None
+        self.assertEqual(remote_row.status, "review")
+        self.assertEqual(remote_row.blocker_category, "needs-probe")
+        self.assertLess(remote_row.action_priority, 90)
 
     def test_mesh_readiness_report_exposes_action_priority(self) -> None:
         auth_device = DeviceRecord(id="auth", name="Auth", host="atlas-auth.tailnet")
