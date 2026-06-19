@@ -10,6 +10,8 @@ for a real terminal-backed Codex workflow, not a hosted chat replacement.
 - Codex CLI available as `codex`
 - A terminal fallback such as Konsole, GNOME Console, GNOME Terminal, or xterm
 - Git, if you want project intelligence, mesh sync, and public repo workflows
+- Python packaging build tooling for local installs: `setuptools>=68` and
+  `wheel`
 
 On Fedora/KDE-style systems, the GTK/PyGObject package names are typically in
 the `gtk4` and `python3-gobject` family. On Debian/Ubuntu-style systems, look
@@ -30,6 +32,12 @@ cd codex-gui
 python3 -m pip install --user .
 codex-gui
 ```
+
+`pip install .` uses the PEP 517 build requirements from `pyproject.toml`.
+On a networked host, pip can download `setuptools>=68` and `wheel` if they are
+missing. On an offline, restricted, or freshly provisioned worker, install those
+packages first through the system package manager, Nix shell, or a local wheel
+cache before running the install command.
 
 If `pip` is missing but Python has `ensurepip`:
 

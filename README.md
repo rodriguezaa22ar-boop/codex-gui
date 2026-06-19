@@ -198,6 +198,11 @@ python3 -m pip install --user .
 That installs the `codex-gui` launcher and keeps the app runnable from a
 GitHub checkout without editing paths.
 
+On offline or restricted workers, make sure Python build tooling is already
+available before installing from the clone: `setuptools>=68` and `wheel` are
+declared in `pyproject.toml` and are normally downloaded by pip on networked
+hosts.
+
 Detailed install and release notes:
 
 - [Install guide](docs/INSTALL.md)
