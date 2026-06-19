@@ -2850,6 +2850,7 @@ class CodexControl(Gtk.Application):
         self.personality_combo = self.make_dropdown(PERSONALITIES, self.config.get("personality", "config"))
         self.action_combo = self.make_dropdown(ACTIONS, self.config.get("action", "interactive"))
 
+        outer.append(self.build_power_banner())
         outer.append(self.build_operator_console())
         outer.append(self.build_mission_panel())
         outer.append(self.build_mission_architect_panel())
@@ -2875,6 +2876,7 @@ class CodexControl(Gtk.Application):
     def build_operator_console(self) -> Gtk.Widget:
         panel = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=14)
         panel.add_css_class("operator-console")
+        panel.add_css_class("launch-cockpit")
 
         header = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
         copy = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=3)
@@ -2910,30 +2912,50 @@ class CodexControl(Gtk.Application):
             self.operator_signal_cards.append(card)
         panel.append(grid)
 
-        action_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-        for label, icon_name, handler, primary in [
-            ("Run Max", "media-playback-start-symbolic", self.on_run_embedded, True),
-        ]:
-            button = self.make_button(label, icon_name)
-            button.add_css_class("primary" if primary else "secondary")
-            button.connect("clicked", handler)
-            action_row.append(button)
-        panel.append(action_row)
+        workflow = Gtk.FlowBox()
+        workflow.add_css_class("workflow-strip")
+        workflow.set_selection_mode(Gtk.SelectionMode.NONE)
+        workflow.set_max_children_per_line(4)
+        workflow.set_min_children_per_line(2)
+        workflow.set_row_spacing(8)
+        workflow.set_column_spacing(8)
+        workflow.set_homogeneous(True)
+        self.operator_workflow_labels: dict[str, tuple[Gtk.Label, Gtk.Label, Gtk.Label]] = {}
+        self.operator_workflow_cards: dict[str, Gtk.Box] = {}
+        for stage_key in ("project", "readiness", "autopilot", "ledger"):
+            card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+            card.add_css_class("workflow-stage")
+            title = self.label(stage_key.capitalize(), "workflow-stage-title")
+            value = self.label("checking", "workflow-stage-value")
+            detail = self.label("", "workflow-stage-detail", wrap=True)
+            value.set_wrap(True)
+            detail.set_wrap(True)
+            card.append(title)
+            card.append(value)
+            card.append(detail)
+            workflow.insert(card, -1)
+            self.operator_workflow_labels[stage_key] = (title, value, detail)
+            self.operator_workflow_cards[stage_key] = card
+        panel.append(workflow)
 
-        secondary_actions = Gtk.Expander(label="Operator actions")
-        secondary_action_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-        for label, icon_name, handler, primary in [
-            ("Prepare Auto", "document-new-symbolic", self.on_prepare_autopilot, False),
-            ("Track Auto", "view-refresh-symbolic", self.on_track_autopilot, False),
-            ("Review", "edit-find-symbolic", lambda button: self.on_run_action_button(button, "review"), False),
-            ("Preflight", "checkbox-checked-symbolic", self.on_show_preflight, False),
-        ]:
-            button = self.make_button(label, icon_name)
-            button.add_css_class("primary" if primary else "secondary")
-            button.connect("clicked", handler)
-            secondary_action_row.append(button)
-        secondary_actions.set_child(secondary_action_row)
-        panel.append(secondary_actions)
+        self.operator_next_step_banner = self.next_step_banner(
+            "Next step",
+            "Review readiness, then launch the selected Codex run path.",
+            "Run Max",
+            self.on_run_embedded,
+        )
+        panel.append(self.operator_next_step_banner)
+
+        action_grid = self.command_grid([
+            ("Run Max", self.on_run_embedded, True, "media-playback-start-symbolic", "Launch the selected prompt in the embedded terminal."),
+            ("Prepare Auto", self.on_prepare_autopilot, False, "document-new-symbolic", "Build a durable autopilot package from the current mission."),
+            ("Track Auto", self.on_track_autopilot, False, "view-refresh-symbolic", "Refresh and inspect the latest autopilot package."),
+            ("Review", lambda button: self.on_run_action_button(button, "review"), False, "edit-find-symbolic", "Run Codex review for the current project."),
+            ("Preflight", self.on_show_preflight, False, "checkbox-checked-symbolic", "Open launch readiness details."),
+            ("Save Session", self.on_save_workspace_session, False, "document-save-symbolic", "Store the current project and prompt as a reusable session."),
+        ], columns=3)
+        action_grid.add_css_class("launch-hero-actions")
+        panel.append(action_grid)
         self.render_operator_brief()
         return panel
 
@@ -2975,29 +2997,35 @@ class CodexControl(Gtk.Application):
         top_row.append(browse)
         command_bar.append(top_row)
 
-        action_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-        max_power = Gtk.Button(label="Max Power")
-        max_power.add_css_class("accent")
-        max_power.connect("clicked", self.on_fast_profile, "interactive", "maximum-power")
-        action_row.append(max_power)
-        for label, action, primary in [
-            ("Start", "interactive", True),
-            ("Review", "review", False),
-            ("Resume", "resume", False),
-            ("Exec", "exec", False),
+        self.mission_focus_flow = self.flow_row()
+        self.mission_project_chip = self.chip_label("project pending", "chip")
+        self.mission_mode_chip = self.chip_label("mode pending", "mode-pill")
+        self.mission_validation_chip = self.chip_label("validation pending", "chip")
+        self.mission_thread_chip = self.chip_label("threads pending", "chip")
+        for chip in [
+            self.mission_project_chip,
+            self.mission_mode_chip,
+            self.mission_validation_chip,
+            self.mission_thread_chip,
         ]:
-            button = Gtk.Button(label=label)
-            if primary:
-                button.add_css_class("primary")
-            else:
-                button.add_css_class("secondary")
-            button.connect("clicked", self.on_run_action_button, action)
-            action_row.append(button)
-        detach = Gtk.Button(label="Detach")
-        detach.add_css_class("secondary")
-        detach.connect("clicked", self.on_run_external)
-        action_row.append(detach)
-        command_bar.append(action_row)
+            self.flow_append(self.mission_focus_flow, chip)
+        command_bar.append(self.mission_focus_flow)
+
+        self.mission_path_label = self.label("Project path will appear here.", "muted", wrap=True)
+        self.mission_path_label.set_ellipsize(Pango.EllipsizeMode.START)
+        self.mission_validation_label = self.label("Validation and thread guidance will update with project scans.", "muted", wrap=True)
+        command_bar.append(self.mission_path_label)
+        command_bar.append(self.mission_validation_label)
+
+        action_grid = self.command_grid([
+            ("Run", lambda button: self.on_run_action_button(button, "interactive"), True, "media-playback-start-symbolic", "Start an interactive Codex session in the selected project."),
+            ("Exec", lambda button: self.on_run_action_button(button, "exec"), False, "system-run-symbolic", "Run a one-shot Codex execution."),
+            ("Review", lambda button: self.on_run_action_button(button, "review"), False, "edit-find-symbolic", "Review the current project."),
+            ("Resume", lambda button: self.on_run_action_button(button, "resume"), False, "view-refresh-symbolic", "Resume the most recent thread."),
+            ("Detach", self.on_run_external, False, "utilities-terminal-symbolic", "Launch the same run in an external terminal."),
+            ("Max Power", lambda button: self.on_fast_profile(button, "interactive", "maximum-power"), False, "flashlight-symbolic", "Apply the maximum-power profile and launch."),
+        ], columns=3)
+        command_bar.append(action_grid)
         return command_bar
 
     def build_preflight_panel(self) -> Gtk.Widget:
@@ -3103,6 +3131,9 @@ class CodexControl(Gtk.Application):
             primary_template_row.append(button)
         composer.append(primary_template_row)
 
+        self.composer_summary_label = self.label("Prompt summary updating", "muted", wrap=True)
+        composer.append(self.composer_summary_label)
+
         template_expander = Gtk.Expander(label="Prompt templates")
         button_grid = Gtk.Grid(column_spacing=8, row_spacing=8)
         secondary_prompts = [
@@ -3171,21 +3202,21 @@ class CodexControl(Gtk.Application):
         rail.add_css_class("side-rail")
         rail.set_size_request(self.layout_state.rail_width - 20, -1)
         rail.append(self.build_session_workspace_panel())
+        rail.append(self.build_project_intelligence_panel())
+        rail.append(self.build_command_preview_panel())
+        rail.append(self.build_quality_gate_panel())
+        rail.append(self.build_autopilot_panel())
         rail.append(self.build_launch_package_panel())
         rail.append(self.build_roadmap_panel())
         rail.append(self.build_context_packet_panel())
         rail.append(self.build_palette_panel())
-        rail.append(self.build_quality_gate_panel())
-        rail.append(self.build_autopilot_panel())
         rail.append(self.build_command_ledger_panel())
         rail.append(self.build_receipt_vault_panel())
         rail.append(self.build_agent_studio_panel())
         rail.append(self.build_agent_results_panel())
-        rail.append(self.build_project_intelligence_panel())
         rail.append(self.build_prompt_choices_panel())
         rail.append(self.build_power_controls_panel())
         rail.append(self.build_quick_launch_panel())
-        rail.append(self.build_command_preview_panel())
         scroll = Gtk.ScrolledWindow()
         scroll.set_size_request(self.layout_state.rail_width, -1)
         scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
@@ -6914,6 +6945,53 @@ class CodexControl(Gtk.Application):
             return "full access"
         return "config default"
 
+    def prompt_summary_text(self) -> str:
+        prompt = self.selected_prompt()
+        if not prompt:
+            return "Prompt is empty."
+        words = len(prompt.split())
+        lines = [line.strip() for line in prompt.splitlines() if line.strip()]
+        headline = lines[0] if lines else prompt
+        if len(headline) > 110:
+            headline = headline[:107].rstrip() + "..."
+        return f"{words} words | {headline}"
+
+    def refresh_workbench_focus(self) -> None:
+        snapshot = self.current_project_snapshot()
+        commands = snapshot.commands if snapshot is not None else ()
+        threads = snapshot.threads if snapshot is not None else ()
+        project_name = snapshot.name if snapshot is not None else Path(self.selected_project()).name
+        validation = commands[0].label if commands else "no validation"
+        thread_text = f"{len(threads)} thread" if len(threads) == 1 else f"{len(threads)} threads"
+
+        if hasattr(self, "mission_project_chip"):
+            self.set_chip(self.mission_project_chip, project_name or "project", "chip")
+        if hasattr(self, "mission_mode_chip"):
+            self.set_chip(self.mission_mode_chip, self.selected_mode_label(), "mode-pill")
+        if hasattr(self, "mission_validation_chip"):
+            css = "chip-strong" if commands else "chip"
+            self.set_chip(self.mission_validation_chip, validation, css)
+        if hasattr(self, "mission_thread_chip"):
+            css = "chip-strong" if threads else "chip"
+            self.set_chip(self.mission_thread_chip, thread_text, css)
+        if hasattr(self, "mission_path_label"):
+            project_path = self.selected_project()
+            self.mission_path_label.set_text(f"Project path: {project_path}")
+            self.mission_path_label.set_tooltip_text(project_path)
+        if hasattr(self, "mission_validation_label"):
+            if commands:
+                detail = "; ".join(command.command for command in commands[:2])
+                self.mission_validation_label.set_text(f"Validation ready: {detail}")
+                self.mission_validation_label.set_tooltip_text(detail)
+            else:
+                recommendation = snapshot.recommendation if snapshot is not None else "Scan the project before launching."
+                self.mission_validation_label.set_text(f"Validation: none detected. {recommendation}")
+                self.mission_validation_label.set_tooltip_text(self.mission_validation_label.get_text())
+        if hasattr(self, "composer_summary_label"):
+            summary = self.prompt_summary_text()
+            self.composer_summary_label.set_text(summary)
+            self.composer_summary_label.set_tooltip_text(summary)
+
     def selected_power_values(self) -> tuple[str, str, str]:
         profile = self.dropdown_value(self.profile_combo) if hasattr(self, "profile_combo") else self.config.get("profile", "maximum-power")
         reasoning = self.dropdown_value(self.reasoning_combo) if hasattr(self, "reasoning_combo") else self.config.get("reasoning", "config")
@@ -6987,6 +7065,43 @@ class CodexControl(Gtk.Application):
                     card.remove_css_class(css_class)
                 css_class = "signal-bad" if signal.status in {"blocked", "block", "failed", "bad", "stopped"} else ("signal-ok" if signal.status in {"ready", "ok", "prepared", "queued", "launched", "running", "done"} else "signal-review")
                 card.add_css_class(css_class)
+        if hasattr(self, "operator_workflow_labels") and hasattr(self, "operator_workflow_cards"):
+            signal_map = {
+                "project": brief.signals[2] if len(brief.signals) > 2 else None,
+                "readiness": brief.signals[0] if brief.signals else None,
+                "autopilot": brief.signals[3] if len(brief.signals) > 3 else None,
+                "ledger": brief.signals[4] if len(brief.signals) > 4 else None,
+            }
+            for stage_key, labels in self.operator_workflow_labels.items():
+                signal = signal_map.get(stage_key)
+                title_label, value_label, detail_label = labels
+                if signal is None:
+                    title_label.set_text(stage_key.capitalize())
+                    value_label.set_text("n/a")
+                    detail_label.set_text("")
+                    continue
+                title_label.set_text(signal.title)
+                value_label.set_text(signal.value)
+                detail_label.set_text(signal.detail)
+                card = self.operator_workflow_cards.get(stage_key)
+                if card is not None:
+                    for css_class in ["signal-ok", "signal-review", "signal-bad"]:
+                        card.remove_css_class(css_class)
+                    css_class = "signal-bad" if signal.status in {"blocked", "block", "failed", "bad", "stopped"} else ("signal-ok" if signal.status in {"ready", "ok", "prepared", "queued", "launched", "running", "done"} else "signal-review")
+                    card.add_css_class(css_class)
+        if hasattr(self, "operator_next_step_banner"):
+            action_label = brief.next_action
+            detail = brief.subtitle
+            if brief.signals:
+                detail = f"{brief.signals[0].detail} | {brief.subtitle}"
+            self.update_next_step_banner(
+                self.operator_next_step_banner,
+                brief.title,
+                detail,
+                action_label=action_label,
+                enabled=True,
+            )
+        self.refresh_workbench_focus()
 
     def on_operator_action(self, button: Gtk.Button) -> None:
         action = (self.operator_brief or self.current_operator_brief()).next_action
