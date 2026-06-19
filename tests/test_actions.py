@@ -83,6 +83,12 @@ class ActionCatalogTests(unittest.TestCase):
         results = rank_actions("role bootstrap", limit=5)
         self.assertTrue(any(item.id == "mesh.copy_role_bootstrap" for item in results))
 
+    def test_search_finds_team_summary_review(self) -> None:
+        action = action_by_id("mesh.review_summary")
+        self.assertIsNotNone(action)
+        results = rank_actions("review team summary", limit=5)
+        self.assertTrue(any(item.id == "mesh.review_summary" for item in results))
+
     def test_search_finds_launcher_diagnostics(self) -> None:
         action = action_by_id("launcher.diagnostics")
         self.assertIsNotNone(action)

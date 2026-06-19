@@ -172,10 +172,12 @@ from codex_sessions import (
 from codex_team import (
     TeamBusTargetStatus,
     TeamBusReport,
+    is_team_summary_reviewed,
     inspect_team_run,
     read_team_chat,
     load_bus_report,
     latest_team_run_dir,
+    mark_team_summary_reviewed,
     merge_team_chat_texts,
     role_profile_hint,
     team_operator_summary,
@@ -3880,6 +3882,7 @@ class CodexControl(Gtk.Application):
             ("Visible", self.on_prepare_visible_mesh_team, False, "view-filter-symbolic", "Create lanes from the visible ready set."),
             ("Launch", self.on_launch_mesh_team, False, "media-playback-start-symbolic", "Launch prepared lanes."),
             ("Collect", self.on_collect_mesh_team, False, "folder-download-symbolic", "Collect lane outputs."),
+            ("Review", self.on_review_mesh_team_summary, False, "emblem-ok-symbolic", "Mark the latest team summary as reviewed."),
         ], columns=6)
         for button in getattr(team_buttons, "command_buttons", [])[4:]:
             button.set_tooltip_text("Prepare or load a team first.")
@@ -4238,6 +4241,7 @@ class CodexControl(Gtk.Application):
             ready_devices=ready,
             saved_runs=saved,
             assignment_count=assignment_count,
+            summary_reviewed=is_team_summary_reviewed(self.mesh_team_dir) if self.mesh_team_dir is not None else False,
         )
 
     def current_team_doctor_report(self) -> dict[str, Any]:
@@ -4793,6 +4797,17 @@ class CodexControl(Gtk.Application):
         summary_path = write_team_summary(self.mesh_team_dir)
         self.copy_mesh_text(summary_path.read_text(encoding="utf-8", errors="replace"), "Team summary copied")
         self.render_mesh_team()
+
+    def on_review_mesh_team_summary(self, _button: Gtk.Button) -> None:
+        if self.mesh_team_dir is None:
+            self.set_mesh_team_status("No team run to review.", "warn")
+            self.set_status("No team run to review", "warn")
+            return
+        marker = mark_team_summary_reviewed(self.mesh_team_dir)
+        self.render_mesh_team()
+        self.render_mesh_detail()
+        self.set_mesh_team_status(f"Reviewed team summary for {self.mesh_team_run_id}. Marker: {marker}")
+        self.set_status("Team summary reviewed")
 
     def _team_bus_report(self) -> TeamBusReport | None:
         if self.mesh_team_dir is None:
@@ -8018,6 +8033,7 @@ class CodexControl(Gtk.Application):
                 "mesh.copy_bus_report": self.on_copy_mesh_team_bus_report,
                 "mesh.copy_role_bootstrap": self.on_copy_role_bootstrap,
                 "mesh.summary": self.on_copy_mesh_team_summary,
+                "mesh.review_summary": self.on_review_mesh_team_summary,
                 "mesh.open": self.on_open_mesh_team,
                 "quality.run": self.on_run_quality_gate,
                 "quality.copy": self.on_copy_quality_report,

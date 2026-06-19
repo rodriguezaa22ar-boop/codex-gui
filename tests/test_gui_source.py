@@ -65,6 +65,21 @@ class GuiSourceTests(unittest.TestCase):
         self.assertIn("mesh_doctor_bus_text", ast.unparse(refresh_chips))
         self.assertIn("blocker", ast.unparse(refresh_chips))
 
+    def test_mesh_summary_review_action_is_wired(self) -> None:
+        source = Path("codex_gui.py").read_text(encoding="utf-8")
+        tree = ast.parse(source)
+
+        build_mesh = _method_named(tree, "build_mesh_page")
+        current_operator = _method_named(tree, "current_team_operator_summary")
+        review_summary = _method_named(tree, "on_review_mesh_team_summary")
+        execute_action = _method_named(tree, "execute_action")
+
+        self.assertIn("Review", ast.unparse(build_mesh))
+        self.assertIn("on_review_mesh_team_summary", ast.unparse(build_mesh))
+        self.assertIn("mark_team_summary_reviewed", ast.unparse(review_summary))
+        self.assertIn("is_team_summary_reviewed", ast.unparse(current_operator))
+        self.assertIn("mesh.review_summary", ast.unparse(execute_action))
+
     def test_chips_and_meta_labels_are_ellipsized_with_tooltips(self) -> None:
         source = Path("codex_gui.py").read_text(encoding="utf-8")
         tree = ast.parse(source)

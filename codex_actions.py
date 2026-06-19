@@ -69,6 +69,7 @@ ACTION_SPECS: tuple[ActionSpec, ...] = (
     ActionSpec("mesh.copy_bus_report", "Copy Bus Report", "Mesh", "Copy the latest handoff bus report JSON for the active Codex Team run.", ("agents", "team", "handoff", "bus", "report"), 70),
     ActionSpec("mesh.copy_role_bootstrap", "Copy Role Bootstrap", "Mesh", "Copy role bootstraps and startup presets for the active Codex Team run.", ("agents", "team", "bootstrap", "roles", "handoff"), 68),
     ActionSpec("mesh.summary", "Copy Team Summary", "Mesh", "Generate and copy the current Codex Team summary from collected lane artifacts.", ("agents", "team", "summary", "handoff"), 84),
+    ActionSpec("mesh.review_summary", "Review Team Summary", "Mesh", "Mark the current Codex Team summary as reviewed so a completed or deliberately closed run stops blocking the next team.", ("agents", "team", "summary", "review", "close"), 85),
     ActionSpec("mesh.open", "Open Team Folder", "Mesh", "Open the current Codex Team run folder.", ("agents", "team", "files", "folder"), 70),
     ActionSpec("launcher.diagnostics", "Launcher Diagnostics", "Launcher", "Run launcher integrity checks for the `codex-gui` entrypoint and show actionable repair guidance.", ("launcher", "codex-gui", "entrypoint", "diagnostics", "repair"), 72),
     ActionSpec("launcher.repair", "Repair Launcher", "Launcher", "Reinstall codex-control in editable mode to regenerate the `codex-gui` entrypoint and metadata.", ("launcher", "pip", "repair", "entrypoint"), 58),

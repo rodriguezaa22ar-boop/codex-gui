@@ -349,6 +349,27 @@ class CodexTeamTests(unittest.TestCase):
         self.assertEqual(needs_review.next_action, "Review Summary")
         self.assertEqual(reviewed.next_action, "Prepare Team")
 
+    def test_team_operator_summary_closes_reviewed_partial_run(self) -> None:
+        run_status = TeamRunStatus(
+            run_id="team-partial",
+            team_dir=Path("/tmp/team-partial"),
+            project="/work/codex-gui",
+            created="2026-06-18T12:00:00-07:00",
+            assignments=(),
+            lanes=(
+                TeamLaneStatus("backend", "Backend", "atlas-builder", "backend", "collected", "handoff"),
+                TeamLaneStatus("verify", "Verify", "atlas-cockpit", "verify", "prepared", "waiting"),
+            ),
+        )
+
+        needs_collection = team_operator_summary(run_status, summary_reviewed=False)
+        reviewed = team_operator_summary(run_status, summary_reviewed=True)
+
+        self.assertEqual(needs_collection.next_action, "Collect Team")
+        self.assertEqual(needs_collection.status, "review")
+        self.assertEqual(reviewed.next_action, "Prepare Team")
+        self.assertEqual(reviewed.status, "ready")
+
     def test_mark_team_summary_reviewed_tracks_current_summary(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             team_dir = Path(tmp) / "team-one"
