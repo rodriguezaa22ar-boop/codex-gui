@@ -44,6 +44,15 @@ class GuiSourceTests(unittest.TestCase):
         self.assertTrue(any(_thread_start_targets_worker(node) for node in method.body))
         self.assertFalse(any(_thread_start_targets_worker(node) for node in worker.body))
 
+    def test_mesh_device_rows_surface_probe_freshness(self) -> None:
+        source = Path("codex_gui.py").read_text(encoding="utf-8")
+        tree = ast.parse(source)
+
+        _method_named(tree, "_mesh_freshness_label")
+        render_device_list = _method_named(tree, "render_device_list")
+        self.assertIn("_mesh_freshness_label", ast.unparse(render_device_list))
+        self.assertIn("top.append(freshness)", ast.unparse(render_device_list))
+
 
 if __name__ == "__main__":
     unittest.main()

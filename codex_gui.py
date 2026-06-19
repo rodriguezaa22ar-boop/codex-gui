@@ -3974,6 +3974,17 @@ class CodexControl(Gtk.Application):
     def _filtered_mesh_devices(self, readiness: MeshReadinessReport) -> list[DeviceRecord]:
         return [device for device in self.devices if self._mesh_device_matches_filter(device, readiness)]
 
+    def _mesh_freshness_label(self, checked: int) -> tuple[str, str]:
+        if not checked:
+            return "not checked", "chip"
+        age = max(0, int(time.time()) - int(checked))
+        if age < 90:
+            return f"fresh {age}s", "chip-strong"
+        minutes = max(1, age // 60)
+        if age < 900:
+            return f"{minutes}m old", "chip"
+        return f"stale {minutes}m", "chip-danger"
+
     def refresh_mesh_filter_bar(self, readiness: MeshReadinessReport) -> None:
         counts = {
             "all": readiness.total,
@@ -4133,10 +4144,13 @@ class CodexControl(Gtk.Application):
                 readiness.status if readiness is not None else device.status,
                 self.chip_css_for_status(readiness.status if readiness is not None else device.status),
             )
+            freshness_text, freshness_css = self._mesh_freshness_label(readiness.checked if readiness is not None else 0)
+            freshness = self.chip_label(freshness_text, freshness_css)
             top.append(title)
             top.append(status)
             top.append(role)
             top.append(fleet_status)
+            top.append(freshness)
             target = self.label(f"{device.target()}:{device.port}", "muted")
             target.set_ellipsize(Pango.EllipsizeMode.MIDDLE)
             project = self.label(device.project_root, "muted")
