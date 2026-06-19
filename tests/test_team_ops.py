@@ -229,6 +229,15 @@ class TeamOpsTests(unittest.TestCase):
                     printed = output.read()
             self.assertIn("# Codex Team Summary", printed)
             self.assertIn("Final handoff", printed)
+
+            args = team_ops.parse_args(["--json", "summary", "--run-id", "team-summary", "--mark-reviewed"])
+            with tempfile.TemporaryFile(mode="w+") as output:
+                with patch("sys.stdout", new=output):
+                    self.assertEqual(team_ops.cmd_summary(args), 0)
+                    output.seek(0)
+                    reviewed_payload = json.loads(output.read())
+            self.assertTrue(reviewed_payload["reviewed"])
+            self.assertTrue(Path(reviewed_payload["review_path"]).exists())
         finally:
             team_ops.CONFIG_DIR = original_config
             team_ops.DEVICES_FILE = original_devices

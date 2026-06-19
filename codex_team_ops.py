@@ -44,9 +44,11 @@ from codex_devices import (
 )
 from codex_team import (
     TeamBusTargetStatus,
+    is_team_summary_reviewed,
     inspect_team_run,
     latest_team_run_dir,
     load_bus_report,
+    mark_team_summary_reviewed,
     team_lane_status_counts,
     write_role_bootstrap,
     write_bus_report,
@@ -701,6 +703,7 @@ def build_team_doctor_report(
             inspect_error = f"{latest_path}: {exc}"
 
     bus_report = load_bus_report(run.team_dir) if run is not None else None
+    summary_reviewed = is_team_summary_reviewed(run.team_dir) if run is not None else False
     saved_runs = len(run_dirs) if run_dirs else (1 if latest_path is not None else 0)
     operator = team_operator_summary(
         run,
@@ -708,6 +711,7 @@ def build_team_doctor_report(
         ready_devices=ready_devices,
         saved_runs=saved_runs,
         assignment_count=len(assignments),
+        summary_reviewed=summary_reviewed,
     )
     blockers = [
         *_doctor_fleet_blockers(devices, readiness),
@@ -728,6 +732,7 @@ def build_team_doctor_report(
         "saved_run_count": saved_runs,
         "latest_run_id": run.run_id if run is not None else "",
         "latest_run_path": str(run.team_dir if run is not None else latest_path or ""),
+        "summary_reviewed": summary_reviewed,
         "lane_counts": _doctor_lane_counts(run),
         "bus_health": _doctor_bus_health(run, bus_report),
         "blockers": blockers,
@@ -849,6 +854,9 @@ def cmd_doctor(args: argparse.Namespace) -> int:
 def cmd_summary(args: argparse.Namespace) -> int:
     team_dir = _resolve_team_dir(TEAM_DIR, args.run_id)
     summary_path = write_team_summary(team_dir)
+    review_path = None
+    if args.mark_reviewed:
+        review_path = mark_team_summary_reviewed(team_dir)
     text = summary_path.read_text(encoding="utf-8", errors="replace")
     run = inspect_team_run(team_dir)
 
@@ -857,6 +865,8 @@ def cmd_summary(args: argparse.Namespace) -> int:
             "team_dir": str(team_dir),
             "summary_path": str(summary_path),
             "summary_bytes": summary_path.stat().st_size,
+            "reviewed": review_path is not None,
+            "review_path": str(review_path or ""),
             "run_id": run.run_id,
             "lane_count": run.lane_count,
             "collected_count": run.collected_count,
@@ -1034,6 +1044,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     summary.set_defaults(func=cmd_summary)
     summary.add_argument("--run-id", default="")
     summary.add_argument("--print", dest="print_summary", action="store_true", help="Print summary markdown instead of the path")
+    summary.add_argument("--mark-reviewed", action="store_true", help="Mark the current summary as reviewed")
 
     sync = subparsers.add_parser("sync", help="Sync team package to selected devices")
     sync.set_defaults(func=cmd_sync)

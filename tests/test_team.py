@@ -9,9 +9,11 @@ from codex_team import (
     TeamBusTargetStatus,
     TeamLaneStatus,
     TeamRunStatus,
+    is_team_summary_reviewed,
     load_bus_report,
     inspect_team_run,
     latest_team_run_dir,
+    mark_team_summary_reviewed,
     merge_team_chat_texts,
     read_team_chat,
     team_operator_summary,
@@ -310,6 +312,44 @@ class CodexTeamTests(unittest.TestCase):
         needs_bus = team_operator_summary(collected)
 
         self.assertEqual(needs_bus.next_action, "Sync Bus")
+
+        healthy_bus = TeamBusReport(
+            run_id="team-one",
+            team_dir="/tmp/team-one",
+            bus_path="/tmp/team-one/out/handoff-bus.md",
+            sent=2,
+            failures=(),
+            generated="2026-06-18T12:10:00-07:00",
+            generated_epoch=1710000000,
+            targets=(
+                TeamBusTargetStatus("backend", "atlas-builder", "atlas-builder", "synced", "ok"),
+                TeamBusTargetStatus("verify", "atlas-cockpit", "atlas-cockpit", "synced", "ok"),
+            ),
+        )
+        needs_review = team_operator_summary(collected, healthy_bus)
+        reviewed = team_operator_summary(collected, healthy_bus, summary_reviewed=True)
+
+        self.assertEqual(needs_review.next_action, "Review Summary")
+        self.assertEqual(reviewed.next_action, "Prepare Team")
+
+    def test_mark_team_summary_reviewed_tracks_current_summary(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            team_dir = Path(tmp) / "team-one"
+            self.write_manifest(team_dir, "team-one")
+            out_dir = team_dir / "collected" / "atlas-builder"
+            out_dir.mkdir(parents=True)
+            final = out_dir / "backend-builder-atlas-builder.final.txt"
+            final.write_text("Reviewed handoff", encoding="utf-8")
+
+            self.assertFalse(is_team_summary_reviewed(team_dir))
+            marker = mark_team_summary_reviewed(team_dir)
+
+            self.assertTrue(marker.exists())
+            self.assertTrue(is_team_summary_reviewed(team_dir))
+
+            summary = team_dir / "summary.md"
+            summary.write_text(summary.read_text(encoding="utf-8") + "\nChanged\n", encoding="utf-8")
+            self.assertFalse(is_team_summary_reviewed(team_dir))
 
     def test_team_operator_summary_prioritizes_bus_repair(self) -> None:
         run_status = TeamRunStatus(
