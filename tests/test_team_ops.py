@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from codex_devices import DeviceRecord, save_devices
+from codex_team import load_bus_report
 import codex_team_ops as team_ops
 
 
@@ -168,6 +169,75 @@ class TeamOpsTests(unittest.TestCase):
             self.assertIn("project", payload)
             self.assertEqual(payload["operator"]["next_action"], "Launch Team")
             self.assertIn("prepared", payload["operator"]["lane_text"])
+        finally:
+            team_ops.CONFIG_DIR = original_config
+            team_ops.DEVICES_FILE = original_devices
+            team_ops.TEAM_DIR = original_team
+            team_ops.LAST_TEAM_RUN_FILE = original_last
+
+    def test_cmd_sync_writes_bus_report(self) -> None:
+        ctx = self._with_workspace()
+        original_config = team_ops.CONFIG_DIR
+        original_devices = team_ops.DEVICES_FILE
+        original_team = team_ops.TEAM_DIR
+        original_last = team_ops.LAST_TEAM_RUN_FILE
+
+        team_ops.CONFIG_DIR = ctx.config_dir.parent
+        team_ops.DEVICES_FILE = ctx.devices
+        team_ops.TEAM_DIR = ctx.team_dir
+        team_ops.LAST_TEAM_RUN_FILE = ctx.last_run
+
+        try:
+            device = DeviceRecord(
+                id="local-1",
+                name="Local",
+                host="localhost",
+                user="ao",
+                status="ready",
+                project_root=str(ctx.workspace),
+            )
+            save_devices(ctx.devices, (device,))
+            run_dir = ctx.team_dir / "team-sync"
+            (run_dir / "lanes").mkdir(parents=True)
+            manifest = {
+                "run_id": "team-sync",
+                "created": "2026-06-18T00:00:00-07:00",
+                "project": str(ctx.workspace),
+                "assignments": [
+                    {
+                        "device_id": "local-1",
+                        "device_name": "Local",
+                        "lane_slug": "coordinator-local",
+                        "lane_title": "Commander / Integrator",
+                        "focus": "Coordinate",
+                        "target": "ao@localhost:22",
+                    }
+                ],
+            }
+            (run_dir / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+
+            args = team_ops.parse_args([
+                "--json",
+                "sync",
+                "--run-id",
+                "team-sync",
+                "--project-root",
+                str(ctx.workspace),
+            ])
+            with tempfile.TemporaryFile(mode="w+") as output:
+                with patch("sys.stdout", new=output):
+                    self.assertEqual(team_ops.cmd_sync(args), 0)
+                    output.seek(0)
+                    payload = json.loads(output.read())
+
+            self.assertEqual(payload["synced"], 1)
+            self.assertEqual(payload["errors"], [])
+            self.assertTrue(Path(payload["bus_report"]).exists())
+            report = load_bus_report(run_dir)
+            self.assertIsNotNone(report)
+            assert report is not None
+            self.assertEqual(report.synced_count, 1)
+            self.assertEqual(report.targets[0].status, "local")
         finally:
             team_ops.CONFIG_DIR = original_config
             team_ops.DEVICES_FILE = original_devices

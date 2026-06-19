@@ -43,11 +43,14 @@ from codex_devices import (
     devices_from_tailscale_status_json,
 )
 from codex_team import (
+    TeamBusTargetStatus,
     inspect_team_run,
     latest_team_run_dir,
     load_bus_report,
     team_lane_status_counts,
     write_role_bootstrap,
+    write_bus_report,
+    write_handoff_bus,
     write_team_summary,
     team_operator_summary,
     team_role_for_device,
@@ -343,21 +346,41 @@ def sync_mesh_team_package(
     run_id: str,
     assignments: list[dict[str, str]],
     project_root: str,
-) -> list[str]:
+) -> tuple[list[str], list[TeamBusTargetStatus], Path]:
+    bus_path = write_handoff_bus(team_dir)
     local_project = Path(project_root).expanduser()
     if not local_project.exists():
-        return [f"local project missing: {local_project}"]
+        return [f"local project missing: {local_project}"], [], bus_path
 
     devices = load_devices(DEVICES_FILE)
     device_map = {item.id: item for item in devices}
     errors: list[str] = []
+    targets: list[TeamBusTargetStatus] = []
+
+    def record_target(assignment: dict[str, str], status: str, detail: str, target: str = "") -> None:
+        targets.append(TeamBusTargetStatus(
+            lane_slug=assignment.get("lane_slug", ""),
+            device_name=assignment.get("device_name", "device"),
+            target=target or assignment.get("target", ""),
+            status=status,
+            detail=detail,
+            artifact_path=str(bus_path),
+        ))
+
+    def record_error(assignment: dict[str, str], detail: str, target: str = "") -> None:
+        errors.append(detail)
+        record_target(assignment, "failed", detail, target)
 
     for assignment in assignments:
         device = device_map.get(assignment.get("device_id", ""))
         if device is None:
-            errors.append(f"{assignment.get('device_name', 'device')}: missing device record")
+            record_error(
+                assignment,
+                f"{assignment.get('device_name', 'device')}: missing device record",
+            )
             continue
         if _is_local_host(device.host):
+            record_target(assignment, "local", "local team package ready", device.target())
             continue
 
         target_project = Path(device.project_root).expanduser()
@@ -365,43 +388,57 @@ def sync_mesh_team_package(
             try:
                 mkdir_result = run_cmd(list(ssh_mkdir_command(device, device.project_root)), timeout=20)
             except Exception as exc:  # noqa: BLE001
-                errors.append(f"{device.name}: project mkdir failed: {exc}")
+                record_error(assignment, f"{device.name}: project mkdir failed: {exc}", device.target())
                 continue
             if mkdir_result.returncode != 0:
                 detail = (mkdir_result.stderr or mkdir_result.stdout or "mkdir failed").strip().splitlines()
-                errors.append(f"{device.name}: project mkdir failed: {detail[-1] if detail else 'mkdir failed'}")
+                record_error(
+                    assignment,
+                    f"{device.name}: project mkdir failed: {detail[-1] if detail else 'mkdir failed'}",
+                    device.target(),
+                )
                 continue
 
             try:
                 project_result = run_cmd(list(rsync_project_command(local_project, device)), timeout=120)
             except Exception as exc:  # noqa: BLE001
-                errors.append(f"{device.name}: project sync failed: {exc}")
+                record_error(assignment, f"{device.name}: project sync failed: {exc}", device.target())
                 continue
             if project_result.returncode != 0:
                 detail = (project_result.stderr or project_result.stdout or "rsync failed").strip().splitlines()
-                errors.append(f"{device.name}: project sync failed: {detail[-1] if detail else 'rsync failed'}")
+                record_error(
+                    assignment,
+                    f"{device.name}: project sync failed: {detail[-1] if detail else 'rsync failed'}",
+                    device.target(),
+                )
                 continue
 
         try:
             team_mkdir = run_cmd(list(ssh_mkdir_command(device, remote_team_dir(run_id))), timeout=20)
         except Exception as exc:  # noqa: BLE001
-            errors.append(f"{device.name}: team mkdir failed: {exc}")
+            record_error(assignment, f"{device.name}: team mkdir failed: {exc}", device.target())
             continue
         if team_mkdir.returncode != 0:
             detail = (team_mkdir.stderr or team_mkdir.stdout or "mkdir failed").strip().splitlines()
-            errors.append(f"{device.name}: team mkdir failed: {detail[-1] if detail else 'mkdir failed'}")
+            record_error(
+                assignment,
+                f"{device.name}: team mkdir failed: {detail[-1] if detail else 'mkdir failed'}",
+                device.target(),
+            )
             continue
 
         try:
             package_result = run_cmd(list(rsync_team_package_command(team_dir, device, run_id)), timeout=120)
         except Exception as exc:  # noqa: BLE001
-            errors.append(f"{device.name}: {exc}")
+            record_error(assignment, f"{device.name}: {exc}", device.target())
             continue
         if package_result.returncode != 0:
             detail = (package_result.stderr or package_result.stdout or "rsync failed").strip().splitlines()
-            errors.append(f"{device.name}: {detail[-1] if detail else 'package sync failed'}")
+            record_error(assignment, f"{device.name}: {detail[-1] if detail else 'package sync failed'}", device.target())
+            continue
+        record_target(assignment, "synced", "team package synced", device.target())
 
-    return errors
+    return errors, targets, bus_path
 
 
 def launch_team_sessions(run_id: str, assignments: list[dict[str, str]]) -> tuple[list[tuple[str, int]], list[str]]:
@@ -813,11 +850,23 @@ def cmd_sync(args: argparse.Namespace) -> int:
     team_dir = _resolve_team_dir(TEAM_DIR, args.run_id)
     run = inspect_team_run(team_dir)
     assignments = [dict(item) for item in run.assignments]
-    errors = sync_mesh_team_package(team_dir, team_dir.name, assignments, args.project_root)
+    errors, targets, bus_path = sync_mesh_team_package(team_dir, team_dir.name, assignments, args.project_root)
+    synced = sum(1 for target in targets if target.is_success)
+    report_path = write_bus_report(
+        team_dir,
+        sent=synced,
+        failures=errors,
+        bus_path=bus_path,
+        target_statuses=targets,
+    )
 
-    synced = max(0, len(assignments) - len(errors))
     if args.json:
-        print(json.dumps({"team_dir": str(team_dir), "errors": errors, "synced": synced}, sort_keys=True))
+        print(json.dumps({
+            "team_dir": str(team_dir),
+            "bus_report": str(report_path),
+            "errors": errors,
+            "synced": synced,
+        }, sort_keys=True))
     else:
         print(f"Synced {synced} lane package(s) to remote team dirs")
 
@@ -834,7 +883,15 @@ def cmd_launch(args: argparse.Namespace) -> int:
     assignments = [dict(item) for item in run.assignments]
 
     if args.sync_before_launch:
-        errors = sync_mesh_team_package(team_dir, team_dir.name, assignments, args.project_root)
+        errors, targets, bus_path = sync_mesh_team_package(team_dir, team_dir.name, assignments, args.project_root)
+        synced = sum(1 for target in targets if target.is_success)
+        write_bus_report(
+            team_dir,
+            sent=synced,
+            failures=errors,
+            bus_path=bus_path,
+            target_statuses=targets,
+        )
         if errors:
             for item in errors:
                 print(item, file=sys.stderr)
