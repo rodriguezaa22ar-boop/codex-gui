@@ -72,6 +72,8 @@ BASE_PROMPT = (
     "trusted multi-device Codex teamwork, validation, and reversible changes."
 )
 
+LAUNCH_READY_STATUSES = {"ready", "ok", "prepared", "launched", "done", "passed"}
+
 
 def run_cmd(args: list[str], cwd: str | Path | None = None, timeout: int = 20):
     """Run one shell command and return a CompletedProcess."""
@@ -114,6 +116,16 @@ def _is_local_host(host: str) -> bool:
 def _is_trusted(device: DeviceRecord) -> bool:
     identity = f"{device.name} {device.host} {device.note}".lower()
     return "atlas-security" not in identity and device.status != "untrusted"
+
+
+def _launch_preflight_error(device: DeviceRecord, assignment: Mapping[str, str]) -> str:
+    lane_slug = assignment.get("lane_slug", "lane")
+    if not _is_trusted(device):
+        return f"{device.name}: launch blocked for {lane_slug}: device is not trusted for team lanes"
+    if device.status not in LAUNCH_READY_STATUSES:
+        status = device.status or "unknown"
+        return f"{device.name}: launch blocked for {lane_slug}: saved status {status}; run codex-team-ops check before launching"
+    return ""
 
 
 def _run_label() -> str:
@@ -478,6 +490,10 @@ def launch_team_sessions(run_id: str, assignments: list[dict[str, str]]) -> tupl
         device = device_for_assignment(devices, assignment)
         if device is None:
             errors.append(f"{assignment.get('device_name', 'device')}: missing device record")
+            continue
+        preflight_error = _launch_preflight_error(device, assignment)
+        if preflight_error:
+            errors.append(preflight_error)
             continue
 
         command = (

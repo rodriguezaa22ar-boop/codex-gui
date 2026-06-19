@@ -381,6 +381,80 @@ class TeamOpsTests(unittest.TestCase):
             team_ops.TEAM_DIR = original_team
             team_ops.LAST_TEAM_RUN_FILE = original_last
 
+    def test_launch_team_sessions_blocks_unready_devices_before_spawn(self) -> None:
+        ctx = self._with_workspace()
+        original_config = team_ops.CONFIG_DIR
+        original_devices = team_ops.DEVICES_FILE
+        original_team = team_ops.TEAM_DIR
+        original_last = team_ops.LAST_TEAM_RUN_FILE
+
+        team_ops.CONFIG_DIR = ctx.config_dir.parent
+        team_ops.DEVICES_FILE = ctx.devices
+        team_ops.TEAM_DIR = ctx.team_dir
+        team_ops.LAST_TEAM_RUN_FILE = ctx.last_run
+
+        try:
+            ready = DeviceRecord(
+                id="local-ready",
+                name="atlas-ubuntu",
+                host="localhost",
+                user="ao",
+                status="ready",
+                project_root=str(ctx.workspace),
+            )
+            blocked = DeviceRecord(
+                id="blocked-builder",
+                name="atlas-builder",
+                host="atlas-builder",
+                user="ao",
+                status="blocked",
+                note="SSH auth denied",
+            )
+            untrusted = DeviceRecord(
+                id="security-node",
+                name="atlas-security",
+                host="atlas-security",
+                user="ao",
+                status="ready",
+            )
+            save_devices(ctx.devices, (ready, blocked, untrusted))
+            assignments = [
+                {
+                    "device_id": ready.id,
+                    "device_name": ready.name,
+                    "lane_slug": "coordinator-atlas-ubuntu",
+                },
+                {
+                    "device_id": blocked.id,
+                    "device_name": blocked.name,
+                    "lane_slug": "backend-builder-atlas-builder",
+                },
+                {
+                    "device_id": untrusted.id,
+                    "device_name": untrusted.name,
+                    "lane_slug": "security-atlas-security",
+                },
+            ]
+
+            with patch.object(team_ops, "spawn_cmd", return_value=SimpleNamespace(pid=4321)) as spawn:
+                launched, errors = team_ops.launch_team_sessions("team-launch", assignments)
+
+            self.assertEqual(launched, [("coordinator-atlas-ubuntu", 4321)])
+            self.assertEqual(spawn.call_count, 1)
+            error_text = "\n".join(errors)
+            self.assertIn("atlas-builder: launch blocked", error_text)
+            self.assertIn("saved status blocked", error_text)
+            self.assertIn("atlas-security: launch blocked", error_text)
+            self.assertIn("not trusted", error_text)
+            self.assertNotIn("SSH auth denied", error_text)
+            self.assertNotIn("token", error_text.lower())
+            self.assertNotIn("password", error_text.lower())
+        finally:
+            team_ops.CONFIG_DIR = original_config
+            team_ops.DEVICES_FILE = original_devices
+            team_ops.TEAM_DIR = original_team
+            team_ops.LAST_TEAM_RUN_FILE = original_last
+
     def test_doctor_json_guides_ready_fleet_without_run(self) -> None:
         ctx = self._with_workspace()
         original_config = team_ops.CONFIG_DIR
