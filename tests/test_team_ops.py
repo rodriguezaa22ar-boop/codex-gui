@@ -758,6 +758,106 @@ class TeamOpsTests(unittest.TestCase):
             team_ops.TEAM_DIR = original_team
             team_ops.LAST_TEAM_RUN_FILE = original_last
 
+    def test_doctor_json_treats_reviewed_stale_bus_run_as_closed(self) -> None:
+        ctx = self._with_workspace()
+        original_config = team_ops.CONFIG_DIR
+        original_devices = team_ops.DEVICES_FILE
+        original_team = team_ops.TEAM_DIR
+        original_last = team_ops.LAST_TEAM_RUN_FILE
+
+        team_ops.CONFIG_DIR = ctx.config_dir.parent
+        team_ops.DEVICES_FILE = ctx.devices
+        team_ops.TEAM_DIR = ctx.team_dir
+        team_ops.LAST_TEAM_RUN_FILE = ctx.last_run
+
+        try:
+            save_devices(ctx.devices, (
+                DeviceRecord(
+                    id="atlas-builder-1",
+                    name="atlas-builder",
+                    host="atlas-builder",
+                    user="ao",
+                    status="ready",
+                ),
+            ))
+            run_dir = ctx.team_dir / "team-reviewed-stale"
+            out_dir = run_dir / "out"
+            collected_dir = run_dir / "collected" / "atlas-builder"
+            out_dir.mkdir(parents=True, exist_ok=True)
+            collected_dir.mkdir(parents=True, exist_ok=True)
+            manifest = {
+                "run_id": "team-reviewed-stale",
+                "created": "2026-06-18T00:00:00-07:00",
+                "project": str(ctx.workspace),
+                "assignments": [
+                    {
+                        "lane_slug": "backend-builder-atlas-builder",
+                        "lane_title": "Core Systems Engineer",
+                        "device_name": "atlas-builder",
+                        "focus": "Backend",
+                    },
+                    {
+                        "lane_slug": "ui-polish-atlas-main",
+                        "lane_title": "Product / GTK UX Engineer",
+                        "device_name": "atlas-main",
+                        "focus": "UI",
+                    },
+                ],
+            }
+            (run_dir / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+            (collected_dir / "backend-builder-atlas-builder.handoff.md").write_text("Backend done", encoding="utf-8")
+            bus_path = out_dir / "handoff-bus.md"
+            bus_path.write_text("bus", encoding="utf-8")
+            (out_dir / "handoff-bus-report.json").write_text(json.dumps({
+                "run_id": "team-reviewed-stale",
+                "team_dir": str(run_dir),
+                "bus_path": str(bus_path),
+                "sent": 2,
+                "failures": [],
+                "generated": "2026-06-18T00:12:00-07:00",
+                "generated_epoch": 1710000000,
+                "targets": [
+                    {
+                        "lane_slug": "backend-builder-atlas-builder",
+                        "device_name": "atlas-builder",
+                        "target": "atlas-builder",
+                        "status": "synced",
+                        "detail": "ok",
+                        "artifact_path": str(bus_path),
+                    },
+                    {
+                        "lane_slug": "ui-polish-atlas-main",
+                        "device_name": "atlas-main",
+                        "target": "atlas-main",
+                        "status": "stale",
+                        "detail": "offline worker left stale bus artifact",
+                        "artifact_path": str(bus_path),
+                    },
+                ],
+            }), encoding="utf-8")
+            team_ops.mark_team_summary_reviewed(run_dir)
+
+            args = team_ops.parse_args(["--json", "doctor"])
+            with tempfile.TemporaryFile(mode="w+") as output:
+                with patch("sys.stdout", new=output):
+                    self.assertEqual(team_ops.cmd_doctor(args), 0)
+                    output.seek(0)
+                    payload = json.loads(output.read())
+
+            self.assertTrue(payload["summary_reviewed"])
+            self.assertTrue(payload["actionable"])
+            self.assertEqual(payload["status"], "ready")
+            self.assertEqual(payload["next_action"], "Prepare Team")
+            self.assertEqual(payload["latest_run_id"], "team-reviewed-stale")
+            self.assertEqual(payload["bus_health"]["status"], "reviewed")
+            self.assertEqual(payload["bus_health"]["stale"], 1)
+            self.assertFalse(any(item["scope"] in {"run", "bus"} for item in payload["blockers"]))
+        finally:
+            team_ops.CONFIG_DIR = original_config
+            team_ops.DEVICES_FILE = original_devices
+            team_ops.TEAM_DIR = original_team
+            team_ops.LAST_TEAM_RUN_FILE = original_last
+
     def test_cmd_roles_reports_assignments(self) -> None:
         ctx = self._with_workspace()
         original_config = team_ops.CONFIG_DIR

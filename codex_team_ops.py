@@ -574,7 +574,12 @@ def _doctor_lane_counts(run: Any | None) -> dict[str, int]:
     return counts
 
 
-def _doctor_bus_health(run: Any | None, bus_report: Any | None) -> dict[str, Any]:
+def _doctor_bus_health(
+    run: Any | None,
+    bus_report: Any | None,
+    *,
+    summary_reviewed: bool = False,
+) -> dict[str, Any]:
     if run is None:
         return {
             "status": "not_started",
@@ -586,8 +591,9 @@ def _doctor_bus_health(run: Any | None, bus_report: Any | None) -> dict[str, Any
             "failures": 0,
         }
     if bus_report is None:
+        status = "reviewed" if summary_reviewed and run.collected_count else "not_synced"
         return {
-            "status": "not_synced",
+            "status": status,
             "path": str(run.team_dir / "out" / "handoff-bus.md"),
             "synced": 0,
             "failed": 0,
@@ -596,7 +602,9 @@ def _doctor_bus_health(run: Any | None, bus_report: Any | None) -> dict[str, Any
             "failures": 0,
         }
     failures = len(bus_report.failures)
-    if bus_report.failed_count or bus_report.stale_count or failures:
+    if summary_reviewed and run.collected_count:
+        status = "reviewed"
+    elif bus_report.failed_count or bus_report.stale_count or failures:
         status = "repair"
     elif bus_report.targets or bus_report.sent:
         status = "healthy"
@@ -654,7 +662,13 @@ def _doctor_fleet_blockers(
     return blockers
 
 
-def _doctor_run_blockers(run: Any | None, bus_report: Any | None, inspect_error: str = "") -> list[dict[str, Any]]:
+def _doctor_run_blockers(
+    run: Any | None,
+    bus_report: Any | None,
+    inspect_error: str = "",
+    *,
+    summary_reviewed: bool = False,
+) -> list[dict[str, Any]]:
     blockers: list[dict[str, Any]] = []
     if inspect_error:
         blockers.append({
@@ -664,6 +678,8 @@ def _doctor_run_blockers(run: Any | None, bus_report: Any | None, inspect_error:
             "summary": inspect_error,
             "next_actions": ["Inspect the latest team run manifest and repair unreadable run artifacts."],
         })
+        return blockers
+    if run is not None and summary_reviewed and run.collected_count:
         return blockers
     if run is not None:
         for lane in run.lanes:
@@ -781,7 +797,7 @@ def build_team_doctor_report(
     blockers = [
         *_doctor_probe_blockers(probe_error),
         *_doctor_fleet_blockers(devices, readiness),
-        *_doctor_run_blockers(run, bus_report, inspect_error),
+        *_doctor_run_blockers(run, bus_report, inspect_error, summary_reviewed=summary_reviewed),
     ]
     status = "blocked" if (inspect_error or probe_error) else operator.status
     if probe_error:
@@ -817,7 +833,7 @@ def build_team_doctor_report(
         "latest_run_path": str(run.team_dir if run is not None else latest_path or ""),
         "summary_reviewed": summary_reviewed,
         "lane_counts": _doctor_lane_counts(run),
-        "bus_health": _doctor_bus_health(run, bus_report),
+        "bus_health": _doctor_bus_health(run, bus_report, summary_reviewed=summary_reviewed),
         "blockers": blockers,
     }
 

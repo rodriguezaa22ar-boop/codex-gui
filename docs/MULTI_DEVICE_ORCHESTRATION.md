@@ -64,6 +64,11 @@ python3 codex_team_ops.py --json summary
 emit raw SSH or probe output.
 Use `python3 codex_team_ops.py --json check --no-persist` in read-only verifier
 lanes when probing is useful but `devices.json` must not be updated.
+If `doctor` reports stale bus targets or offline lanes from a run you have
+already collected and intentionally closed, run
+`python3 codex_team_ops.py --json summary --mark-reviewed`. A reviewed partial
+run stays visible in the report, but no longer blocks preparing a new team from
+the currently ready devices.
 
 You can also use the launcher script:
 
