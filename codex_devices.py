@@ -200,6 +200,8 @@ def _has_uncommitted_changes(git_state: str) -> bool:
 def _missing_codex_hint(probe: DeviceProbe, device: DeviceRecord) -> bool:
     haystack = f"{probe.raw} {probe.summary} {probe.codex_version} {probe.returncode}".lower()
     codex_name = Path(device.codex_bin).name.lower() if device.codex_bin else "codex"
+    if "codex cli missing" in haystack or "codex executable not found" in haystack:
+        return True
     if "no such file" in haystack and ("codex" in haystack or codex_name in haystack):
         return True
     if "command not found" in haystack:
@@ -888,6 +890,12 @@ def local_probe_command(device: DeviceRecord) -> tuple[str, ...]:
 def classify_probe_failure(text: str, returncode: int) -> tuple[str, str]:
     clean = " ".join(line.strip() for line in text.splitlines() if line.strip())
     lower = clean.lower()
+    if (
+        "codex executable not found" in lower
+        or "codex: command not found" in lower
+        or ("no such file" in lower and "codex" in lower)
+    ):
+        return "blocked", "Codex CLI missing"
     if "login.tailscale.com/a/" in lower or "tailscale ssh requires an additional check" in lower:
         return "blocked", "Tailscale SSH approval required"
     if "permission denied" in lower:

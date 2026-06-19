@@ -343,6 +343,27 @@ class DeviceMeshTests(unittest.TestCase):
         self.assertEqual(probe.status, "blocked")
         self.assertEqual(probe.summary, "SSH auth denied")
 
+    def test_mesh_readiness_report_categorizes_missing_codex(self) -> None:
+        device = DeviceRecord(
+            id="codex-missing",
+            name="Builder",
+            host="atlas-builder.tailnet",
+            codex_bin="~/.local/bin/codex",
+        )
+
+        probe = parse_probe_output(device, "codex executable not found", 127, timestamp=123)
+        report = mesh_readiness_report((device,), {device.id: probe})
+        row = report.by_device(device.id)
+
+        self.assertIsNotNone(row)
+        assert row is not None
+        self.assertEqual(probe.status, "blocked")
+        self.assertEqual(probe.summary, "Codex CLI missing")
+        self.assertEqual(row.status, "blocked")
+        self.assertEqual(row.blocker_category, "missing-codex")
+        self.assertEqual(row.action_priority, 20)
+        self.assertTrue(any("Install Codex CLI" in action for action in row.next_actions))
+
     def test_mesh_readiness_report_categorizes_missing_project(self) -> None:
         device = DeviceRecord(id="one", name="Builder", host="atlas-builder.tailnet", project_root="~/Projects/codex-gui")
         output = "\n".join([
