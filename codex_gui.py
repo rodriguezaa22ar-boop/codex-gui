@@ -5367,7 +5367,7 @@ class CodexControl(Gtk.Application):
                 return
             GLib.idle_add(self.finish_tailnet_discovery, discovered, "")
 
-            threading.Thread(target=worker, daemon=True).start()
+        threading.Thread(target=worker, daemon=True).start()
 
     def probe_mesh_device(self, device: DeviceRecord) -> DeviceProbe:
         try:
