@@ -364,6 +364,65 @@ class TeamOpsTests(unittest.TestCase):
             team_ops.TEAM_DIR = original_team
             team_ops.LAST_TEAM_RUN_FILE = original_last
 
+    def test_check_no_persist_reports_fresh_probe_without_saving(self) -> None:
+        ctx = self._with_workspace()
+        original_config = team_ops.CONFIG_DIR
+        original_devices = team_ops.DEVICES_FILE
+        original_team = team_ops.TEAM_DIR
+        original_last = team_ops.LAST_TEAM_RUN_FILE
+
+        team_ops.CONFIG_DIR = ctx.config_dir.parent
+        team_ops.DEVICES_FILE = ctx.devices
+        team_ops.TEAM_DIR = ctx.team_dir
+        team_ops.LAST_TEAM_RUN_FILE = ctx.last_run
+
+        try:
+            saved = DeviceRecord(
+                id="atlas-builder-1",
+                name="atlas-builder",
+                host="atlas-builder",
+                user="ao",
+                status="blocked",
+                note="stale blocker",
+            )
+            checked = DeviceRecord(
+                id="atlas-builder-1",
+                name="atlas-builder",
+                host="atlas-builder",
+                user="ao",
+                status="ready",
+                note="fresh ready",
+            )
+            probe = DeviceProbe(
+                device_id="atlas-builder-1",
+                status="ready",
+                summary="codex-cli 0.141.0 | ## main...origin/main | branch=main | changes=0",
+                project_exists=True,
+                git_state="## main...origin/main | branch=main | changes=0",
+            )
+            save_devices(ctx.devices, (saved,))
+
+            with patch.object(team_ops, "check_devices", wraps=team_ops.check_devices) as wrapped:
+                with patch.object(team_ops, "probe_device", return_value=probe):
+                    args = team_ops.parse_args(["--json", "check", "--no-persist"])
+                    with tempfile.TemporaryFile(mode="w+") as output:
+                        with patch("sys.stdout", new=output):
+                            self.assertEqual(team_ops.cmd_check(args), 0)
+                            output.seek(0)
+                            payload = json.loads(output.read())
+
+            self.assertEqual(wrapped.call_args.kwargs["persist"], False)
+            self.assertFalse(payload["persisted"])
+            self.assertEqual(payload["rows"][0]["status"], "ready")
+            saved_after = team_ops.load_devices(ctx.devices)
+            self.assertEqual(saved_after[0].status, "blocked")
+            self.assertEqual(checked.id, saved_after[0].id)
+        finally:
+            team_ops.CONFIG_DIR = original_config
+            team_ops.DEVICES_FILE = original_devices
+            team_ops.TEAM_DIR = original_team
+            team_ops.LAST_TEAM_RUN_FILE = original_last
+
     def test_doctor_check_uses_fresh_probe_readiness(self) -> None:
         ctx = self._with_workspace()
         original_config = team_ops.CONFIG_DIR

@@ -62,6 +62,8 @@ python3 codex_team_ops.py --json summary
 
 `doctor` includes sanitized readiness rows for each saved device; it does not
 emit raw SSH or probe output.
+Use `python3 codex_team_ops.py --json check --no-persist` in read-only verifier
+lanes when probing is useful but `devices.json` must not be updated.
 
 You can also use the launcher script:
 

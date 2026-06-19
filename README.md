@@ -165,6 +165,8 @@ python3 codex_team_ops.py --json summary
 
 `doctor` returns the shared mesh readiness summary plus sanitized per-device
 readiness rows, so commander scripts can act without reading raw probe output.
+Use `python3 codex_team_ops.py --json check --no-persist` for verifier or
+read-only validation lanes that must probe devices without updating `devices.json`.
 
 The same command set is available as a short script:
 

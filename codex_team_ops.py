@@ -193,7 +193,11 @@ def probe_device(device: DeviceRecord) -> DeviceProbe:
     return parse_probe_output(device, text, result.returncode)
 
 
-def check_devices(devices: tuple[DeviceRecord, ...]) -> tuple[tuple[DeviceRecord, ...], dict[str, DeviceProbe]]:
+def check_devices(
+    devices: tuple[DeviceRecord, ...],
+    *,
+    persist: bool = True,
+) -> tuple[tuple[DeviceRecord, ...], dict[str, DeviceProbe]]:
     probes: dict[str, DeviceProbe] = {}
     updated: list[DeviceRecord] = []
     for device in devices:
@@ -204,7 +208,8 @@ def check_devices(devices: tuple[DeviceRecord, ...]) -> tuple[tuple[DeviceRecord
         probes[device.id] = probe
         updated.append(update_device_from_probe(device, probe))
     updated_devices = tuple(sorted(updated, key=lambda item: item.updated, reverse=True))
-    save_devices(DEVICES_FILE, updated_devices)
+    if persist:
+        save_devices(DEVICES_FILE, updated_devices)
     return updated_devices, probes
 
 
@@ -846,12 +851,16 @@ def cmd_check(args: argparse.Namespace) -> int:
         print("No saved devices. Run discover first.", file=sys.stderr)
         return 2
 
-    checked, probes = check_devices(devices)
+    checked, probes = check_devices(devices, persist=not args.no_persist)
     report = team_readiness(checked, probes)
 
     if args.json:
         rows = [asdict(row) for row in report.rows]
-        print(json.dumps({"summary": report.summary, "rows": rows}, sort_keys=True, indent=2))
+        print(json.dumps({
+            "persisted": not args.no_persist,
+            "summary": report.summary,
+            "rows": rows,
+        }, sort_keys=True, indent=2))
     else:
         print(report.detail_text())
     return 0
@@ -1105,6 +1114,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
     check = subparsers.add_parser("check", help="Probe all saved mesh devices")
     check.set_defaults(func=cmd_check)
+    check.add_argument("--no-persist", action="store_true", help="Probe devices without updating devices.json")
 
     prepare = subparsers.add_parser("prepare", help="Prepare a Codex Team run")
     prepare.set_defaults(func=cmd_prepare)
