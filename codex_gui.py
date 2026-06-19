@@ -3744,6 +3744,7 @@ class CodexControl(Gtk.Application):
         title: str,
         detail: str,
         action_label: str | None = None,
+        enabled: bool = True,
     ) -> None:
         title_label = getattr(banner, "title_label", None)
         detail_label = getattr(banner, "detail_label", None)
@@ -3754,8 +3755,11 @@ class CodexControl(Gtk.Application):
         if detail_label is not None:
             detail_label.set_text(detail)
             detail_label.set_tooltip_text(detail)
-        if action_label is not None and action_button is not None:
-            self.set_button_text(action_button, action_label)
+        if action_button is not None:
+            if action_label is not None:
+                self.set_button_text(action_button, action_label)
+            action_button.set_sensitive(enabled)
+            action_button.set_tooltip_text("" if enabled else detail)
 
     def build_terminal_widget(self) -> Gtk.Widget:
         if Vte is None:
@@ -6989,6 +6993,7 @@ class CodexControl(Gtk.Application):
             next_title = "Gate running"
             next_detail = "Checks are in progress; wait for the report before copying a handoff."
             next_action = "Run Gate"
+            next_enabled = False
         elif report is not None:
             summary = report.summary()
             status = report.status
@@ -7004,6 +7009,7 @@ class CodexControl(Gtk.Application):
                 next_title = "Report is clean"
                 next_detail = "Copy the report into the lane handoff or rerun after additional edits."
             next_action = "Run Gate"
+            next_enabled = True
         else:
             summary = plan.summary()
             status = "ready"
@@ -7012,6 +7018,7 @@ class CodexControl(Gtk.Application):
             next_title = "Run the gate"
             next_detail = "The current plan is ready; run checks before handing this workstation state to another lane."
             next_action = "Run Gate"
+            next_enabled = True
         if hasattr(self, "quality_status_label"):
             self.quality_status_label.set_text(summary)
         if hasattr(self, "quality_signal_label"):
@@ -7023,7 +7030,13 @@ class CodexControl(Gtk.Application):
         if hasattr(self, "quality_page_detail_label"):
             self.quality_page_detail_label.set_text(detail)
         if hasattr(self, "quality_next_step_banner"):
-            self.update_next_step_banner(self.quality_next_step_banner, next_title, next_detail, next_action)
+            self.update_next_step_banner(
+                self.quality_next_step_banner,
+                next_title,
+                next_detail,
+                next_action,
+                enabled=next_enabled,
+            )
         if hasattr(self, "quality_compact_list"):
             self.render_quality_check_rows(self.quality_compact_list, compact=True)
         if hasattr(self, "quality_page_list"):
@@ -7999,6 +8012,7 @@ class CodexControl(Gtk.Application):
                     "Select a command",
                     "Search narrows to ready actions first; Execute runs the highlighted action.",
                     "Execute",
+                    enabled=False,
                 )
             self.render_palette_history(None)
             return
