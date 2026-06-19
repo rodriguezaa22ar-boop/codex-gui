@@ -845,6 +845,7 @@ def _doctor_readiness_rows(
             "host": row.host,
             "status": row.status,
             "blocker_category": row.blocker_category,
+            "action_priority": row.action_priority,
             "summary": row.summary,
             "next_actions": list(row.next_actions),
             "checked": row.checked,

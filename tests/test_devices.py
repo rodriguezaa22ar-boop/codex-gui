@@ -410,6 +410,49 @@ class DeviceMeshTests(unittest.TestCase):
         assert row is not None
         self.assertEqual(row.status, "ready")
         self.assertIn(row.blocker_category, {"ready-saved", "local-ready"})
+        self.assertEqual(row.action_priority, 90)
+
+    def test_mesh_readiness_report_exposes_action_priority(self) -> None:
+        auth_device = DeviceRecord(id="auth", name="Auth", host="atlas-auth.tailnet")
+        offline_device = DeviceRecord(id="offline", name="Offline", host="atlas-offline.tailnet", status="offline")
+        missing_project_device = DeviceRecord(
+            id="project",
+            name="Project",
+            host="atlas-project.tailnet",
+            project_root="~/Projects/codex-gui",
+        )
+        ready_device = DeviceRecord(id="ready", name="Ready", host="atlas-ready.tailnet", status="ready")
+        missing_project_output = "\n".join([
+            "CODEX_EXIT=0",
+            "CODEX_VERSION=codex-cli 0.140.0",
+            "PROJECT_ROOT=~/Projects/codex-gui",
+            "PROJECT_EXISTS=no",
+        ])
+        probes = {
+            auth_device.id: parse_probe_output(
+                auth_device,
+                "ao@atlas-auth: Permission denied (publickey).",
+                255,
+                timestamp=123,
+            ),
+            missing_project_device.id: parse_probe_output(
+                missing_project_device,
+                missing_project_output,
+                0,
+                timestamp=123,
+            ),
+        }
+
+        report = mesh_readiness_report(
+            (ready_device, missing_project_device, offline_device, auth_device),
+            probes,
+        )
+        by_device = {row.device_id: row for row in report.rows}
+
+        self.assertEqual(by_device[auth_device.id].blocker_category, "ssh-auth-denied")
+        self.assertLess(by_device[auth_device.id].action_priority, by_device[offline_device.id].action_priority)
+        self.assertLess(by_device[offline_device.id].action_priority, by_device[missing_project_device.id].action_priority)
+        self.assertLess(by_device[missing_project_device.id].action_priority, by_device[ready_device.id].action_priority)
 
     def test_remote_team_commands_use_prompt_files_not_raw_prompt(self) -> None:
         device = DeviceRecord(
