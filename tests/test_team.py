@@ -298,6 +298,23 @@ class CodexTeamTests(unittest.TestCase):
         self.assertEqual(prepared.next_action, "Launch Team")
         self.assertIn("prepared", prepared.lane_text)
 
+        prepared_bus = TeamBusReport(
+            run_id="team-one",
+            team_dir="/tmp/team-one",
+            bus_path="/tmp/team-one/out/handoff-bus.md",
+            sent=2,
+            failures=(),
+            generated="2026-06-18T12:05:00-07:00",
+            generated_epoch=1710000000,
+            targets=(
+                TeamBusTargetStatus("backend", "atlas-builder", "atlas-builder", "synced", "ok"),
+                TeamBusTargetStatus("verify", "atlas-cockpit", "atlas-cockpit", "synced", "ok"),
+            ),
+        )
+        synced_prepared = team_operator_summary(run_status, prepared_bus)
+
+        self.assertEqual(synced_prepared.next_action, "Launch Team")
+
         collected = TeamRunStatus(
             run_id=run_status.run_id,
             team_dir=run_status.team_dir,
