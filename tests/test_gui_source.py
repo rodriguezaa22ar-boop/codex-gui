@@ -173,12 +173,15 @@ class GuiSourceTests(unittest.TestCase):
 
         self.assertIn("next-step-banner", ast.unparse(next_step))
         self.assertIn("set_button_text", ast.unparse(update_next_step))
+        self.assertIn("set_sensitive(enabled)", ast.unparse(update_next_step))
         self.assertIn("palette_next_step_banner", ast.unparse(build_palette))
         self.assertIn("mesh_next_step_banner", ast.unparse(build_mesh))
         self.assertIn("quality_next_step_banner", ast.unparse(build_quality))
         self.assertIn("update_next_step_banner", ast.unparse(render_palette))
+        self.assertIn("enabled=False", ast.unparse(render_palette))
         self.assertIn("update_next_step_banner", ast.unparse(refresh_mesh))
         self.assertIn("update_next_step_banner", ast.unparse(render_quality))
+        self.assertIn("next_enabled = False", ast.unparse(render_quality))
 
 
 if __name__ == "__main__":
