@@ -117,6 +117,17 @@ class LauncherTests(unittest.TestCase):
             data = json.loads(log_path.read_text(encoding="utf-8").strip().splitlines()[-1])
             self.assertEqual(data["status"], "ready")
 
+    def test_smoke_log_write_failure_does_not_block_launch(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            log_path = Path(tmp) / "launcher-smoke.log"
+            with (
+                patch("codex_launcher._collect_setup_report", return_value=(Path.home(), self.ready_report)),
+                patch("codex_launcher._smoke_log_path", return_value=log_path),
+                patch("codex_launcher.Path.open", side_effect=OSError("read-only filesystem")),
+                patch.dict("sys.modules", {"codex_gui": SimpleNamespace(main=lambda: 7)}),
+            ):
+                self.assertEqual(codex_launcher.main(["--force-start"]), 7)
+
     def test_self_check_runs_setup_report(self) -> None:
         fake_report = SimpleNamespace(
             status="ready",

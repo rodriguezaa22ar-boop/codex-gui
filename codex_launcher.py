@@ -157,7 +157,6 @@ def _emit_smoke_block(report) -> None:
 
 def _log_smoke_report(project: Path, report, status_code: int) -> None:
     path = _smoke_log_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
     entry = {
         "ts": int(time.time()),
         "status": report.status,
@@ -166,8 +165,12 @@ def _log_smoke_report(project: Path, report, status_code: int) -> None:
         "project": str(project),
         "summary": report.summary(),
     }
-    with path.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(entry) + "\n")
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(entry) + "\n")
+    except OSError:
+        return
 
 
 def main(argv: list[str] | None = None) -> int:
