@@ -80,6 +80,25 @@ class GuiSourceTests(unittest.TestCase):
         self.assertIn("is_team_summary_reviewed", ast.unparse(current_operator))
         self.assertIn("mesh.review_summary", ast.unparse(execute_action))
 
+    def test_mesh_launch_console_surfaces_prelaunch_review(self) -> None:
+        source = Path("codex_gui.py").read_text(encoding="utf-8")
+        tree = ast.parse(source)
+
+        build_mesh = _method_named(tree, "build_mesh_page")
+        render_console = _method_named(tree, "render_mesh_launch_console")
+        render_team = _method_named(tree, "render_mesh_team")
+
+        build_text = ast.unparse(build_mesh)
+        render_text = ast.unparse(render_console)
+        self.assertIn("Launch Console", build_text)
+        self.assertIn("mesh_launch_console_list", build_text)
+        self.assertIn("on_sync_mesh_handoff_bus", build_text)
+        self.assertIn("build_mesh_team_assignments", render_text)
+        self.assertIn("role_profile", render_text)
+        self.assertIn("should_sync_project_to_device", render_text)
+        self.assertIn("Expected: out/", render_text)
+        self.assertIn("render_mesh_launch_console", ast.unparse(render_team))
+
     def test_chips_and_meta_labels_are_ellipsized_with_tooltips(self) -> None:
         source = Path("codex_gui.py").read_text(encoding="utf-8")
         tree = ast.parse(source)

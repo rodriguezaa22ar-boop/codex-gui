@@ -3870,6 +3870,35 @@ class CodexControl(Gtk.Application):
         team.add_css_class("team-panel")
         self.mesh_team_status_label = self.label("No team package yet", "muted", wrap=True)
         team.append(self.mesh_team_status_label)
+        launch_console = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        launch_console.add_css_class("workflow-panel")
+        launch_header = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        launch_header.append(self.label("Launch Console", "section"))
+        self.mesh_launch_console_status_label = self.label("No team staged", "muted", wrap=True)
+        self.mesh_launch_console_meta_label = self.label("0 lanes", "muted", wrap=True)
+        self.mesh_launch_console_prompt_label = self.label("Mission preview unavailable", "muted", wrap=True)
+        launch_header.append(self.mesh_launch_console_status_label)
+        launch_header.append(self.mesh_launch_console_meta_label)
+        launch_header.append(self.mesh_launch_console_prompt_label)
+        launch_console.append(launch_header)
+        self.mesh_launch_console_list = Gtk.ListBox()
+        self.mesh_launch_console_list.add_css_class("team-list")
+        launch_scroll = Gtk.ScrolledWindow()
+        launch_scroll.set_min_content_height(145)
+        launch_scroll.set_size_request(-1, 165)
+        launch_scroll.set_vexpand(False)
+        launch_scroll.set_child(self.mesh_launch_console_list)
+        launch_console.append(launch_scroll)
+        console_buttons = self.command_grid([
+            ("Prepare", self.on_prepare_mesh_team, True, "document-new-symbolic", "Create lanes for all ready trusted devices."),
+            ("Sync", self.on_sync_mesh_handoff_bus, False, "send-to-symbolic", "Sync the handoff bus for the active team."),
+            ("Launch", self.on_launch_mesh_team, False, "media-playback-start-symbolic", "Launch prepared team lanes."),
+            ("Collect", self.on_collect_mesh_team, False, "folder-download-symbolic", "Collect lane outputs."),
+            ("Review", self.on_review_mesh_team_summary, False, "emblem-ok-symbolic", "Mark the team summary as reviewed."),
+        ], columns=5)
+        self.mesh_launch_console_buttons = getattr(console_buttons, "command_buttons", [])[1:]
+        launch_console.append(console_buttons)
+        team.append(launch_console)
         team_actions = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
         team_actions.add_css_class("workflow-panel")
         team_actions.append(self.label("Team Workflow", "section"))
@@ -3887,6 +3916,7 @@ class CodexControl(Gtk.Application):
         for button in getattr(team_buttons, "command_buttons", [])[4:]:
             button.set_tooltip_text("Prepare or load a team first.")
             self.mesh_prepared_team_buttons.append(button)
+        self.mesh_prepared_team_buttons.extend(getattr(self, "mesh_launch_console_buttons", []))
         team_actions.append(team_buttons)
         team.append(team_actions)
 
@@ -4408,6 +4438,96 @@ class CodexControl(Gtk.Application):
         self.render_mesh_detail()
         self.render_mesh_team_chat()
         self.render_mesh_team()
+
+    def render_mesh_launch_console(self, run_status=None) -> None:
+        if not hasattr(self, "mesh_launch_console_list"):
+            return
+        self.clear_listbox(self.mesh_launch_console_list)
+        readiness = mesh_readiness_report(self.devices, self.mesh_probe_records)
+        prepared = bool(self.mesh_team_assignments and self.mesh_team_dir is not None and self.mesh_team_run_id)
+        assignments = list(self.mesh_team_assignments) if prepared else self.build_mesh_team_assignments()
+        operator = (
+            self.current_team_operator_summary(run_status)
+            if prepared
+            else team_operator_summary(
+                None,
+                ready_devices=len(self.ready_mesh_devices()),
+                saved_runs=len(team_run_dirs(TEAM_DIR)),
+                assignment_count=len(assignments),
+            )
+        )
+        prompt = self.mesh_base_prompt().strip().splitlines()
+        prompt_preview = prompt[0][:180] if prompt else "No mission prompt selected"
+        if hasattr(self, "mesh_launch_console_status_label"):
+            status_text = (
+                f"{self.mesh_team_run_id} | {operator.next_action}"
+                if prepared
+                else f"Proposed team | {operator.next_action}"
+            )
+            self.mesh_launch_console_status_label.set_text(status_text)
+        if hasattr(self, "mesh_launch_console_meta_label"):
+            ready = len(self.ready_mesh_devices())
+            mode = "prepared" if prepared else "preview"
+            self.mesh_launch_console_meta_label.set_text(
+                f"{len(assignments)} lane(s) | {ready} ready device(s) | {mode} | bus {operator.bus_text}"
+            )
+        if hasattr(self, "mesh_launch_console_prompt_label"):
+            self.mesh_launch_console_prompt_label.set_text(f"Mission: {prompt_preview}")
+        if not assignments:
+            row = Gtk.ListBoxRow()
+            row.add_css_class("team-row")
+            row.set_child(self.label("No launchable lanes. Run Check Fleet or add a trusted ready device.", "muted", wrap=True))
+            self.mesh_launch_console_list.append(row)
+            return
+        project_path = Path(self.selected_project()).expanduser()
+        for assignment in assignments:
+            device = self.mesh_assignment_device(assignment)
+            readiness_row = readiness.by_device(device.id) if device is not None else None
+            row = Gtk.ListBoxRow()
+            row.add_css_class("team-row")
+            content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=5)
+            top = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+            title = self.label(
+                f"{assignment.get('role_title') or assignment.get('lane_title', 'Lane')} | {assignment.get('device_name', 'device')}",
+                "row-title",
+            )
+            title.set_hexpand(True)
+            title.set_ellipsize(Pango.EllipsizeMode.END)
+            title.set_tooltip_text(title.get_text())
+            top.append(title)
+            chip_flow = self.flow_row()
+            status = readiness_row.status if readiness_row is not None else "unknown"
+            self.flow_append(chip_flow, self.chip_label(status, self.chip_css_for_status(status)))
+            self.flow_append(chip_flow, self.chip_label(assignment.get("role_profile", "profile"), "chip"))
+            if device is None:
+                sync_text = "missing device"
+                sync_css = "chip-danger"
+            elif self.should_sync_project_to_device(device, project_path):
+                sync_text = "sync required"
+                sync_css = "chip"
+            else:
+                sync_text = "local checkout"
+                sync_css = "chip-strong"
+            self.flow_append(chip_flow, self.chip_label(sync_text, sync_css))
+            self.flow_append(chip_flow, self.chip_label("handoff ready" if prepared else "handoff planned", "mode-pill"))
+            content.append(top)
+            content.append(chip_flow)
+            focus = assignment.get("role_focus") or assignment.get("focus", "")
+            boundary = assignment.get("role_boundary", "")
+            detail_bits = [
+                focus,
+                f"Boundary: {boundary}" if boundary else "",
+                f"Target: {assignment.get('target', 'target unknown')}",
+                f"Expected: out/{assignment.get('lane_slug', 'lane')}.handoff.md",
+            ]
+            detail = " | ".join(bit for bit in detail_bits if bit)
+            detail_label = self.label(detail, "muted", wrap=True)
+            detail_label.set_lines(3)
+            detail_label.set_ellipsize(Pango.EllipsizeMode.END)
+            detail_label.set_tooltip_text(detail)
+            content.append(detail_label)
+            row.set_child(content)
+            self.mesh_launch_console_list.append(row)
 
     def _mesh_team_lane_for_selected_device(self) -> tuple[str, str]:
         device = self.selected_mesh_device()
@@ -5360,6 +5480,7 @@ class CodexControl(Gtk.Application):
         self.refresh_mesh_action_sensitivity()
         self.clear_listbox(self.mesh_team_list)
         if not self.mesh_team_assignments:
+            self.render_mesh_launch_console()
             row = Gtk.ListBoxRow()
             row.add_css_class("team-row")
             row.set_child(self.label("No prepared team yet. Check Fleet, then Prepare Team.", "muted", wrap=True))
@@ -5369,9 +5490,10 @@ class CodexControl(Gtk.Application):
                 saved = len(team_run_dirs(TEAM_DIR))
                 self.mesh_team_status_label.set_text(
                     f"{ready} ready trusted device(s). {saved} saved team run(s). Prepare Team creates lanes and prompts."
-                )
+            )
             return
         run_status = inspect_team_run(self.mesh_team_dir) if self.mesh_team_dir is not None else None
+        self.render_mesh_launch_console(run_status)
         if hasattr(self, "mesh_team_status_label"):
             if run_status is not None:
                 bus_report = self._team_bus_report()
