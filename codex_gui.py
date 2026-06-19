@@ -556,6 +556,14 @@ window {
   padding: 6px 9px;
 }
 
+.chip-flow {
+  background: transparent;
+}
+
+.chip-flow flowboxchild {
+  padding: 0;
+}
+
 .chip-strong {
   background: #12332d;
   color: #a8f0dd;
@@ -1753,6 +1761,7 @@ class CodexControl(Gtk.Application):
 
     def make_button(self, label: str, icon_name: str | None = None) -> Gtk.Button:
         button = Gtk.Button()
+        button.set_tooltip_text(label)
         if icon_name is None:
             button.set_label(label)
             return button
@@ -1763,6 +1772,7 @@ class CodexControl(Gtk.Application):
         text = Gtk.Label(label=label)
         text.set_ellipsize(Pango.EllipsizeMode.END)
         text.set_max_width_chars(16)
+        text.set_tooltip_text(label)
         button.text_label = text
         content.append(image)
         content.append(text)
@@ -1806,6 +1816,19 @@ class CodexControl(Gtk.Application):
                 1,
             )
         return grid
+
+    def flow_row(self, spacing: int = 6) -> Gtk.FlowBox:
+        flow = Gtk.FlowBox()
+        flow.add_css_class("chip-flow")
+        flow.set_selection_mode(Gtk.SelectionMode.NONE)
+        flow.set_column_spacing(spacing)
+        flow.set_row_spacing(spacing)
+        flow.set_max_children_per_line(12)
+        flow.set_homogeneous(False)
+        return flow
+
+    def flow_append(self, flow: Gtk.FlowBox, widget: Gtk.Widget) -> None:
+        flow.append(widget)
 
     def set_button_text(self, button: Gtk.Button, label: str) -> None:
         text_label = getattr(button, "text_label", None)
@@ -2064,9 +2087,9 @@ class CodexControl(Gtk.Application):
         summary.add_css_class("action-palette")
         self.palette_summary_label = self.label("Search every major Codex Control capability.", "action-detail", wrap=True)
         summary.append(self.palette_summary_label)
-        groups = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        groups = self.flow_row()
         for group, count in action_groups():
-            groups.append(self.chip_label(f"{group} {count}", "chip"))
+            self.flow_append(groups, self.chip_label(f"{group} {count}", "chip"))
         summary.append(groups)
         box.append(summary)
 
@@ -2087,10 +2110,12 @@ class CodexControl(Gtk.Application):
         self.palette_action_title_label = self.label("No action selected", "action-title", wrap=True)
         self.palette_action_group_label = self.chip_label("idle", "chip")
         self.palette_action_detail_label = self.label("Search or select an action.", "action-detail", wrap=True)
-        detail_header = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        detail_header = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
         self.palette_action_title_label.set_hexpand(True)
         detail_header.append(self.palette_action_title_label)
-        detail_header.append(self.palette_action_group_label)
+        action_chip_flow = self.flow_row()
+        self.flow_append(action_chip_flow, self.palette_action_group_label)
+        detail_header.append(action_chip_flow)
         detail.append(detail_header)
         detail.append(self.palette_action_detail_label)
         detail.append(self.label("Action ID", "section"))
@@ -2098,16 +2123,18 @@ class CodexControl(Gtk.Application):
         detail.append(self.palette_action_id_label)
         preview = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
         preview.add_css_class("action-preview")
-        preview_header = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        preview_header = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
         self.palette_preview_title_label = self.label("Would Run", "action-preview-title", wrap=True)
         self.palette_preview_title_label.set_hexpand(True)
         self.palette_preview_status_label = self.chip_label("ready", "chip")
         self.palette_preview_surface_label = self.chip_label("surface", "chip")
         self.palette_preview_risk_label = self.chip_label("risk", "chip")
         preview_header.append(self.palette_preview_title_label)
-        preview_header.append(self.palette_preview_status_label)
-        preview_header.append(self.palette_preview_surface_label)
-        preview_header.append(self.palette_preview_risk_label)
+        preview_chip_flow = self.flow_row()
+        self.flow_append(preview_chip_flow, self.palette_preview_status_label)
+        self.flow_append(preview_chip_flow, self.palette_preview_surface_label)
+        self.flow_append(preview_chip_flow, self.palette_preview_risk_label)
+        preview_header.append(preview_chip_flow)
         preview.append(preview_header)
         self.palette_preview_summary_label = self.label("Select an action to preview its effect.", "action-preview-detail", wrap=True)
         self.palette_preview_requirements_label = self.label("Ready", "action-preview-detail", wrap=True)
@@ -2126,14 +2153,16 @@ class CodexControl(Gtk.Application):
         detail.append(feedback)
         history = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
         history.add_css_class("action-history")
-        history_header = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        history_header = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
         self.palette_history_title_label = self.label("Last Result", "action-history-title", wrap=True)
         self.palette_history_title_label.set_hexpand(True)
         self.palette_history_status_label = self.chip_label("none", "chip")
         self.palette_history_time_label = self.chip_label("never", "chip")
         history_header.append(self.palette_history_title_label)
-        history_header.append(self.palette_history_status_label)
-        history_header.append(self.palette_history_time_label)
+        history_chip_flow = self.flow_row()
+        self.flow_append(history_chip_flow, self.palette_history_status_label)
+        self.flow_append(history_chip_flow, self.palette_history_time_label)
+        history_header.append(history_chip_flow)
         history.append(history_header)
         self.palette_history_detail_label = self.label("No action history yet.", "action-history-detail", wrap=True)
         self.palette_history_command_label = self.label("-", "action-history-command", wrap=True)
@@ -2330,27 +2359,27 @@ class CodexControl(Gtk.Application):
     def build_quality_page(self) -> Gtk.Widget:
         box = self.page_box()
         toolbar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-        for label, handler, primary in [
-            ("Run Gate", self.on_run_quality_gate, True),
-            ("Copy Report", self.on_copy_quality_report, False),
-            ("Refresh Plan", self.on_refresh_quality_gate, False),
+        for label, handler, primary, icon_name, tooltip in [
+            ("Run Gate", self.on_run_quality_gate, True, "media-playback-start-symbolic", "Run the current quality checks."),
+            ("Copy Report", self.on_copy_quality_report, False, "edit-copy-symbolic", "Copy the latest quality report."),
+            ("Refresh Plan", self.on_refresh_quality_gate, False, "view-refresh-symbolic", "Rebuild the quality plan."),
         ]:
-            button = Gtk.Button(label=label)
-            button.add_css_class("primary" if primary else "secondary")
-            button.connect("clicked", handler)
+            button = self.command_button(label, handler, primary=primary, icon_name=icon_name, tooltip=tooltip)
             toolbar.append(button)
         box.append(toolbar)
 
         summary = self.panel("Quality Gate")
         summary.add_css_class("quality-gate")
-        header = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        header = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
         self.quality_page_summary_label = self.label("No quality report yet", "quality-title", wrap=True)
         self.quality_page_summary_label.set_hexpand(True)
         self.quality_page_score_label = self.chip_label("not run", "chip")
         self.quality_page_status_label = self.chip_label("idle", "chip")
         header.append(self.quality_page_summary_label)
-        header.append(self.quality_page_score_label)
-        header.append(self.quality_page_status_label)
+        quality_chip_flow = self.flow_row()
+        self.flow_append(quality_chip_flow, self.quality_page_score_label)
+        self.flow_append(quality_chip_flow, self.quality_page_status_label)
+        header.append(quality_chip_flow)
         summary.append(header)
         self.quality_page_detail_label = self.label("Plan is ready. Run Gate to create a report.", "quality-check-detail", wrap=True)
         summary.append(self.quality_page_detail_label)
@@ -3715,6 +3744,7 @@ class CodexControl(Gtk.Application):
             self.chip_css_for_status(initial_operator.status),
         )
         self.mesh_next_action_label = self.chip_label(f"Next: {initial_operator.next_action}", "mode-pill")
+        chip_flow = self.flow_row()
         for chip in [
             self.mesh_device_count_label,
             self.mesh_memory_count_label,
@@ -3724,7 +3754,8 @@ class CodexControl(Gtk.Application):
             self.mesh_bus_health_label,
             self.mesh_next_action_label,
         ]:
-            top.append(chip)
+            self.flow_append(chip_flow, chip)
+        top.append(chip_flow)
         summary.append(top)
         actions = self.command_grid([
             ("Refresh", self.on_refresh_mesh, False, "view-refresh-symbolic", "Refresh mesh state."),
@@ -4159,13 +4190,15 @@ class CodexControl(Gtk.Application):
             freshness_text, freshness_css = self._mesh_freshness_label(readiness.checked if readiness is not None else 0)
             freshness = self.chip_label(freshness_text, freshness_css)
             top.append(title)
-            top.append(status)
-            top.append(role)
-            top.append(fleet_status)
-            top.append(freshness)
+            chip_flow = self.flow_row()
+            self.flow_append(chip_flow, status)
+            self.flow_append(chip_flow, role)
+            self.flow_append(chip_flow, fleet_status)
+            self.flow_append(chip_flow, freshness)
+            content.append(top)
+            content.append(chip_flow)
             target = self.muted_meta_label(f"{device.target()}:{device.port}")
             project = self.muted_meta_label(device.project_root)
-            content.append(top)
             content.append(target)
             content.append(project)
             if readiness is not None:
@@ -5366,13 +5399,15 @@ class CodexControl(Gtk.Application):
             title.set_ellipsize(Pango.EllipsizeMode.END)
             title.set_tooltip_text(f"{lane.lane_title} | {lane.device_name}")
             top.append(title)
-            top.append(self.chip_label(lane.status, self.chip_css_for_status(lane.status)))
+            chip_flow = self.flow_row()
+            self.flow_append(chip_flow, self.chip_label(lane.status, self.chip_css_for_status(lane.status)))
             if assignment.get("role_id"):
                 role_title = assignment.get("role_title", "") or assignment.get("role_id", "")
-                top.append(self.chip_label(role_title.replace("-", " ").title(), "chip"))
+                self.flow_append(chip_flow, self.chip_label(role_title.replace("-", " ").title(), "chip"))
             if bus_status is not None:
-                top.append(self.chip_label(f"bus: {bus_status.status}", self._bus_status_css(bus_status.status)))
+                self.flow_append(chip_flow, self.chip_label(f"bus: {bus_status.status}", self._bus_status_css(bus_status.status)))
             content.append(top)
+            content.append(chip_flow)
             content.append(self.label(lane.focus, "muted", wrap=True))
             detail = lane.detail
             if getattr(lane, "handoff_bytes", 0) or getattr(lane, "final_bytes", 0):
@@ -6703,18 +6738,20 @@ class CodexControl(Gtk.Application):
             title.set_tooltip_text(item.label)
             status = getattr(item, "status", "running" if self.quality_running else "ready")
             top.append(title)
-            top.append(self.chip_label(status, self.chip_css_for_status(status)))
+            chip_flow = self.flow_row()
+            self.flow_append(chip_flow, self.chip_label(status, self.chip_css_for_status(status)))
             if isinstance(item, QualityCheckResult):
                 exit_text = f"exit {item.exit_code}" if item.exit_code is not None else "timeout"
-                top.append(self.chip_label(exit_text, self.chip_css_for_status(status)))
-                top.append(self.chip_label(f"{item.duration_ms} ms", "chip"))
+                self.flow_append(chip_flow, self.chip_label(exit_text, self.chip_css_for_status(status)))
+                self.flow_append(chip_flow, self.chip_label(f"{item.duration_ms} ms", "chip"))
             elif not compact:
-                top.append(self.chip_label(f"{item.timeout}s", "chip"))
+                self.flow_append(chip_flow, self.chip_label(f"{item.timeout}s", "chip"))
             detail = self.label(item.command_text(), "quality-check-detail", wrap=True)
             detail.set_lines(2)
             detail.set_ellipsize(Pango.EllipsizeMode.END)
             detail.set_tooltip_text(item.command_text())
             content.append(top)
+            content.append(chip_flow)
             content.append(detail)
             if isinstance(item, QualityCheckResult) and item.output_tail and not compact:
                 output = self.label(item.output_tail.strip().splitlines()[-1][:160], "quality-check-detail", wrap=True)
@@ -7608,9 +7645,10 @@ class CodexControl(Gtk.Application):
             title.set_ellipsize(Pango.EllipsizeMode.END)
             title.set_tooltip_text(action.title)
             top.append(title)
-            top.append(self.chip_label(action.group, "chip"))
-            top.append(self.chip_label(preview.status, "chip-strong" if preview.ready else "chip-danger"))
-            top.append(self.chip_label(preview.surface, "chip"))
+            chip_flow = self.flow_row()
+            self.flow_append(chip_flow, self.chip_label(action.group, "chip"))
+            self.flow_append(chip_flow, self.chip_label(preview.status, "chip-strong" if preview.ready else "chip-danger"))
+            self.flow_append(chip_flow, self.chip_label(preview.surface, "chip"))
             detail = self.label(action.detail, "action-detail", wrap=True)
             detail.set_lines(2)
             detail.set_ellipsize(Pango.EllipsizeMode.END)
@@ -7620,6 +7658,7 @@ class CodexControl(Gtk.Application):
             requirement.set_ellipsize(Pango.EllipsizeMode.END)
             requirement.set_tooltip_text(preview.detail_text())
             content.append(top)
+            content.append(chip_flow)
             content.append(detail)
             content.append(requirement)
             row.set_child(content)

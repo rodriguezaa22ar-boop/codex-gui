@@ -71,6 +71,7 @@ REQUIRED_SELECTORS = (
     ".action-feedback-title",
     ".action-history",
     ".action-history-title",
+    ".chip-flow",
     ".device-mesh",
     ".device-row",
     ".mesh-detail",
@@ -302,6 +303,14 @@ button:hover {
   color: #e7edf0;
   border: 1px solid @cc_border_strong;
   border-radius: 999px;
+}
+
+.chip-flow {
+  background: transparent;
+}
+
+.chip-flow flowboxchild {
+  padding: 0;
 }
 
 .chip-strong {

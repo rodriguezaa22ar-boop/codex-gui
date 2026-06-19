@@ -50,8 +50,9 @@ class GuiSourceTests(unittest.TestCase):
 
         _method_named(tree, "_mesh_freshness_label")
         render_device_list = _method_named(tree, "render_device_list")
+        text = ast.unparse(render_device_list)
         self.assertIn("_mesh_freshness_label", ast.unparse(render_device_list))
-        self.assertIn("top.append(freshness)", ast.unparse(render_device_list))
+        self.assertIn("self.flow_append(chip_flow, freshness)", text)
 
     def test_mesh_operator_chips_use_team_doctor_report(self) -> None:
         source = Path("codex_gui.py").read_text(encoding="utf-8")
@@ -71,12 +72,31 @@ class GuiSourceTests(unittest.TestCase):
         chip_label = _method_named(tree, "chip_label")
         muted_meta_label = _method_named(tree, "muted_meta_label")
         set_chip = _method_named(tree, "set_chip")
+        make_button = _method_named(tree, "make_button")
 
         self.assertIn("set_ellipsize", ast.unparse(chip_label))
         self.assertIn("set_max_width_chars", ast.unparse(chip_label))
         self.assertIn("set_tooltip_text", ast.unparse(chip_label))
         self.assertIn("Pango.EllipsizeMode.MIDDLE", ast.unparse(muted_meta_label))
         self.assertIn("set_tooltip_text", ast.unparse(set_chip))
+        self.assertIn("button.set_tooltip_text(label)", ast.unparse(make_button))
+
+    def test_dense_chip_rows_use_wrapping_flowbox(self) -> None:
+        source = Path("codex_gui.py").read_text(encoding="utf-8")
+        tree = ast.parse(source)
+
+        flow_row = _method_named(tree, "flow_row")
+        build_mesh = _method_named(tree, "build_mesh_page")
+        build_palette = _method_named(tree, "build_palette_page")
+        build_quality = _method_named(tree, "build_quality_page")
+
+        self.assertIn("Gtk.FlowBox", ast.unparse(flow_row))
+        self.assertIn("set_selection_mode(Gtk.SelectionMode.NONE)", ast.unparse(flow_row))
+        self.assertIn("set_max_children_per_line", ast.unparse(flow_row))
+        self.assertIn("chip_flow", ast.unparse(build_mesh))
+        self.assertIn("preview_chip_flow", ast.unparse(build_palette))
+        self.assertIn("history_chip_flow", ast.unparse(build_palette))
+        self.assertIn("quality_chip_flow", ast.unparse(build_quality))
 
     def test_palette_rows_surface_readiness_metadata(self) -> None:
         source = Path("codex_gui.py").read_text(encoding="utf-8")
@@ -89,6 +109,7 @@ class GuiSourceTests(unittest.TestCase):
         self.assertIn("preview.status", text)
         self.assertIn("preview.surface", text)
         self.assertIn("preview.requirement_text", text)
+        self.assertIn("chip_flow", text)
 
     def test_quality_rows_surface_exit_and_duration_metadata(self) -> None:
         source = Path("codex_gui.py").read_text(encoding="utf-8")
@@ -101,6 +122,7 @@ class GuiSourceTests(unittest.TestCase):
         self.assertIn("exit_text", text)
         self.assertIn("duration_ms", text)
         self.assertIn("set_tooltip_text(item.command_text())", text)
+        self.assertIn("chip_flow", text)
 
 
 if __name__ == "__main__":
