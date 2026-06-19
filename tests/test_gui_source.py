@@ -244,7 +244,7 @@ class GuiSourceTests(unittest.TestCase):
 
         self.assertIn("mesh_launch_console_decision_label", ast.unparse(build_mesh))
         self.assertIn("Decision:", ast.unparse(render_console))
-        self.assertIn("blocked/offline", ast.unparse(render_console))
+        self.assertIn("launch blocked", ast.unparse(render_console))
 
     def test_workstation_pages_have_stateful_next_step_banners(self) -> None:
         source = Path("codex_gui.py").read_text(encoding="utf-8")

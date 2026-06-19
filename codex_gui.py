@@ -4648,13 +4648,19 @@ class CodexControl(Gtk.Application):
         if hasattr(self, "mesh_launch_console_prompt_label"):
             self.mesh_launch_console_prompt_label.set_text(f"Mission: {prompt_preview}")
         if hasattr(self, "mesh_launch_console_decision_label"):
-            blocked = readiness.blocked_count + readiness.offline_count
+            launch_ready, _, blocked_reasons = self._mesh_launch_guard(assignments)
             if not assignments:
                 decision = "Decision: no launchable lanes; check fleet or add a trusted ready device."
             elif not prepared:
                 decision = f"Decision: prepare {len(assignments)} lane(s) across {len(self.ready_mesh_devices())} ready device(s)."
-            elif blocked:
-                decision = f"Decision: review {blocked} blocked/offline device(s) before launch."
+            elif not launch_ready:
+                if blocked_reasons:
+                    compact = "; ".join(blocked_reasons[:2])
+                    if len(blocked_reasons) > 2:
+                        compact += f"; +{len(blocked_reasons) - 2} more"
+                    decision = f"Decision: launch blocked: {compact}"
+                else:
+                    decision = "Decision: launch blocked by mesh readiness, review fleet before launch."
             else:
                 decision = f"Decision: {operator.next_action}; handoff bus {operator.bus_text}."
             self.mesh_launch_console_decision_label.set_text(decision)
