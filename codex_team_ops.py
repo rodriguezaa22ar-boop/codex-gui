@@ -846,6 +846,28 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_summary(args: argparse.Namespace) -> int:
+    team_dir = _resolve_team_dir(TEAM_DIR, args.run_id)
+    summary_path = write_team_summary(team_dir)
+    text = summary_path.read_text(encoding="utf-8", errors="replace")
+    run = inspect_team_run(team_dir)
+
+    if args.json:
+        print(json.dumps({
+            "team_dir": str(team_dir),
+            "summary_path": str(summary_path),
+            "summary_bytes": summary_path.stat().st_size,
+            "run_id": run.run_id,
+            "lane_count": run.lane_count,
+            "collected_count": run.collected_count,
+        }, sort_keys=True))
+    elif args.print_summary:
+        print(text, end="" if text.endswith("\n") else "\n")
+    else:
+        print(summary_path)
+    return 0
+
+
 def cmd_sync(args: argparse.Namespace) -> int:
     team_dir = _resolve_team_dir(TEAM_DIR, args.run_id)
     run = inspect_team_run(team_dir)
@@ -1007,6 +1029,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
     doctor = subparsers.add_parser("doctor", help="Emit fleet and latest team run doctor JSON")
     doctor.set_defaults(func=cmd_doctor)
+
+    summary = subparsers.add_parser("summary", help="Write and review a team run summary")
+    summary.set_defaults(func=cmd_summary)
+    summary.add_argument("--run-id", default="")
+    summary.add_argument("--print", dest="print_summary", action="store_true", help="Print summary markdown instead of the path")
 
     sync = subparsers.add_parser("sync", help="Sync team package to selected devices")
     sync.set_defaults(func=cmd_sync)

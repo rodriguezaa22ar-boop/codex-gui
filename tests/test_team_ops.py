@@ -175,6 +175,66 @@ class TeamOpsTests(unittest.TestCase):
             team_ops.TEAM_DIR = original_team
             team_ops.LAST_TEAM_RUN_FILE = original_last
 
+    def test_summary_json_writes_reviewable_summary(self) -> None:
+        ctx = self._with_workspace()
+        original_config = team_ops.CONFIG_DIR
+        original_devices = team_ops.DEVICES_FILE
+        original_team = team_ops.TEAM_DIR
+        original_last = team_ops.LAST_TEAM_RUN_FILE
+
+        team_ops.CONFIG_DIR = ctx.config_dir.parent
+        team_ops.DEVICES_FILE = ctx.devices
+        team_ops.TEAM_DIR = ctx.team_dir
+        team_ops.LAST_TEAM_RUN_FILE = ctx.last_run
+
+        try:
+            run_dir = ctx.team_dir / "team-summary"
+            collected = run_dir / "collected" / "atlas-builder"
+            collected.mkdir(parents=True, exist_ok=True)
+            manifest = {
+                "run_id": "team-summary",
+                "created": "2026-06-18T00:00:00-07:00",
+                "project": str(ctx.workspace),
+                "assignments": [
+                    {
+                        "lane_slug": "backend-builder-atlas-builder",
+                        "lane_title": "Core Systems Engineer",
+                        "device_name": "atlas-builder",
+                        "focus": "Backend",
+                    }
+                ],
+            }
+            (run_dir / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+            (collected / "backend-builder-atlas-builder.final.txt").write_text("Final handoff", encoding="utf-8")
+
+            args = team_ops.parse_args(["--json", "summary", "--run-id", "team-summary"])
+            with tempfile.TemporaryFile(mode="w+") as output:
+                with patch("sys.stdout", new=output):
+                    self.assertEqual(team_ops.cmd_summary(args), 0)
+                    output.seek(0)
+                    payload = json.loads(output.read())
+
+            summary_path = Path(payload["summary_path"])
+            self.assertTrue(summary_path.exists())
+            self.assertEqual(payload["run_id"], "team-summary")
+            self.assertEqual(payload["lane_count"], 1)
+            self.assertEqual(payload["collected_count"], 1)
+            self.assertIn("Final handoff", summary_path.read_text(encoding="utf-8"))
+
+            args = team_ops.parse_args(["summary", "--run-id", "team-summary", "--print"])
+            with tempfile.TemporaryFile(mode="w+") as output:
+                with patch("sys.stdout", new=output):
+                    self.assertEqual(team_ops.cmd_summary(args), 0)
+                    output.seek(0)
+                    printed = output.read()
+            self.assertIn("# Codex Team Summary", printed)
+            self.assertIn("Final handoff", printed)
+        finally:
+            team_ops.CONFIG_DIR = original_config
+            team_ops.DEVICES_FILE = original_devices
+            team_ops.TEAM_DIR = original_team
+            team_ops.LAST_TEAM_RUN_FILE = original_last
+
     def test_cmd_sync_writes_bus_report(self) -> None:
         ctx = self._with_workspace()
         original_config = team_ops.CONFIG_DIR
