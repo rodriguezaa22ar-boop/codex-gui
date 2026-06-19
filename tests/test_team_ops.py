@@ -5,7 +5,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from codex_devices import DeviceRecord, save_devices
+from codex_devices import DeviceProbe, DeviceRecord, save_devices
 from codex_team import load_bus_report
 import codex_team_ops as team_ops
 
@@ -351,6 +351,110 @@ class TeamOpsTests(unittest.TestCase):
             self.assertEqual(payload["lane_counts"]["total"], 0)
             self.assertEqual(payload["bus_health"]["status"], "not_started")
             self.assertEqual(payload["blockers"], [])
+        finally:
+            team_ops.CONFIG_DIR = original_config
+            team_ops.DEVICES_FILE = original_devices
+            team_ops.TEAM_DIR = original_team
+            team_ops.LAST_TEAM_RUN_FILE = original_last
+
+    def test_doctor_check_uses_fresh_probe_readiness(self) -> None:
+        ctx = self._with_workspace()
+        original_config = team_ops.CONFIG_DIR
+        original_devices = team_ops.DEVICES_FILE
+        original_team = team_ops.TEAM_DIR
+        original_last = team_ops.LAST_TEAM_RUN_FILE
+
+        team_ops.CONFIG_DIR = ctx.config_dir.parent
+        team_ops.DEVICES_FILE = ctx.devices
+        team_ops.TEAM_DIR = ctx.team_dir
+        team_ops.LAST_TEAM_RUN_FILE = ctx.last_run
+
+        try:
+            saved = (
+                DeviceRecord(
+                    id="atlas-builder-1",
+                    name="atlas-builder",
+                    host="atlas-builder",
+                    user="ao",
+                    status="blocked",
+                    note="stale saved blocker",
+                ),
+            )
+            checked = (
+                DeviceRecord(
+                    id="atlas-builder-1",
+                    name="atlas-builder",
+                    host="atlas-builder",
+                    user="ao",
+                    status="ready",
+                ),
+            )
+            probes = {
+                "atlas-builder-1": DeviceProbe(
+                    device_id="atlas-builder-1",
+                    status="ready",
+                    summary="codex-cli 0.141.0 | ## main...origin/main | branch=main | changes=0",
+                    project_exists=True,
+                    git_state="## main...origin/main | branch=main | changes=0",
+                )
+            }
+            save_devices(ctx.devices, saved)
+
+            with patch.object(team_ops, "check_devices", return_value=(checked, probes)):
+                args = team_ops.parse_args(["--json", "doctor", "--check"])
+                with tempfile.TemporaryFile(mode="w+") as output:
+                    with patch("sys.stdout", new=output):
+                        self.assertEqual(team_ops.cmd_doctor(args), 0)
+                        output.seek(0)
+                        payload = json.loads(output.read())
+
+            self.assertEqual(payload["probe_mode"], "checked")
+            self.assertEqual(payload["checked_device_count"], 1)
+            self.assertEqual(payload["ready_device_count"], 1)
+            self.assertEqual(payload["readiness"]["ready"], 1)
+            self.assertEqual(payload["blockers"], [])
+        finally:
+            team_ops.CONFIG_DIR = original_config
+            team_ops.DEVICES_FILE = original_devices
+            team_ops.TEAM_DIR = original_team
+            team_ops.LAST_TEAM_RUN_FILE = original_last
+
+    def test_doctor_check_reports_probe_errors(self) -> None:
+        ctx = self._with_workspace()
+        original_config = team_ops.CONFIG_DIR
+        original_devices = team_ops.DEVICES_FILE
+        original_team = team_ops.TEAM_DIR
+        original_last = team_ops.LAST_TEAM_RUN_FILE
+
+        team_ops.CONFIG_DIR = ctx.config_dir.parent
+        team_ops.DEVICES_FILE = ctx.devices
+        team_ops.TEAM_DIR = ctx.team_dir
+        team_ops.LAST_TEAM_RUN_FILE = ctx.last_run
+
+        try:
+            save_devices(ctx.devices, (
+                DeviceRecord(
+                    id="atlas-builder-1",
+                    name="atlas-builder",
+                    host="atlas-builder",
+                    user="ao",
+                    status="ready",
+                ),
+            ))
+
+            with patch.object(team_ops, "check_devices", side_effect=RuntimeError("network\nfailed")):
+                args = team_ops.parse_args(["--json", "doctor", "--check"])
+                with tempfile.TemporaryFile(mode="w+") as output:
+                    with patch("sys.stdout", new=output):
+                        self.assertEqual(team_ops.cmd_doctor(args), 0)
+                        output.seek(0)
+                        payload = json.loads(output.read())
+
+            self.assertEqual(payload["probe_mode"], "error")
+            self.assertEqual(payload["status"], "blocked")
+            self.assertEqual(payload["next_action"], "Check Fleet")
+            self.assertTrue(any(item["category"] == "fleet-probe-failed" for item in payload["blockers"]))
+            self.assertIn("network failed", payload["blockers"][0]["summary"])
         finally:
             team_ops.CONFIG_DIR = original_config
             team_ops.DEVICES_FILE = original_devices
