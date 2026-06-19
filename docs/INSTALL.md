@@ -21,8 +21,15 @@ On NixOS or other Nix-enabled machines:
 
 ```bash
 nix-shell
-python3 -m unittest discover -s tests
+python3 -m pytest
+python3 -m venv --system-site-packages .venv
+.venv/bin/python -m pip install --no-build-isolation .
 ```
+
+The bundled shell includes `pip`, `pytest`, `setuptools`, and `wheel`, so it
+can validate tests and local installs even when a worker cannot fetch Python
+build dependencies from PyPI. Use a venv inside the shell; Nix Python itself is
+externally managed and should not be modified directly with `pip install --user`.
 
 ## Install From GitHub
 
