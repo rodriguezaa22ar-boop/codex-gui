@@ -50,12 +50,12 @@ a terminal-native control flow:
 
 ```bash
 cd ~/Projects/codex-gui
-python3 codex_team_ops.py discover --json
-python3 codex_team_ops.py check --json
-python3 codex_team_ops.py prepare --check --json
-python3 codex_team_ops.py sync --json
-python3 codex_team_ops.py launch --sync --json
-python3 codex_team_ops.py collect --json
+python3 codex_team_ops.py --json discover
+python3 codex_team_ops.py --json check
+python3 codex_team_ops.py --json prepare --check
+python3 codex_team_ops.py --json sync
+python3 codex_team_ops.py --json launch --sync
+python3 codex_team_ops.py --json collect
 ```
 
 You can also use the launcher script:

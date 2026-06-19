@@ -152,13 +152,13 @@ export ATLAS_BUILDER_SESSION=atlas-builder
 Run the full atlas team lifecycle from terminal using the same role model as the GUI:
 
 ```bash
-python3 codex_team_ops.py discover --json
-python3 codex_team_ops.py check --json
-python3 codex_team_ops.py roles --json
-python3 codex_team_ops.py prepare --check --json
-python3 codex_team_ops.py sync --json
-python3 codex_team_ops.py launch --json
-python3 codex_team_ops.py collect --json
+python3 codex_team_ops.py --json discover
+python3 codex_team_ops.py --json check
+python3 codex_team_ops.py --json roles
+python3 codex_team_ops.py --json prepare --check
+python3 codex_team_ops.py --json sync
+python3 codex_team_ops.py --json launch
+python3 codex_team_ops.py --json collect
 ```
 
 The same command set is available as a short script:
