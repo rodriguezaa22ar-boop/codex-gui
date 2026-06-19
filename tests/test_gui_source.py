@@ -177,6 +177,36 @@ class GuiSourceTests(unittest.TestCase):
         self.assertIn("palette_readiness_label", ast.unparse(render_palette))
         self.assertIn("need setup", ast.unparse(render_palette))
 
+    def test_palette_execute_controls_follow_preview_readiness(self) -> None:
+        source = Path("codex_gui.py").read_text(encoding="utf-8")
+        tree = ast.parse(source)
+
+        build_palette = _method_named(tree, "build_palette_page")
+        build_compact = _method_named(tree, "build_palette_panel")
+        refresh_execute = _method_named(tree, "refresh_palette_execute_buttons")
+        render_preview = _method_named(tree, "render_palette_preview")
+
+        self.assertIn("palette_execute_buttons", ast.unparse(build_palette))
+        self.assertIn("palette_execute_buttons", ast.unparse(build_compact))
+        self.assertIn("button.set_sensitive(enabled)", ast.unparse(refresh_execute))
+        self.assertIn("preview.requirement_text()", ast.unparse(refresh_execute))
+        self.assertIn("refresh_palette_execute_buttons(None)", ast.unparse(render_preview))
+        self.assertIn("refresh_palette_execute_buttons(preview)", ast.unparse(render_preview))
+        self.assertIn("enabled=preview.ready", ast.unparse(render_preview))
+
+    def test_palette_preview_surfaces_operator_decision_and_command_label(self) -> None:
+        source = Path("codex_gui.py").read_text(encoding="utf-8")
+        tree = ast.parse(source)
+
+        build_palette = _method_named(tree, "build_palette_page")
+        render_preview = _method_named(tree, "render_palette_preview")
+
+        self.assertIn("palette_preview_decision_label", ast.unparse(build_palette))
+        self.assertIn("Decision: select an action", ast.unparse(build_palette))
+        self.assertIn("Command Preview", ast.unparse(build_palette))
+        self.assertIn("Decision: ready to execute", ast.unparse(render_preview))
+        self.assertIn("Decision: blocked until", ast.unparse(render_preview))
+
     def test_quality_rows_surface_exit_and_duration_metadata(self) -> None:
         source = Path("codex_gui.py").read_text(encoding="utf-8")
         tree = ast.parse(source)
@@ -199,8 +229,11 @@ class GuiSourceTests(unittest.TestCase):
 
         self.assertIn("quality_page_pass_label", ast.unparse(build_quality))
         self.assertIn("quality_page_fail_label", ast.unparse(build_quality))
+        self.assertIn("quality_page_artifact_label", ast.unparse(build_quality))
         self.assertIn("pass_count", ast.unparse(render_quality))
         self.assertIn("fail_count", ast.unparse(render_quality))
+        self.assertIn("Artifact:", ast.unparse(render_quality))
+        self.assertIn("quality_page_artifact_label", ast.unparse(render_quality))
 
     def test_mesh_launch_console_surfaces_decision_copy(self) -> None:
         source = Path("codex_gui.py").read_text(encoding="utf-8")

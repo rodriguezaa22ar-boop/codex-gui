@@ -2077,6 +2077,8 @@ class CodexControl(Gtk.Application):
         execute = self.make_button("Execute", "media-playback-start-symbolic")
         execute.add_css_class("primary")
         execute.connect("clicked", self.on_execute_selected_action)
+        execute.set_sensitive(False)
+        self.palette_execute_buttons = [execute]
         clear = self.make_button("Clear", "edit-clear-symbolic")
         clear.add_css_class("secondary")
         clear.connect("clicked", self.on_clear_action_query)
@@ -2149,12 +2151,15 @@ class CodexControl(Gtk.Application):
         preview_header.append(preview_chip_flow)
         preview.append(preview_header)
         self.palette_preview_summary_label = self.label("Select an action to preview its effect.", "action-preview-detail", wrap=True)
+        self.palette_preview_decision_label = self.label("Decision: select an action", "next-step-detail", wrap=True)
         self.palette_preview_requirements_label = self.label("Ready", "action-preview-detail", wrap=True)
         self.palette_preview_command_label = self.label("-", "action-preview-command", wrap=True)
         self.palette_preview_command_label.set_lines(4)
         self.palette_preview_command_label.set_ellipsize(Pango.EllipsizeMode.MIDDLE)
         preview.append(self.palette_preview_summary_label)
+        preview.append(self.palette_preview_decision_label)
         preview.append(self.palette_preview_requirements_label)
+        preview.append(self.label("Command Preview", "section"))
         preview.append(self.palette_preview_command_label)
         detail.append(preview)
         feedback = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
@@ -2188,9 +2193,12 @@ class CodexControl(Gtk.Application):
             ("Copy", self.on_copy_palette_history, False),
             ("Open Log", self.on_open_palette_history, False),
         ]:
-            button = Gtk.Button(label=label)
-            button.add_css_class("primary" if primary else "secondary")
-            button.connect("clicked", handler)
+            button = self.command_button(
+                label,
+                handler,
+                primary=primary,
+                icon_name="media-playback-start-symbolic" if label == "Rerun" else "edit-copy-symbolic" if label == "Copy" else "document-open-symbolic",
+            )
             history_controls.append(button)
         history.append(history_controls)
         detail.append(history)
@@ -2401,6 +2409,8 @@ class CodexControl(Gtk.Application):
         summary.append(header)
         self.quality_page_detail_label = self.label("Plan is ready. Run Gate to create a report.", "quality-check-detail", wrap=True)
         summary.append(self.quality_page_detail_label)
+        self.quality_page_artifact_label = self.label("Artifact: plan preview", "action-preview-detail", wrap=True)
+        summary.append(self.quality_page_artifact_label)
         self.quality_next_step_banner = self.next_step_banner(
             "Run the gate",
             "The current plan is ready; run checks before handing this workstation state to another lane.",
@@ -3189,14 +3199,17 @@ class CodexControl(Gtk.Application):
         panel.append(self.palette_compact_entry)
 
         controls = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-        for label, handler, primary in [
-            ("Run", self.on_execute_selected_action, True),
-            ("Open", lambda button: self.show_palette(), False),
-            ("Clear", self.on_clear_action_query, False),
+        for label, handler, primary, icon_name in [
+            ("Run", self.on_execute_selected_action, True, "media-playback-start-symbolic"),
+            ("Open", lambda button: self.show_palette(), False, "document-open-symbolic"),
+            ("Clear", self.on_clear_action_query, False, "edit-clear-symbolic"),
         ]:
-            button = Gtk.Button(label=label)
-            button.add_css_class("primary" if primary else "secondary")
-            button.connect("clicked", handler)
+            button = self.command_button(label, handler, primary=primary, icon_name=icon_name)
+            if label == "Run":
+                button.set_sensitive(False)
+                buttons = getattr(self, "palette_execute_buttons", [])
+                buttons.append(button)
+                self.palette_execute_buttons = buttons
             controls.append(button)
         panel.append(controls)
         self.palette_compact_preview_label = self.label("Preview: select an action", "action-preview-detail", wrap=True)
@@ -7086,6 +7099,7 @@ class CodexControl(Gtk.Application):
             status = "running"
             score = "running"
             detail = f"Project: {plan.project} | checks: {len(plan.checks)} | report pending"
+            artifact = "Artifact: running gate; report will replace the plan preview when finished"
             next_title = "Gate running"
             next_detail = "Checks are in progress; wait for the report before copying a handoff."
             next_action = "Run Gate"
@@ -7095,6 +7109,7 @@ class CodexControl(Gtk.Application):
             status = report.status
             score = f"score {report.score}"
             detail = f"Report saved at {QUALITY_FILE} | checks: {len(report.checks)} | project: {report.project}"
+            artifact = f"Artifact: saved report at {QUALITY_FILE}"
             failed = [check.label for check in report.checks if check.status == "failed"]
             if failed:
                 next_title = "Fix failing checks"
@@ -7111,6 +7126,7 @@ class CodexControl(Gtk.Application):
             status = "ready"
             score = "not run"
             detail = f"Plan: {len(plan.checks)} check(s) | project: {plan.project} | report not run"
+            artifact = "Artifact: plan preview; no report has been generated for this project"
             next_title = "Run the gate"
             next_detail = "The current plan is ready; run checks before handing this workstation state to another lane."
             next_action = "Run Gate"
@@ -7135,6 +7151,9 @@ class CodexControl(Gtk.Application):
             )
         if hasattr(self, "quality_page_detail_label"):
             self.quality_page_detail_label.set_text(detail)
+        if hasattr(self, "quality_page_artifact_label"):
+            self.quality_page_artifact_label.set_text(artifact)
+            self.quality_page_artifact_label.set_tooltip_text(artifact)
         if hasattr(self, "quality_next_step_banner"):
             self.update_next_step_banner(
                 self.quality_next_step_banner,
@@ -8077,6 +8096,15 @@ class CodexControl(Gtk.Application):
             self.palette_action_id_label.set_text(action.id)
         self.render_palette_preview(action)
 
+    def refresh_palette_execute_buttons(self, preview: PalettePreview | None) -> None:
+        enabled = bool(preview and preview.ready)
+        tooltip = "Execute selected action" if enabled else (
+            preview.requirement_text() if preview is not None else "Select a ready action"
+        )
+        for button in getattr(self, "palette_execute_buttons", []):
+            button.set_sensitive(enabled)
+            button.set_tooltip_text(tooltip)
+
     def palette_context(self) -> PaletteContext:
         project = self.selected_project()
         return PaletteContext(
@@ -8126,8 +8154,10 @@ class CodexControl(Gtk.Application):
                 self.set_chip(self.palette_preview_surface_label, "surface", "chip")
                 self.set_chip(self.palette_preview_risk_label, "risk", "chip")
                 self.palette_preview_summary_label.set_text("Select an action to preview its effect.")
+                self.palette_preview_decision_label.set_text("Decision: select an action")
                 self.palette_preview_requirements_label.set_text("Ready")
                 self.palette_preview_command_label.set_text("-")
+            self.refresh_palette_execute_buttons(None)
             if hasattr(self, "palette_compact_preview_label"):
                 self.palette_compact_preview_label.set_text("Preview: select an action")
             if hasattr(self, "palette_next_step_banner"):
@@ -8155,8 +8185,12 @@ class CodexControl(Gtk.Application):
             self.set_chip(self.palette_preview_surface_label, preview.surface, "chip")
             self.set_chip(self.palette_preview_risk_label, preview.risk, "chip")
             self.palette_preview_summary_label.set_text(preview.summary)
+            decision = "Decision: ready to execute" if preview.ready else f"Decision: blocked until {', '.join(preview.requirements)}"
+            self.palette_preview_decision_label.set_text(decision)
+            self.palette_preview_decision_label.set_tooltip_text(decision)
             self.palette_preview_requirements_label.set_text(preview.requirement_text())
             self.palette_preview_command_label.set_text(preview.command_text or preview.detail_text())
+        self.refresh_palette_execute_buttons(preview)
         if hasattr(self, "palette_compact_preview_label"):
             command_hint = f" | {preview.command_text}" if preview.command_text else ""
             self.palette_compact_preview_label.set_text(
@@ -8169,6 +8203,7 @@ class CodexControl(Gtk.Application):
                 title,
                 f"{preview.surface} | {preview.risk} | {preview.requirement_text()}",
                 "Execute",
+                enabled=preview.ready,
             )
         self.render_palette_history(action)
 
