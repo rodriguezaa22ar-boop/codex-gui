@@ -21,7 +21,7 @@ configure_origin() {
 
 if [[ "${1:-}" == "--run-codex" ]]; then
   cd "$REPO"
-  export PATH="$HOME/.local/bin:$PATH"
+  export PATH="$HOME/.npm-global/bin:$HOME/.local/bin:$PATH"
   export PROMPT_FILE
   if ! command -v codex >/dev/null 2>&1; then
     echo "codex CLI not found in PATH."
@@ -66,18 +66,17 @@ Read docs/TEAM_ROLES.md and docs/missions/ATLAS_BUILDER_CORE_SYSTEMS.md first.
 Stay inside the Core Systems boundary.
 
 Mission:
-Implement a backend-first mesh readiness report path that the GUI and future CLI
-can reuse. It should inspect saved mesh devices, classify readiness using
-existing codex_devices helpers, and produce actionable next steps per worker
-without exposing secrets or requiring a broad UI rewrite.
+Implement backend-first orchestration hardening that does not overlap the
+active atlas-main product pulse lane.
 
 Preferred shape:
-- Add small backend helpers rather than large GUI rewrites.
-- Reuse codex_devices.py, codex_team.py, and existing test style.
-- Include blocker categories for local ready, SSH auth denied, Tailscale SSH
-  approval required, offline/timeout, missing project, missing Codex, and stale
-  checkout when detectable.
-- Add unit tests for report generation and classification.
+- Work only in backend/core systems paths.
+- Prefer one focused target:
+  - mesh doctor/report CLI follow-through
+  - readiness classification cleanup
+  - safer worker setup / launch plumbing
+  - clearer SSH/Tailscale/Codex missing-state diagnostics
+- Reuse existing codex_devices.py, codex_team.py, codex_setup.py, and test patterns.
 - Keep remote command paths deterministic and metadata-safe.
 - Do not commit local ~/.config/codex-gui/devices.json, raw logs, tokens, sudo
   codes, credentials, or machine-private output.
