@@ -4673,15 +4673,18 @@ class CodexControl(Gtk.Application):
             self.mesh_launch_console_list.append(row)
             return
         project_path = Path(self.selected_project()).expanduser()
+        reason_map = self._mesh_launch_blocking_reason_map(assignments)
         for assignment in assignments:
             device = self.mesh_assignment_device(assignment)
             readiness_row = readiness.by_device(device.id) if device is not None else None
+            lane_title = assignment.get("lane_title", "Lane")
+            device_name = assignment.get("device_name", "device")
             row = Gtk.ListBoxRow()
             row.add_css_class("team-row")
             content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=5)
             top = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
             title = self.label(
-                f"{assignment.get('role_title') or assignment.get('lane_title', 'Lane')} | {assignment.get('device_name', 'device')}",
+                f"{assignment.get('role_title') or lane_title} | {device_name}",
                 "row-title",
             )
             title.set_hexpand(True)
@@ -4691,6 +4694,9 @@ class CodexControl(Gtk.Application):
             chip_flow = self.flow_row()
             status = readiness_row.status if readiness_row is not None else "unknown"
             self.flow_append(chip_flow, self.chip_label(status, self.chip_css_for_status(status)))
+            reason = reason_map.get((lane_title, device_name))
+            if reason:
+                self.flow_append(chip_flow, self.chip_label(f"blocked: {reason}", "chip-danger"))
             self.flow_append(chip_flow, self.chip_label(assignment.get("role_profile", "profile"), "chip"))
             if device is None:
                 sync_text = "missing device"
@@ -4945,6 +4951,25 @@ class CodexControl(Gtk.Application):
                 continue
             ready.append(assignment['lane_title'])
         return (len(blocked) == 0 and bool(ready), ready, blocked)
+
+    def _mesh_launch_blocking_reason_map(self, assignments: list[dict[str, str]]) -> dict[tuple[str, str], str]:
+        _, _, blocked_reasons = self._mesh_launch_guard(assignments)
+        reasons: dict[tuple[str, str], str] = {}
+        for raw in blocked_reasons:
+            parts = raw.split(" | ", 2)
+            if len(parts) >= 3:
+                lane = parts[0].strip()
+                device = parts[1].strip()
+                reason = parts[2].strip()
+            elif len(parts) == 2:
+                lane = parts[0].strip()
+                device = "device"
+                reason = parts[1].strip()
+            else:
+                continue
+            if lane and reason:
+                reasons[(lane, device)] = reason
+        return reasons
 
     def _mesh_team_seed_devices(self) -> tuple[DeviceRecord, ...]:
         readiness = mesh_readiness_report(self.devices, self.mesh_probe_records)
