@@ -7,6 +7,8 @@ REMOTE_SSH="git@github.com:rodriguezaa22ar-boop/codex-gui.git"
 REMOTE_HTTPS="https://github.com/rodriguezaa22ar-boop/codex-gui.git"
 MISSION_DIR="$HOME/.config/codex-gui/missions"
 PROMPT_FILE="$MISSION_DIR/atlas-cockpit-release-verify.prompt"
+LOG_FILE="$MISSION_DIR/atlas-cockpit-release-verify.log"
+PID_FILE="$MISSION_DIR/atlas-cockpit-release-verify.pid"
 SCRIPT_PATH="$(readlink -f "$0")"
 export GIT_TERMINAL_PROMPT=0
 
@@ -33,11 +35,6 @@ fi
 
 if ! command -v git >/dev/null 2>&1; then
   echo "git is required before starting the verifier lane." >&2
-  exit 1
-fi
-
-if ! command -v tmux >/dev/null 2>&1; then
-  echo "tmux is required before starting the verifier lane." >&2
   exit 1
 fi
 
@@ -87,10 +84,11 @@ write a precise handoff with the commands run, results, failures, risks, and the
 exact Commander next action.
 PROMPT
 
-tmux kill-session -t "$SESSION" 2>/dev/null || true
-tmux new-session -d -s "$SESSION" -c "$REPO" "bash '$SCRIPT_PATH' --run-codex"
+if command -v tmux >/dev/null 2>&1; then
+  tmux kill-session -t "$SESSION" 2>/dev/null || true
+  tmux new-session -d -s "$SESSION" -c "$REPO" "bash '$SCRIPT_PATH' --run-codex"
 
-cat <<EOF
+  cat <<EOF
 Started atlas-cockpit Release Verify Codex lane.
 
 Session:
@@ -98,6 +96,34 @@ Session:
 
 Attach:
   tmux attach -t $SESSION
+
+Repo:
+  $REPO
+
+Prompt:
+  $PROMPT_FILE
+EOF
+  exit 0
+fi
+
+if [[ -f "$PID_FILE" ]] && kill -0 "$(cat "$PID_FILE" 2>/dev/null)" 2>/dev/null; then
+  kill "$(cat "$PID_FILE")" 2>/dev/null || true
+fi
+
+nohup bash "$SCRIPT_PATH" --run-codex >"$LOG_FILE" 2>&1 </dev/null &
+echo "$!" >"$PID_FILE"
+
+cat <<EOF
+Started atlas-cockpit Release Verify Codex lane.
+
+Mode:
+  nohup
+
+PID:
+  $(cat "$PID_FILE")
+
+Log:
+  $LOG_FILE
 
 Repo:
   $REPO
