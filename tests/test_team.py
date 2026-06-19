@@ -3,6 +3,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from codex_team import (
     TeamBusReport,
@@ -91,6 +92,41 @@ class CodexTeamTests(unittest.TestCase):
             self.assertIn("Backend Builder | atlas-builder", text)
             self.assertIn("Handoff body", text)
             self.assertIn("Final body", text)
+
+    def test_write_team_summary_falls_back_to_out_when_root_is_read_only(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            team_dir = Path(tmp) / "team-one"
+            self.write_manifest(team_dir, "team-one")
+            original_write_text = Path.write_text
+
+            def write_text(path: Path, *args, **kwargs):
+                if path == team_dir / "summary.md":
+                    raise OSError("read-only run root")
+                return original_write_text(path, *args, **kwargs)
+
+            with patch.object(Path, "write_text", write_text):
+                summary = write_team_summary(team_dir)
+
+            self.assertEqual(summary, team_dir / "out" / "team-summary.md")
+            self.assertTrue(summary.exists())
+            self.assertIn("No collected handoff", summary.read_text(encoding="utf-8"))
+
+    def test_summary_review_marker_falls_back_with_out_summary(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            team_dir = Path(tmp) / "team-one"
+            self.write_manifest(team_dir, "team-one")
+            original_write_text = Path.write_text
+
+            def write_text(path: Path, *args, **kwargs):
+                if path in {team_dir / "summary.md", team_dir / "summary-reviewed.json"}:
+                    raise OSError("read-only run root")
+                return original_write_text(path, *args, **kwargs)
+
+            with patch.object(Path, "write_text", write_text):
+                marker = mark_team_summary_reviewed(team_dir)
+
+            self.assertEqual(marker, team_dir / "out" / "summary-reviewed.json")
+            self.assertTrue(is_team_summary_reviewed(team_dir))
 
     def test_write_handoff_bus_places_round_context_under_out(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

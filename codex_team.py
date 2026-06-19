@@ -557,8 +557,14 @@ def write_team_summary(team_dir: Path) -> Path:
         if not lane.handoff_path and not lane.final_path:
             lines.append("No collected handoff or final message yet.")
             lines.append("")
+    text = "\n".join(lines).rstrip() + "\n"
     output = team_dir / "summary.md"
-    output.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+    try:
+        output.write_text(text, encoding="utf-8")
+    except OSError:
+        output = team_dir / "out" / "team-summary.md"
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(text, encoding="utf-8")
     try:
         output.chmod(0o600)
     except OSError:
@@ -589,7 +595,12 @@ def mark_team_summary_reviewed(team_dir: Path) -> Path:
         "summary_sha256": _sha256_file(summary_path),
         "reviewed_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
     }
-    marker.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    marker_text = json.dumps(payload, indent=2, sort_keys=True) + "\n"
+    try:
+        marker.write_text(marker_text, encoding="utf-8")
+    except OSError:
+        marker = summary_path.parent / "summary-reviewed.json"
+        marker.write_text(marker_text, encoding="utf-8")
     try:
         marker.chmod(0o600)
     except OSError:
@@ -598,19 +609,23 @@ def mark_team_summary_reviewed(team_dir: Path) -> Path:
 
 
 def is_team_summary_reviewed(team_dir: Path) -> bool:
-    summary_path = team_dir / "summary.md"
-    marker = team_summary_review_path(team_dir)
-    if not summary_path.exists() or not marker.exists():
-        return False
-    try:
-        payload = json.loads(marker.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return False
-    if payload.get("schema") != "codex-team-summary-review/v1":
-        return False
-    if str(payload.get("summary_sha256") or "") != _sha256_file(summary_path):
-        return False
-    return str(payload.get("run_id") or "") == inspect_team_run(team_dir).run_id
+    candidates = (
+        (team_dir / "summary.md", team_summary_review_path(team_dir)),
+        (team_dir / "out" / "team-summary.md", team_dir / "out" / "summary-reviewed.json"),
+    )
+    for summary_path, marker in candidates:
+        if not summary_path.exists() or not marker.exists():
+            continue
+        try:
+            payload = json.loads(marker.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if payload.get("schema") != "codex-team-summary-review/v1":
+            continue
+        if str(payload.get("summary_sha256") or "") != _sha256_file(summary_path):
+            continue
+        return str(payload.get("run_id") or "") == inspect_team_run(team_dir).run_id
+    return False
 
 
 def write_handoff_bus(team_dir: Path) -> Path:
@@ -621,7 +636,8 @@ def write_handoff_bus(team_dir: Path) -> Path:
     out_dir.mkdir(parents=True, exist_ok=True)
     bus_path = out_dir / "handoff-bus.md"
     summary_copy = out_dir / "team-summary.md"
-    summary_copy.write_text(summary_path.read_text(encoding="utf-8", errors="replace"), encoding="utf-8")
+    if summary_path != summary_copy:
+        summary_copy.write_text(summary_path.read_text(encoding="utf-8", errors="replace"), encoding="utf-8")
     lines = [
         "# Codex Team Handoff Bus",
         "",
