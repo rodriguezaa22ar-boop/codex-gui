@@ -163,6 +163,9 @@ python3 codex_team_ops.py --json doctor
 python3 codex_team_ops.py --json summary
 ```
 
+`doctor` returns the shared mesh readiness summary plus sanitized per-device
+readiness rows, so commander scripts can act without reading raw probe output.
+
 The same command set is available as a short script:
 
 ```bash

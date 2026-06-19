@@ -700,6 +700,28 @@ def _doctor_probe_blockers(probe_error: str = "") -> list[dict[str, Any]]:
     }]
 
 
+def _doctor_readiness_rows(
+    devices: tuple[DeviceRecord, ...],
+    report: MeshReadinessReport,
+) -> list[dict[str, Any]]:
+    trusted = {device.id: _is_trusted(device) for device in devices}
+    return [
+        {
+            "device_id": row.device_id,
+            "device_name": row.device_name,
+            "host": row.host,
+            "status": row.status,
+            "blocker_category": row.blocker_category,
+            "summary": row.summary,
+            "next_actions": list(row.next_actions),
+            "checked": row.checked,
+            "source": row.source,
+            "trusted": trusted.get(row.device_id, False),
+        }
+        for row in report.rows
+    ]
+
+
 def build_team_doctor_report(
     devices: tuple[DeviceRecord, ...],
     *,
@@ -769,6 +791,7 @@ def build_team_doctor_report(
             "offline": readiness.offline_count,
             "total": readiness.total,
             "generated": readiness.generated,
+            "rows": _doctor_readiness_rows(devices, readiness),
         },
         "saved_run_count": saved_runs,
         "latest_run_id": run.run_id if run is not None else "",
