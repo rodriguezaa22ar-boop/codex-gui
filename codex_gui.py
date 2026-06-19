@@ -4663,7 +4663,7 @@ class CodexControl(Gtk.Application):
             ready = len(self.ready_mesh_devices())
             mode = "prepared" if prepared else "preview"
             self.mesh_launch_console_meta_label.set_text(
-                f"{len(assignments)} lane(s) | {ready} ready device(s) | {mode} | bus {operator.bus_text}"
+                f"{len(assignments)} lane(s) | {len(display_assignments)} shown | {ready} ready device(s) | {mode} | bus {operator.bus_text}"
             )
         if hasattr(self, "mesh_launch_console_prompt_label"):
             self.mesh_launch_console_prompt_label.set_text(f"Mission: {prompt_preview}")
@@ -4686,7 +4686,11 @@ class CodexControl(Gtk.Application):
             self.mesh_launch_console_decision_label.set_text(decision)
             self.mesh_launch_console_decision_label.set_tooltip_text(decision)
         if hasattr(self, "mesh_launch_blocker_timeline_label"):
-            timeline = self.mesh_launch_blocker_timeline_text(assignments, readiness=readiness)
+            timeline = self.mesh_launch_blocker_timeline_text(
+                assignments,
+                readiness=readiness,
+                only_blocked=self.mesh_launch_console_blocked_only,
+            )
             if timeline:
                 timeline_text = f"Blocker timeline:\n{timeline}"
                 self.mesh_launch_blocker_timeline_label.set_text(timeline_text)
@@ -4695,15 +4699,31 @@ class CodexControl(Gtk.Application):
                 self.mesh_launch_blocker_timeline_label.set_text("Blocker timeline: ready")
                 self.mesh_launch_blocker_timeline_label.set_tooltip_text("All lanes are ready")
         self.refresh_mesh_launch_stage_strip(run_status, prepared=prepared, operator=operator)
-        if not assignments:
+        if not display_assignments:
             row = Gtk.ListBoxRow()
             row.add_css_class("team-row")
-            row.set_child(self.label("No launchable lanes. Run Check Fleet or add a trusted ready device.", "muted", wrap=True))
+            if assignments:
+                row.set_child(
+                    self.label(
+                        "No displayed lanes match the launch console filter. "
+                        "Disable 'Blocked only' or recheck the fleet.",
+                        "muted",
+                        wrap=True,
+                    )
+                )
+            else:
+                row.set_child(
+                    self.label(
+                        "No launchable lanes. Run Check Fleet or add a trusted ready device.",
+                        "muted",
+                        wrap=True,
+                    )
+                )
             self.mesh_launch_console_list.append(row)
             return
         project_path = Path(self.selected_project()).expanduser()
         reason_map = self._mesh_launch_blocking_reason_map(assignments)
-        for assignment in assignments:
+        for assignment in display_assignments:
             device = self.mesh_assignment_device(assignment)
             readiness_row = readiness.by_device(device.id) if device is not None else None
             lane_title = assignment.get("lane_title", "Lane")
@@ -4805,6 +4825,77 @@ class CodexControl(Gtk.Application):
                 content.append(action_row)
             row.set_child(content)
             self.mesh_launch_console_list.append(row)
+
+    def on_launch_console_blocked_only_toggled(self, _button: Gtk.ToggleButton) -> None:
+        self.mesh_launch_console_blocked_only = bool(self.mesh_launch_console_blocked_only_toggle.get_active())
+        self.save_current_state()
+        self.render_mesh_launch_console()
+
+    def on_recheck_launch_blocked_lanes(self, _button: Gtk.Button) -> None:
+        readiness = mesh_readiness_report(self.devices, self.mesh_probe_records)
+        prepared = bool(self.mesh_team_assignments and self.mesh_team_dir is not None and self.mesh_team_run_id)
+        assignments = list(self.mesh_team_assignments) if prepared else self.build_mesh_team_assignments()
+        row_map = {row.device_id: row for row in readiness.rows}
+        blocked = []
+        for assignment in assignments:
+            device = self.mesh_assignment_device(assignment)
+            if device is None:
+                continue
+            row = row_map.get(device.id)
+            if row is None or row.status != "ready" or not self.trusted_mesh_device(device):
+                blocked.append(device.id)
+        seen: set[str] = set()
+        for device_id in blocked:
+            if device_id in seen:
+                continue
+            seen.add(device_id)
+            self.on_recheck_lane(device_id)
+        if seen:
+            self.set_mesh_team_status(f"Rechecking {len(seen)} blocked lane device(s).")
+            self.set_status("Rechecking blocked lanes")
+        else:
+            self.set_mesh_team_status("No blocked lanes to recheck.")
+            self.set_status("No blocked lanes detected in launch console.")
+
+    def _mesh_launch_console_display_assignments(
+        self,
+        assignments: list[dict[str, str]],
+        *,
+        readiness: MeshReadinessReport | None = None,
+        only_blocked: bool | None = None,
+    ) -> list[dict[str, str]]:
+        readiness = readiness or mesh_readiness_report(self.devices, self.mesh_probe_records)
+        row_map = {row.device_id: row for row in readiness.rows}
+        blocked_filter = self.mesh_launch_console_blocked_only if only_blocked is None else only_blocked
+
+        def is_blocked(assignment: dict[str, str]) -> bool:
+            device = self.mesh_assignment_device(assignment)
+            if device is None:
+                return True
+            if not self.trusted_mesh_device(device):
+                return True
+            row = row_map.get(device.id)
+            if row is None:
+                return True
+            return row.status != "ready"
+
+        def sort_key(assignment: dict[str, str]) -> tuple[int, str]:
+            device = self.mesh_assignment_device(assignment)
+            if device is None:
+                return (90, assignment.get("lane_title", "lane"))
+            row = row_map.get(device.id)
+            if row is None:
+                return (70, assignment.get("lane_title", "lane"))
+            if not self.trusted_mesh_device(device):
+                return (60, assignment.get("lane_title", "lane"))
+            if row.status == "ready":
+                return (99, assignment.get("lane_title", "lane"))
+            return (row.action_priority if row.action_priority else 50, assignment.get("lane_title", "lane"))
+
+        ordered = sorted(assignments, key=sort_key)
+        if not blocked_filter:
+            return ordered
+        return [assignment for assignment in ordered if is_blocked(assignment)]
 
     def _mesh_team_lane_for_selected_device(self) -> tuple[str, str]:
         device = self.selected_mesh_device()
@@ -5184,12 +5275,33 @@ class CodexControl(Gtk.Application):
         assignments: list[dict[str, str]],
         *,
         readiness: MeshReadinessReport | None = None,
+        only_blocked: bool = False,
     ) -> str:
-        readiness_rows = (readiness or mesh_readiness_report(self.devices, self.mesh_probe_records)).rows
-        row_by_device = {row.device_id: row for row in readiness_rows}
-        if not assignments:
-            return "No lanes available. Add ready trusted devices and run Check Fleet."
+        all_readiness = readiness or mesh_readiness_report(self.devices, self.mesh_probe_records)
+        ordered = self._mesh_launch_console_display_assignments(
+            assignments,
+            readiness=all_readiness,
+            only_blocked=only_blocked,
+        )
+        if not ordered:
+            if not assignments:
+                return "No lanes available. Add ready trusted devices and run Check Fleet."
+            if only_blocked:
+                return "No blocked lanes."
+            return "All lanes ready to launch."
+        row_by_device = {row.device_id: row for row in all_readiness.rows}
+        lines = self._mesh_launch_blocker_timeline_lines(ordered, row_by_device=row_by_device)
 
+        if not lines:
+            return "All lanes ready to launch."
+        return "\n".join(lines)
+
+    def _mesh_launch_blocker_timeline_lines(
+        self,
+        assignments: list[dict[str, str]],
+        *,
+        row_by_device: dict[str, MeshReadinessRow],
+    ) -> list[str]:
         lines: list[str] = []
         for index, assignment in enumerate(assignments, start=1):
             lane = assignment.get("lane_title", "lane")
@@ -5219,10 +5331,7 @@ class CodexControl(Gtk.Application):
 
             next_action = row.next_actions[0] if row.next_actions else "Recheck readiness"
             lines.append(f"{index}. {lane} on {device_name}: {blocker} | checked {when} | action: {next_action}")
-
-        if not lines:
-            return "All lanes ready to launch."
-        return "\n".join(lines)
+        return lines
 
     def _mesh_team_seed_devices(self) -> tuple[DeviceRecord, ...]:
         readiness = mesh_readiness_report(self.devices, self.mesh_probe_records)

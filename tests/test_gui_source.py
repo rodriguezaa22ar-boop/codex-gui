@@ -109,6 +109,7 @@ class GuiSourceTests(unittest.TestCase):
         tree = ast.parse(source)
 
         render_console = _method_named(tree, "render_mesh_launch_console")
+        build_mesh = _method_named(tree, "build_mesh_page")
         sync_project_handler = _method_named(tree, "on_sync_launch_console_project")
         open_session_handler = _method_named(tree, "on_open_launch_console_session")
 
@@ -123,6 +124,8 @@ class GuiSourceTests(unittest.TestCase):
         self.assertIn("launch_console_command_copy", render_text)
         self.assertIn("on_mesh_lane_fix_now", render_text)
         self.assertIn("mesh_launch_blocker_timeline_text", render_text)
+        self.assertIn("on_recheck_launch_blocked_lanes", ast.unparse(build_mesh))
+        self.assertIn("on_launch_console_blocked_only_toggled", ast.unparse(build_mesh))
 
         self.assertIn("def on_open_launch_console_session", ast.unparse(open_session_handler))
         self.assertIn("is_local_mesh_device", ast.unparse(open_session_handler))
@@ -276,18 +279,39 @@ class GuiSourceTests(unittest.TestCase):
         self.assertIn("on_recheck_lane", ast.unparse(render_console))
         self.assertIn("on_mesh_lane_fix_now", ast.unparse(render_console))
         self.assertIn("set_tooltip_text", ast.unparse(render_console))
+        self.assertIn("mesh_launch_console_blocked_only_toggle", ast.unparse(build_mesh))
+        self.assertIn("Blocked only", ast.unparse(build_mesh))
 
     def test_mesh_launch_blocker_timeline_method_exists(self) -> None:
         source = Path("codex_gui.py").read_text(encoding="utf-8")
         tree = ast.parse(source)
         render_console = _method_named(tree, "render_mesh_launch_console")
+        timeline_lines = _method_named(tree, "_mesh_launch_blocker_timeline_lines")
         timeline = _method_named(tree, "mesh_launch_blocker_timeline_text")
 
         self.assertIn("mesh_launch_blocker_timeline_label", ast.unparse(render_console))
         self.assertIn("mesh_launch_blocker_timeline_text", ast.unparse(render_console))
-        self.assertIn("mesh_assignment_device", ast.unparse(timeline))
+        self.assertIn("_mesh_launch_blocker_timeline_lines", ast.unparse(timeline))
         self.assertIn("mesh_readiness_report", ast.unparse(timeline))
-        self.assertIn("row.next_actions", ast.unparse(timeline))
+        self.assertIn("row.next_actions", ast.unparse(timeline_lines))
+
+    def test_mesh_launch_blocker_timeline_display_helpers(self) -> None:
+        source = Path("codex_gui.py").read_text(encoding="utf-8")
+        tree = ast.parse(source)
+
+        render_console = _method_named(tree, "render_mesh_launch_console")
+        build_mesh = _method_named(tree, "build_mesh_page")
+        display = _method_named(tree, "_mesh_launch_console_display_assignments")
+        timeline = _method_named(tree, "mesh_launch_blocker_timeline_text")
+        blocked_lines = _method_named(tree, "_mesh_launch_blocker_timeline_lines")
+        sort_text = ast.unparse(display)
+        self.assertIn("mesh_launch_console_blocked_only", ast.unparse(render_console))
+        self.assertIn("only_blocked", sort_text)
+        self.assertIn("sorted(assignments", ast.unparse(display))
+        self.assertIn("mesh_launch_console_blocked_only_toggle", ast.unparse(build_mesh))
+        self.assertIn("on_recheck_launch_blocked_lanes", ast.unparse(build_mesh))
+        self.assertIn("_mesh_launch_blocker_timeline_lines", ast.unparse(timeline))
+        self.assertIn("row.next_actions", ast.unparse(blocked_lines))
 
     def test_workstation_pages_have_stateful_next_step_banners(self) -> None:
         source = Path("codex_gui.py").read_text(encoding="utf-8")
