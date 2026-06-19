@@ -4147,6 +4147,8 @@ class CodexControl(Gtk.Application):
             top = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
             title = self.label(device.name, "row-title")
             title.set_hexpand(True)
+            title.set_ellipsize(Pango.EllipsizeMode.END)
+            title.set_tooltip_text(device.name)
             status = self.chip_label(device.status, self.chip_css_for_status(device.status))
             role = self.chip_label(self._mesh_device_role_chip(device), "mode-pill")
             readiness = readiness_report.by_device(device.id)
@@ -4161,15 +4163,21 @@ class CodexControl(Gtk.Application):
             top.append(role)
             top.append(fleet_status)
             top.append(freshness)
-            target = self.label(f"{device.target()}:{device.port}", "muted")
-            target.set_ellipsize(Pango.EllipsizeMode.MIDDLE)
-            project = self.label(device.project_root, "muted")
-            project.set_ellipsize(Pango.EllipsizeMode.MIDDLE)
+            target = self.muted_meta_label(f"{device.target()}:{device.port}")
+            project = self.muted_meta_label(device.project_root)
             content.append(top)
             content.append(target)
             content.append(project)
-            if readiness is not None and readiness.blocker_category:
-                content.append(self.label(f"Readiness: {readiness.blocker_category}", "muted"))
+            if readiness is not None:
+                readiness_bits = [f"Readiness: {readiness.blocker_category}"]
+                if readiness.next_actions:
+                    readiness_bits.append(readiness.next_actions[0])
+                readiness_line = " | ".join(bit for bit in readiness_bits if bit)
+                next_action = self.label(readiness_line, "muted", wrap=True)
+                next_action.set_lines(2)
+                next_action.set_ellipsize(Pango.EllipsizeMode.END)
+                next_action.set_tooltip_text("\n".join(readiness.next_actions) if readiness.next_actions else readiness.summary)
+                content.append(next_action)
             if device.note:
                 note = self.label(device.note, "muted", wrap=True)
                 note.set_lines(2)
@@ -5355,6 +5363,8 @@ class CodexControl(Gtk.Application):
             top = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
             title = self.label(f"{lane.lane_title} | {lane.device_name}", "row-title")
             title.set_hexpand(True)
+            title.set_ellipsize(Pango.EllipsizeMode.END)
+            title.set_tooltip_text(f"{lane.lane_title} | {lane.device_name}")
             top.append(title)
             top.append(self.chip_label(lane.status, self.chip_css_for_status(lane.status)))
             if assignment.get("role_id"):
@@ -5371,12 +5381,14 @@ class CodexControl(Gtk.Application):
                 detail += f" | comm: {bus_status.detail}"
             else:
                 detail += " | comm: not synced"
-            content.append(self.label(detail, "muted", wrap=True))
-            target = self.label(
+            detail_label = self.label(detail, "muted", wrap=True)
+            detail_label.set_lines(2)
+            detail_label.set_ellipsize(Pango.EllipsizeMode.END)
+            detail_label.set_tooltip_text(detail)
+            content.append(detail_label)
+            target = self.muted_meta_label(
                 f"{assignment.get('target', 'target unknown')} | {assignment.get('project_root', 'project unknown')}",
-                "muted",
             )
-            target.set_ellipsize(Pango.EllipsizeMode.MIDDLE)
             content.append(target)
             row.set_child(content)
             self.mesh_team_list.append(row)
@@ -6687,10 +6699,21 @@ class CodexControl(Gtk.Application):
             top = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
             title = self.label(item.label, "quality-check-title")
             title.set_hexpand(True)
+            title.set_ellipsize(Pango.EllipsizeMode.END)
+            title.set_tooltip_text(item.label)
             status = getattr(item, "status", "running" if self.quality_running else "ready")
             top.append(title)
             top.append(self.chip_label(status, self.chip_css_for_status(status)))
+            if isinstance(item, QualityCheckResult):
+                exit_text = f"exit {item.exit_code}" if item.exit_code is not None else "timeout"
+                top.append(self.chip_label(exit_text, self.chip_css_for_status(status)))
+                top.append(self.chip_label(f"{item.duration_ms} ms", "chip"))
+            elif not compact:
+                top.append(self.chip_label(f"{item.timeout}s", "chip"))
             detail = self.label(item.command_text(), "quality-check-detail", wrap=True)
+            detail.set_lines(2)
+            detail.set_ellipsize(Pango.EllipsizeMode.END)
+            detail.set_tooltip_text(item.command_text())
             content.append(top)
             content.append(detail)
             if isinstance(item, QualityCheckResult) and item.output_tail and not compact:
@@ -7567,7 +7590,14 @@ class CodexControl(Gtk.Application):
 
     def render_action_list(self, listbox: Gtk.ListBox, actions: tuple[ActionSpec, ...]) -> None:
         self.clear_listbox(listbox)
+        context = self.palette_context()
         for action in actions:
+            preview = build_palette_preview(
+                action,
+                context,
+                self.command_for_palette_action(action.id),
+                prompt_redacted=bool(self.selected_prompt()),
+            )
             row = Gtk.ListBoxRow()
             row.action = action
             row.add_css_class("action-row")
@@ -7575,11 +7605,23 @@ class CodexControl(Gtk.Application):
             top = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
             title = self.label(action.title, "action-title")
             title.set_hexpand(True)
+            title.set_ellipsize(Pango.EllipsizeMode.END)
+            title.set_tooltip_text(action.title)
             top.append(title)
             top.append(self.chip_label(action.group, "chip"))
+            top.append(self.chip_label(preview.status, "chip-strong" if preview.ready else "chip-danger"))
+            top.append(self.chip_label(preview.surface, "chip"))
             detail = self.label(action.detail, "action-detail", wrap=True)
+            detail.set_lines(2)
+            detail.set_ellipsize(Pango.EllipsizeMode.END)
+            detail.set_tooltip_text(action.detail)
+            requirement = self.label(preview.requirement_text(), "action-preview-detail", wrap=True)
+            requirement.set_lines(2)
+            requirement.set_ellipsize(Pango.EllipsizeMode.END)
+            requirement.set_tooltip_text(preview.detail_text())
             content.append(top)
             content.append(detail)
+            content.append(requirement)
             row.set_child(content)
             listbox.append(row)
             if self.selected_action is not None and action.id == self.selected_action.id:
