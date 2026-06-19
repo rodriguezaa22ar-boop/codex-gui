@@ -92,6 +92,7 @@ class MeshReadinessRow:
     host: str
     status: str
     blocker_category: str
+    action_priority: int
     summary: str
     next_actions: tuple[str, ...]
     checked: int = 0
@@ -151,6 +152,7 @@ class MeshReadinessReport:
                 f"## {row.device_name} ({row.host})",
                 f"Status: {row.status}",
                 f"Category: {row.blocker_category}",
+                f"Priority: {row.action_priority}",
                 f"Summary: {row.summary}",
             ])
             if row.checked:
@@ -203,6 +205,24 @@ def _missing_codex_hint(probe: DeviceProbe, device: DeviceRecord) -> bool:
     if "command not found" in haystack:
         return True
     return False
+
+
+def _readiness_action_priority(status: str, category: str) -> int:
+    if status == "blocked":
+        if category in {"tailscale-approval-required", "ssh-auth-denied"}:
+            return 10
+        if category == "missing-codex":
+            return 20
+        return 25
+    if status == "offline":
+        return 15
+    if category in {"missing-project", "stale-checkout"}:
+        return 30
+    if category in {"needs-probe", "needs-review"}:
+        return 40
+    if status == "ready":
+        return 90
+    return 50
 
 
 TAILSCALE_APPROVAL_RE = re.compile(r"https://login\.tailscale\.com/a/[A-Za-z0-9_-]+")
@@ -276,6 +296,7 @@ def _row_from_device_probe(device: DeviceRecord, probe: DeviceProbe | None) -> M
                 host=device.host,
                 status="ready",
                 blocker_category=category,
+                action_priority=_readiness_action_priority("ready", category),
                 summary="Saved device state is ready.",
                 next_actions=_probe_actions(category, device),
                 checked=0,
@@ -288,6 +309,7 @@ def _row_from_device_probe(device: DeviceRecord, probe: DeviceProbe | None) -> M
                 host=device.host,
                 status="offline",
                 blocker_category="offline",
+                action_priority=_readiness_action_priority("offline", "offline"),
                 summary="Device is currently offline in saved mesh state.",
                 next_actions=_probe_actions("offline-or-timeout", device),
                 source="saved",
@@ -298,6 +320,7 @@ def _row_from_device_probe(device: DeviceRecord, probe: DeviceProbe | None) -> M
             host=device.host,
             status="review",
             blocker_category="needs-probe",
+            action_priority=_readiness_action_priority("review", "needs-probe"),
             summary=f"No probe data yet. Last note: {device.note or 'no note'}",
             next_actions=_probe_actions("needs-probe", device),
             source="saved",
@@ -322,6 +345,7 @@ def _row_from_device_probe(device: DeviceRecord, probe: DeviceProbe | None) -> M
             host=device.host,
             status=status,
             blocker_category=category,
+            action_priority=_readiness_action_priority(status, category),
             summary=summary,
             next_actions=_probe_actions(category if status != "ready" else "local-ready" if _is_local_host(device.host) else "ready", device),
             checked=probe.checked,
@@ -346,6 +370,7 @@ def _row_from_device_probe(device: DeviceRecord, probe: DeviceProbe | None) -> M
             host=device.host,
             status="review",
             blocker_category=category,
+            action_priority=_readiness_action_priority("review", category),
             summary=summary,
             next_actions=_probe_actions(category, device),
             checked=probe.checked,
@@ -377,6 +402,7 @@ def _row_from_device_probe(device: DeviceRecord, probe: DeviceProbe | None) -> M
             host=device.host,
             status=row_status,
             blocker_category=category,
+            action_priority=_readiness_action_priority(row_status, category),
             summary=summary,
             next_actions=_probe_actions(category, device, approval_url),
             checked=probe.checked,
@@ -389,6 +415,7 @@ def _row_from_device_probe(device: DeviceRecord, probe: DeviceProbe | None) -> M
         host=device.host,
         status="unknown",
         blocker_category="needs-review",
+        action_priority=_readiness_action_priority("unknown", "needs-review"),
         summary=probe.summary or "No usable readiness data",
         next_actions=_probe_actions("needs-review", device),
         checked=probe.checked,

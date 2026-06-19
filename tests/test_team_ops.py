@@ -587,6 +587,7 @@ class TeamOpsTests(unittest.TestCase):
         self.assertEqual(row["device_id"], device.id)
         self.assertEqual(row["status"], "blocked")
         self.assertEqual(row["blocker_category"], "ssh-auth-denied")
+        self.assertEqual(row["action_priority"], 10)
         self.assertEqual(row["checked"], 123)
         self.assertNotIn("raw", row)
         self.assertNotIn("PRIVATE_RAW_PROBE_OUTPUT", json.dumps(payload))
