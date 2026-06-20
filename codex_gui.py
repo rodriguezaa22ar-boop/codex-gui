@@ -1529,6 +1529,11 @@ class CodexControl(Gtk.Application):
         self.mesh_team_only = bool(self.config.get("mesh_team_only", False))
         self.focus_mode = bool(self.config.get("focus_mode", False))
         self.mesh_launch_console_blocked_only = bool(self.config.get("mesh_launch_console_blocked_only", False))
+        self.mesh_launch_console_focus_filter = self.config.get("mesh_launch_console_focus_filter", "all")
+        if self.mesh_launch_console_focus_filter not in {"all", "ready", "blocked", "review", "offline"}:
+            self.mesh_launch_console_focus_filter = "all"
+        if self.mesh_launch_console_focus_filter != "all":
+            self.mesh_launch_console_blocked_only = False
         self.mesh_live_refresh = bool(self.config.get("mesh_live_refresh", True))
         try:
             self.mesh_live_refresh_seconds = max(10, min(300, int(self.config.get("mesh_live_refresh_seconds", 30))))
@@ -1596,6 +1601,7 @@ class CodexControl(Gtk.Application):
         self.memory_items: tuple[MemoryItem, ...] = load_memory(MEMORY_FILE)
         self.mesh_probe_records: dict[str, DeviceProbe] = {}
         self._mesh_filter_toggling = False
+        self._mesh_launch_console_filter_toggling = False
         self.mesh_team_run_id = ""
         self.mesh_team_dir: Path | None = None
         self.mesh_team_assignments: list[dict[str, str]] = []
@@ -4005,16 +4011,31 @@ class CodexControl(Gtk.Application):
         self.mesh_launch_blocker_timeline_label = self.label("Blocker timeline: none yet", "muted", wrap=True)
         launch_header.append(self.mesh_launch_console_status_label)
         launch_header.append(self.mesh_launch_console_meta_label)
+        self.mesh_launch_console_focus_label = self.label("Focus: all", "muted")
+        launch_header.append(self.mesh_launch_console_focus_label)
         launch_header.append(self.mesh_launch_console_prompt_label)
         launch_header.append(self.mesh_launch_console_decision_label)
         launch_header.append(self.mesh_launch_blocker_timeline_label)
         self.mesh_launch_pulse_label = self.label("Fleet pulse: readying status...", "muted", wrap=True)
         launch_header.append(self.mesh_launch_pulse_label)
         pulse_flow = self.flow_row()
-        self.mesh_launch_pulse_ready_chip = self.chip_label("0/0 ready", "chip")
-        self.mesh_launch_pulse_blocked_chip = self.chip_label("0 blocked", "chip")
-        self.mesh_launch_pulse_review_chip = self.chip_label("0 review", "chip")
-        self.mesh_launch_pulse_offline_chip = self.chip_label("0 offline", "chip")
+        self.mesh_launch_pulse_ready_chip = self.make_button("0/0 ready")
+        self.mesh_launch_pulse_ready_chip.connect("clicked", self.on_mesh_launch_pulse_focus_ready)
+        self.mesh_launch_pulse_ready_chip.add_css_class("chip")
+        self.mesh_launch_pulse_ready_chip.set_tooltip_text("Show all lanes.")
+        self.mesh_launch_pulse_blocked_chip = self.make_button("0 blocked")
+        self.mesh_launch_pulse_blocked_chip.connect("clicked", self.on_mesh_launch_pulse_focus_blocked)
+        self.mesh_launch_pulse_blocked_chip.add_css_class("chip")
+        self.mesh_launch_pulse_blocked_chip.set_tooltip_text("Show blocked / unready lanes.")
+        self.mesh_launch_pulse_review_chip = self.make_button("0 review")
+        self.mesh_launch_pulse_review_chip.connect("clicked", self.on_mesh_launch_pulse_focus_review)
+        self.mesh_launch_pulse_review_chip.add_css_class("chip")
+        self.mesh_launch_pulse_review_chip.set_tooltip_text("Show review-required lanes.")
+        self.mesh_launch_pulse_offline_chip = self.make_button("0 offline")
+        self.mesh_launch_pulse_offline_chip.connect("clicked", self.on_mesh_launch_pulse_focus_offline)
+        self.mesh_launch_pulse_offline_chip.add_css_class("chip")
+        self.mesh_launch_pulse_offline_chip.set_tooltip_text("Show offline lanes.")
+        self._apply_mesh_launch_console_focus_filter_style()
         for chip in [
             self.mesh_launch_pulse_ready_chip,
             self.mesh_launch_pulse_blocked_chip,
@@ -4024,6 +4045,13 @@ class CodexControl(Gtk.Application):
             self.flow_append(pulse_flow, chip)
         launch_header.append(pulse_flow)
         launch_filters = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        cycle_focus_button = self.command_button(
+            "Cycle Focus",
+            self.on_cycle_mesh_launch_focus,
+            icon_name="view-refresh-symbolic",
+            tooltip="Cycle through launch focus filters: all, blocked, review, offline.",
+        )
+        launch_filters.append(cycle_focus_button)
         self.mesh_launch_console_blocked_only_toggle = Gtk.ToggleButton(label="Blocked only")
         self.mesh_launch_console_blocked_only_toggle.set_active(self.mesh_launch_console_blocked_only)
         self.mesh_launch_console_blocked_only_toggle.connect(
@@ -4711,6 +4739,10 @@ class CodexControl(Gtk.Application):
             self.mesh_launch_console_meta_label.set_text(
                 f"{len(assignments)} lane(s) | {len(display_assignments)} shown | {ready} ready device(s) | {mode} | bus {operator.bus_text}"
             )
+        if hasattr(self, "mesh_launch_console_focus_label"):
+            self.mesh_launch_console_focus_label.set_text(
+                f"Focus: {self._mesh_launch_console_focus_name(self.mesh_launch_console_focus_filter)}"
+            )
         if hasattr(self, "mesh_launch_console_prompt_label"):
             self.mesh_launch_console_prompt_label.set_text(f"Mission: {prompt_preview}")
         if hasattr(self, "mesh_launch_console_decision_label"):
@@ -4736,6 +4768,7 @@ class CodexControl(Gtk.Application):
                 assignments,
                 readiness=readiness,
                 only_blocked=self.mesh_launch_console_blocked_only,
+                focus_filter=self.mesh_launch_console_focus_filter,
             )
             if timeline:
                 timeline_text = f"Blocker timeline:\n{timeline}"
@@ -4751,26 +4784,27 @@ class CodexControl(Gtk.Application):
             )
             self.mesh_launch_pulse_label.set_text(pulse_summary)
             self.mesh_launch_pulse_label.set_tooltip_text(pulse_detail)
-            self.set_chip(
+            self.set_button_chip(
                 self.mesh_launch_pulse_ready_chip,
                 f"{ready_count}/{len(assignments)} ready",
                 "chip-strong" if blocked_count == 0 and untrusted_count == 0 and offline_count == 0 else "chip",
             )
-            self.set_chip(
+            self.set_button_chip(
                 self.mesh_launch_pulse_blocked_chip,
                 f"{blocked_count} blocked",
                 "chip-danger" if blocked_count else "chip",
             )
-            self.set_chip(
+            self.set_button_chip(
                 self.mesh_launch_pulse_review_chip,
                 f"{review_count} review",
                 "chip-danger" if review_count else "chip",
             )
-            self.set_chip(
+            self.set_button_chip(
                 self.mesh_launch_pulse_offline_chip,
                 f"{offline_count} offline",
                 "chip-danger" if offline_count else "chip",
             )
+            self._apply_mesh_launch_console_focus_filter_style()
         if not display_assignments:
             row = Gtk.ListBoxRow()
             row.add_css_class("team-row")
@@ -4899,9 +4933,102 @@ class CodexControl(Gtk.Application):
             self.mesh_launch_console_list.append(row)
 
     def on_launch_console_blocked_only_toggled(self, _button: Gtk.ToggleButton) -> None:
+        if getattr(self, "_mesh_launch_console_filter_toggling", False):
+            return
+        if self.mesh_launch_console_focus_filter != "all":
+            self.mesh_launch_console_focus_filter = "all"
+            self._apply_mesh_launch_console_focus_filter_style()
         self.mesh_launch_console_blocked_only = bool(self.mesh_launch_console_blocked_only_toggle.get_active())
         self.save_current_state()
         self.render_mesh_launch_console()
+
+    def _launch_console_focus_filter(
+        self,
+        assignment: dict[str, str],
+        readiness: dict[str, MeshReadinessRow] | None = None,
+    ) -> str:
+        if readiness is None:
+            readiness = self._mesh_ready_rows()
+        device = self.mesh_assignment_device(assignment)
+        if device is None or not self.trusted_mesh_device(device):
+            return "blocked"
+        row = readiness.get(device.id)
+        if row is None:
+            return "blocked"
+        if row.status == "ready":
+            return "ready"
+        if row.status == "review":
+            return "review"
+        if row.status == "offline":
+            return "offline"
+        return "blocked"
+
+    def _mesh_launch_console_focus_name(self, focus: str) -> str:
+        names = {
+            "all": "all lanes",
+            "ready": "ready lanes",
+            "blocked": "blocked / unready",
+            "review": "review required",
+            "offline": "offline",
+        }
+        return names.get(focus, "all lanes")
+
+    def on_cycle_mesh_launch_focus(self, _button: Gtk.Button) -> None:
+        cycle = ("all", "blocked", "review", "offline")
+        current = self.mesh_launch_console_focus_filter if self.mesh_launch_console_focus_filter in cycle else "all"
+        try:
+            index = cycle.index(current)
+        except ValueError:
+            index = 0
+        self._set_mesh_launch_console_focus_filter(cycle[(index + 1) % len(cycle)])
+
+    def _apply_mesh_launch_console_focus_filter_style(self) -> None:
+        if not hasattr(self, "mesh_launch_pulse_ready_chip"):
+            return
+        selected = self.mesh_launch_console_focus_filter
+        for mode, chip in [
+            ("all", self.mesh_launch_pulse_ready_chip),
+            ("blocked", self.mesh_launch_pulse_blocked_chip),
+            ("review", self.mesh_launch_pulse_review_chip),
+            ("offline", self.mesh_launch_pulse_offline_chip),
+        ]:
+            if selected == mode:
+                chip.add_css_class("chip-strong")
+                chip.remove_css_class("chip-danger")
+                chip.add_css_class("chip")
+            else:
+                chip.remove_css_class("chip-strong")
+                chip.remove_css_class("chip-danger")
+                chip.add_css_class("chip")
+        if self.mesh_launch_console_focus_filter != "all" and hasattr(self, "mesh_launch_console_blocked_only_toggle"):
+            self._mesh_launch_console_filter_toggling = True
+            self.mesh_launch_console_blocked_only_toggle.set_active(False)
+            self._mesh_launch_console_filter_toggling = False
+            self.mesh_launch_console_blocked_only = False
+
+    def _set_mesh_launch_console_focus_filter(self, focus: str) -> None:
+        if focus not in {"all", "ready", "blocked", "review", "offline"}:
+            focus = "all"
+        if self.mesh_launch_console_focus_filter == focus:
+            return
+        self.mesh_launch_console_focus_filter = focus
+        if focus != "all":
+            self.mesh_launch_console_blocked_only = False
+        self._apply_mesh_launch_console_focus_filter_style()
+        self.save_current_state()
+        self.render_mesh_launch_console()
+
+    def on_mesh_launch_pulse_focus_ready(self, _button: Gtk.Button) -> None:
+        self._set_mesh_launch_console_focus_filter("all")
+
+    def on_mesh_launch_pulse_focus_blocked(self, _button: Gtk.Button) -> None:
+        self._set_mesh_launch_console_focus_filter("blocked")
+
+    def on_mesh_launch_pulse_focus_review(self, _button: Gtk.Button) -> None:
+        self._set_mesh_launch_console_focus_filter("review")
+
+    def on_mesh_launch_pulse_focus_offline(self, _button: Gtk.Button) -> None:
+        self._set_mesh_launch_console_focus_filter("offline")
 
     def on_recheck_launch_blocked_lanes(self, _button: Gtk.Button) -> None:
         readiness = mesh_readiness_report(self.devices, self.mesh_probe_records)
@@ -4935,10 +5062,14 @@ class CodexControl(Gtk.Application):
         *,
         readiness: MeshReadinessReport | None = None,
         only_blocked: bool | None = None,
+        focus_filter: str | None = None,
     ) -> list[dict[str, str]]:
         readiness = readiness or mesh_readiness_report(self.devices, self.mesh_probe_records)
         row_map = {row.device_id: row for row in readiness.rows}
         blocked_filter = self.mesh_launch_console_blocked_only if only_blocked is None else only_blocked
+        focus = (focus_filter or self.mesh_launch_console_focus_filter).strip().lower()
+        if focus not in {"all", "ready", "blocked", "review", "offline"}:
+            focus = "all"
 
         def is_blocked(assignment: dict[str, str]) -> bool:
             device = self.mesh_assignment_device(assignment)
@@ -4965,9 +5096,15 @@ class CodexControl(Gtk.Application):
             return (row.action_priority if row.action_priority else 50, assignment.get("lane_title", "lane"))
 
         ordered = sorted(assignments, key=sort_key)
-        if not blocked_filter:
-            return ordered
-        return [assignment for assignment in ordered if is_blocked(assignment)]
+        if focus == "all":
+            if not blocked_filter:
+                return ordered
+            return [assignment for assignment in ordered if is_blocked(assignment)]
+
+        def is_focus_match(assignment: dict[str, str]) -> bool:
+            return self._launch_console_focus_filter(assignment, readiness=row_map) == focus
+
+        return [assignment for assignment in ordered if is_focus_match(assignment)]
 
     def _mesh_launch_readiness_pulse(
         self,
@@ -5431,12 +5568,14 @@ class CodexControl(Gtk.Application):
         *,
         readiness: MeshReadinessReport | None = None,
         only_blocked: bool = False,
+        focus_filter: str = "all",
     ) -> str:
         all_readiness = readiness or mesh_readiness_report(self.devices, self.mesh_probe_records)
         ordered = self._mesh_launch_console_display_assignments(
             assignments,
             readiness=all_readiness,
             only_blocked=only_blocked,
+            focus_filter=focus_filter,
         )
         if not ordered:
             if not assignments:
@@ -7256,6 +7395,13 @@ class CodexControl(Gtk.Application):
             label.remove_css_class(item)
         label.add_css_class(css)
 
+    def set_button_chip(self, button: Gtk.Button, text: str, css: str) -> None:
+        button.set_label(text)
+        button.set_tooltip_text(text)
+        for item in ["chip", "chip-strong", "chip-danger", "mode-pill"]:
+            button.remove_css_class(item)
+        button.add_css_class(css)
+
     def current_context_packet(self) -> ContextPacket:
         plan = self.current_quality_plan()
         quality = self.active_quality_report(plan)
@@ -8565,6 +8711,7 @@ class CodexControl(Gtk.Application):
             "mesh_filter_mode": self.mesh_filter_mode,
             "mesh_team_only": self.mesh_team_only,
             "mesh_launch_console_blocked_only": self.mesh_launch_console_blocked_only,
+            "mesh_launch_console_focus_filter": self.mesh_launch_console_focus_filter,
             "mesh_live_refresh": self.mesh_live_refresh,
             "mesh_live_refresh_seconds": self.mesh_live_refresh_seconds,
             "layout": layout_to_config(self.current_layout_state()),
