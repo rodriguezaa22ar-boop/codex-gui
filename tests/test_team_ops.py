@@ -723,6 +723,8 @@ class TeamOpsTests(unittest.TestCase):
         self.assertEqual(row["action_priority"], 10)
         self.assertEqual(row["checked"], 123)
         self.assertNotIn("raw", row)
+        self.assertEqual(payload["run_marker"]["status"], "absent")
+        self.assertEqual(payload["run_marker"]["marker_path"], str(ctx.config_dir / "team-last-run.json"))
         self.assertNotIn("PRIVATE_RAW_PROBE_OUTPUT", json.dumps(payload))
 
     def test_doctor_check_reports_probe_errors(self) -> None:
@@ -1264,6 +1266,90 @@ class TeamOpsTests(unittest.TestCase):
             team_ops.TEAM_DIR = original_team
             team_ops.LAST_TEAM_RUN_FILE = original_last
 
+    def test_doctor_json_reports_missing_last_run_marker_target(self) -> None:
+        ctx = self._with_workspace()
+        original_config = team_ops.CONFIG_DIR
+        original_devices = team_ops.DEVICES_FILE
+        original_team = team_ops.TEAM_DIR
+        original_last = team_ops.LAST_TEAM_RUN_FILE
+
+        team_ops.CONFIG_DIR = ctx.config_dir.parent
+        team_ops.DEVICES_FILE = ctx.devices
+        team_ops.TEAM_DIR = ctx.team_dir
+        team_ops.LAST_TEAM_RUN_FILE = ctx.last_run
+
+        try:
+            save_devices(ctx.devices, (
+                DeviceRecord(
+                    id="atlas-ubuntu-1",
+                    name="atlas-ubuntu",
+                    host="localhost",
+                    user="ao",
+                    status="ready",
+                ),
+            ))
+            missing_run = ctx.team_dir / "missing-run"
+            ctx.last_run.write_text(json.dumps({
+                "run_id": "missing-run",
+                "team_dir": str(missing_run),
+                "raw": "PRIVATE_RAW_OUTPUT",
+            }), encoding="utf-8")
+
+            args = team_ops.parse_args(["--json", "doctor"])
+            with tempfile.TemporaryFile(mode="w+") as output:
+                with patch("sys.stdout", new=output):
+                    self.assertEqual(team_ops.cmd_doctor(args), 0)
+                    output.seek(0)
+                    payload = json.loads(output.read())
+
+            self.assertTrue(payload["actionable"])
+            self.assertEqual(payload["status"], "ready")
+            self.assertEqual(payload["next_action"], "Prepare Team")
+            self.assertEqual(payload["run_marker"]["status"], "missing")
+            self.assertEqual(payload["run_marker"]["run_id"], "missing-run")
+            self.assertEqual(payload["run_marker"]["team_dir"], str(missing_run))
+            self.assertEqual(payload["latest_run_id"], "")
+            self.assertEqual(payload["latest_run_path"], "")
+            self.assertTrue(any(item["category"] == "last-run-missing" for item in payload["blockers"]))
+            self.assertNotIn("PRIVATE_RAW_OUTPUT", json.dumps(payload))
+        finally:
+            team_ops.CONFIG_DIR = original_config
+            team_ops.DEVICES_FILE = original_devices
+            team_ops.TEAM_DIR = original_team
+            team_ops.LAST_TEAM_RUN_FILE = original_last
+
+    def test_resolve_team_dir_reports_missing_last_run_marker_target(self) -> None:
+        ctx = self._with_workspace()
+        original_config = team_ops.CONFIG_DIR
+        original_devices = team_ops.DEVICES_FILE
+        original_team = team_ops.TEAM_DIR
+        original_last = team_ops.LAST_TEAM_RUN_FILE
+
+        team_ops.CONFIG_DIR = ctx.config_dir.parent
+        team_ops.DEVICES_FILE = ctx.devices
+        team_ops.TEAM_DIR = ctx.team_dir
+        team_ops.LAST_TEAM_RUN_FILE = ctx.last_run
+
+        try:
+            missing_run = ctx.team_dir / "missing-run"
+            ctx.last_run.write_text(json.dumps({
+                "run_id": "missing-run",
+                "team_dir": str(missing_run),
+            }), encoding="utf-8")
+
+            with self.assertRaises(FileNotFoundError) as raised:
+                team_ops._resolve_team_dir(team_ops.TEAM_DIR, None)
+
+            message = str(raised.exception)
+            self.assertIn("missing team run directory", message)
+            self.assertIn("codex-team-ops prepare", message)
+            self.assertNotIn("\n", message)
+        finally:
+            team_ops.CONFIG_DIR = original_config
+            team_ops.DEVICES_FILE = original_devices
+            team_ops.TEAM_DIR = original_team
+            team_ops.LAST_TEAM_RUN_FILE = original_last
+
     def test_resolve_team_dir_falls_back_to_last_run_marker(self) -> None:
         ctx = self._with_workspace()
         original_config = team_ops.CONFIG_DIR
@@ -1279,6 +1365,10 @@ class TeamOpsTests(unittest.TestCase):
         try:
             marker_target = ctx.team_dir / "legacy"
             marker_target.mkdir(parents=True, exist_ok=True)
+            (marker_target / "manifest.json").write_text(json.dumps({
+                "run_id": "legacy",
+                "assignments": [],
+            }), encoding="utf-8")
             marker_payload = {"run_id": "legacy", "team_dir": str(marker_target)}
             ctx.last_run.write_text(json.dumps(marker_payload), encoding="utf-8")
 

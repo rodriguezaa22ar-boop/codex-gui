@@ -107,6 +107,12 @@ def _short_error(exc: BaseException) -> str:
     return text.replace("\n", " ").strip()[:240]
 
 
+def _one_line(value: object, limit: int = 360) -> str:
+    text = str(value or "").strip()
+    clean = " ".join(part.strip() for part in text.splitlines() if part.strip())
+    return clean[:limit]
+
+
 def _is_local_host(host: str) -> bool:
     return _safe_text(host).lower() in {"localhost", "127.0.0.1", "::1"}
 
@@ -158,19 +164,111 @@ def write_last_run(run_dir: Path) -> None:
 
 
 def load_last_run() -> Path | None:
-    if not LAST_TEAM_RUN_FILE.exists():
+    marker = _last_run_marker_status()
+    if marker["status"] != "found" or not marker["team_dir"]:
         return None
+    return Path(str(marker["team_dir"])).expanduser()
+
+
+def _last_run_marker_path_for(team_root: Path) -> Path:
+    return LAST_TEAM_RUN_FILE if team_root == TEAM_DIR else team_root.parent / LAST_TEAM_RUN_FILE.name
+
+
+def _run_marker_record(
+    status: str,
+    summary: str,
+    *,
+    marker_path: Path | None = None,
+    run_id: str = "",
+    team_dir: str = "",
+    next_actions: tuple[str, ...] = (),
+) -> dict[str, Any]:
+    marker_file = LAST_TEAM_RUN_FILE if marker_path is None else marker_path
+    return {
+        "status": status,
+        "marker_path": str(marker_file),
+        "run_id": _one_line(run_id),
+        "team_dir": _one_line(team_dir),
+        "summary": summary,
+        "next_actions": list(next_actions),
+    }
+
+
+def _last_run_marker_status(marker_path: Path | None = None) -> dict[str, Any]:
+    marker_file = LAST_TEAM_RUN_FILE if marker_path is None else marker_path
+    if not marker_file.exists():
+        return _run_marker_record(
+            "absent",
+            "No last team run marker was found.",
+            marker_path=marker_file,
+            next_actions=("Run `codex-team-ops prepare` to create a team run.",),
+        )
+
     try:
-        payload = json.loads(LAST_TEAM_RUN_FILE.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
-        return None
+        payload = json.loads(marker_file.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError) as exc:
+        return _run_marker_record(
+            "corrupt",
+            f"Last team run marker is unreadable: {_short_error(exc)}",
+            marker_path=marker_file,
+            next_actions=("Repair or remove the marker, then run `codex-team-ops prepare`.",),
+        )
+
     if not isinstance(payload, dict):
-        return None
-    path_text = payload.get("team_dir")
+        return _run_marker_record(
+            "corrupt",
+            "Last team run marker is not a JSON object.",
+            marker_path=marker_file,
+            next_actions=("Repair or remove the marker, then run `codex-team-ops prepare`.",),
+        )
+
+    run_id = _one_line(payload.get("run_id", ""))
+    path_text = str(payload.get("team_dir") or "").strip()
     if not path_text:
-        return None
-    candidate = Path(path_text)
-    return candidate if candidate.exists() else None
+        return _run_marker_record(
+            "invalid",
+            "Last team run marker does not include a team_dir.",
+            marker_path=marker_file,
+            run_id=run_id,
+            next_actions=("Repair or remove the marker, then run `codex-team-ops prepare`.",),
+        )
+
+    candidate = Path(path_text).expanduser()
+    team_dir = str(candidate)
+    if not candidate.exists():
+        return _run_marker_record(
+            "missing",
+            "Last team run marker points to a missing team run directory.",
+            marker_path=marker_file,
+            run_id=run_id,
+            team_dir=team_dir,
+            next_actions=("Run `codex-team-ops prepare` to create a fresh team run.",),
+        )
+    if not candidate.is_dir():
+        return _run_marker_record(
+            "invalid",
+            "Last team run marker does not point to a directory.",
+            marker_path=marker_file,
+            run_id=run_id,
+            team_dir=team_dir,
+            next_actions=("Repair or remove the marker, then run `codex-team-ops prepare`.",),
+        )
+    if not (candidate / "manifest.json").exists():
+        return _run_marker_record(
+            "invalid",
+            "Last team run marker points to a directory without manifest.json.",
+            marker_path=marker_file,
+            run_id=run_id,
+            team_dir=team_dir,
+            next_actions=("Select a valid team run or prepare a fresh one.",),
+        )
+    return _run_marker_record(
+        "found",
+        "Last team run marker resolves to a saved team run.",
+        marker_path=marker_file,
+        run_id=run_id or candidate.name,
+        team_dir=team_dir,
+    )
 
 
 def discover_mesh_devices(
@@ -853,6 +951,29 @@ def _doctor_probe_blockers(probe_error: str = "") -> list[dict[str, Any]]:
     }]
 
 
+def _doctor_run_marker_blockers(
+    marker: Mapping[str, Any],
+    selected_path: Path | None,
+) -> list[dict[str, Any]]:
+    status = str(marker.get("status") or "")
+    if selected_path is not None or status in {"", "absent", "found"}:
+        return []
+    category = {
+        "corrupt": "last-run-corrupt",
+        "invalid": "last-run-invalid",
+        "missing": "last-run-missing",
+    }.get(status, "last-run-marker")
+    return [{
+        "scope": "run",
+        "category": category,
+        "status": "review",
+        "summary": str(marker.get("summary") or "Last team run marker needs review."),
+        "marker_path": str(marker.get("marker_path") or ""),
+        "team_dir": str(marker.get("team_dir") or ""),
+        "next_actions": list(marker.get("next_actions") or ()),
+    }]
+
+
 def _doctor_readiness_rows(
     devices: tuple[DeviceRecord, ...],
     report: MeshReadinessReport,
@@ -890,9 +1011,10 @@ def build_team_doctor_report(
     ready_devices = _ready_trusted_count(devices, readiness)
     assignments = build_team_assignments(devices, probe_map)
     run_dirs = team_run_dirs(root)
+    run_marker = _last_run_marker_status(_last_run_marker_path_for(root))
     latest_path = latest_team_run_dir(root)
-    if latest_path is None:
-        latest_path = load_last_run()
+    if latest_path is None and run_marker["status"] == "found":
+        latest_path = Path(str(run_marker["team_dir"])).expanduser()
 
     run = None
     inspect_error = ""
@@ -917,6 +1039,7 @@ def build_team_doctor_report(
     blockers = [
         *_doctor_probe_blockers(probe_error),
         *_doctor_fleet_blockers(devices, readiness),
+        *_doctor_run_marker_blockers(run_marker, latest_path),
         *_doctor_run_blockers(run, bus_report, inspect_error, summary_reviewed=summary_reviewed),
         *_doctor_handoff_blockers(run, summary_reviewed=summary_reviewed),
     ]
@@ -955,6 +1078,7 @@ def build_team_doctor_report(
         "saved_run_count": saved_runs,
         "latest_run_id": run.run_id if run is not None else "",
         "latest_run_path": str(run.team_dir if run is not None else latest_path or ""),
+        "run_marker": run_marker,
         "summary_reviewed": summary_reviewed,
         "lane_counts": _doctor_lane_counts(run),
         "bus_health": _doctor_bus_health(run, bus_report, summary_reviewed=summary_reviewed),
@@ -974,10 +1098,13 @@ def _resolve_team_dir(team_root: Path, run_id: str | None = None) -> Path:
     if latest is not None:
         return latest
 
-    fallback = load_last_run()
-    if fallback is None or not fallback.exists():
+    marker = _last_run_marker_status(_last_run_marker_path_for(team_root))
+    if marker["status"] == "found":
+        return Path(str(marker["team_dir"])).expanduser()
+    if marker["status"] == "absent":
         raise FileNotFoundError("No prior team run found. Run `prepare` first.")
-    return fallback
+    actions = marker.get("next_actions") or ["Run `codex-team-ops prepare` to create a fresh team run."]
+    raise FileNotFoundError(f"{marker['summary']} {actions[0]}")
 
 
 def cmd_discover(args: argparse.Namespace) -> int:
