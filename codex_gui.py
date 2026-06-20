@@ -573,6 +573,11 @@ window {
   border-color: #287565;
 }
 
+.chip-selected {
+  border-color: #7aa7d9;
+  box-shadow: inset 0 0 0 1px #7aa7d9;
+}
+
 .chip-danger {
   background: #321c19;
   color: #ffb2a8;
@@ -4787,12 +4792,7 @@ class CodexControl(Gtk.Application):
             )
             self.mesh_launch_pulse_label.set_text(pulse_summary)
             self.mesh_launch_pulse_label.set_tooltip_text(pulse_detail)
-            ready_css = (
-                "chip-strong"
-                if self.mesh_launch_console_focus_filter == "ready"
-                or (blocked_count == 0 and untrusted_count == 0 and offline_count == 0)
-                else "chip"
-            )
+            ready_css = "chip-strong" if blocked_count == 0 and untrusted_count == 0 and offline_count == 0 else "chip"
             self.set_button_chip(
                 self.mesh_launch_pulse_ready_chip,
                 f"{ready_count}/{len(assignments)} ready",
@@ -5002,12 +5002,10 @@ class CodexControl(Gtk.Application):
             ("offline", self.mesh_launch_pulse_offline_chip),
         ]:
             if selected == mode:
-                chip.add_css_class("chip-strong")
-                chip.remove_css_class("chip-danger")
+                chip.add_css_class("chip-selected")
                 chip.add_css_class("chip")
             else:
-                chip.remove_css_class("chip-strong")
-                chip.remove_css_class("chip-danger")
+                chip.remove_css_class("chip-selected")
                 chip.add_css_class("chip")
         if self.mesh_launch_console_focus_filter != "all" and hasattr(self, "mesh_launch_console_blocked_only_toggle"):
             self._mesh_launch_console_filter_toggling = True
@@ -7407,7 +7405,7 @@ class CodexControl(Gtk.Application):
     def set_button_chip(self, button: Gtk.Button, text: str, css: str) -> None:
         button.set_label(text)
         button.set_tooltip_text(text)
-        for item in ["chip", "chip-strong", "chip-danger", "mode-pill"]:
+        for item in ["chip", "chip-strong", "chip-danger", "chip-selected", "mode-pill"]:
             button.remove_css_class(item)
         button.add_css_class(css)
 
