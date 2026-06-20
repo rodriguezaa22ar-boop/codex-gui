@@ -492,7 +492,6 @@ class DeviceMeshTests(unittest.TestCase):
         self.assertEqual(local_row.status, "ready")
         self.assertIn(local_row.blocker_category, {"ready-saved", "local-ready"})
         self.assertEqual(local_row.action_priority, 90)
-
         remote_report = mesh_readiness_report((remote,), {})
         remote_row = remote_report.by_device(remote.id)
         self.assertIsNotNone(remote_row)
