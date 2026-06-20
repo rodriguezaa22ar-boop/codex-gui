@@ -4787,10 +4787,16 @@ class CodexControl(Gtk.Application):
             )
             self.mesh_launch_pulse_label.set_text(pulse_summary)
             self.mesh_launch_pulse_label.set_tooltip_text(pulse_detail)
+            ready_css = (
+                "chip-strong"
+                if self.mesh_launch_console_focus_filter == "ready"
+                or (blocked_count == 0 and untrusted_count == 0 and offline_count == 0)
+                else "chip"
+            )
             self.set_button_chip(
                 self.mesh_launch_pulse_ready_chip,
                 f"{ready_count}/{len(assignments)} ready",
-                "chip-strong" if blocked_count == 0 and untrusted_count == 0 and offline_count == 0 else "chip",
+                ready_css,
             )
             self.set_button_chip(
                 self.mesh_launch_pulse_blocked_chip,
@@ -4986,11 +4992,10 @@ class CodexControl(Gtk.Application):
         self._set_mesh_launch_console_focus_filter(cycle[(index + 1) % len(cycle)])
 
     def _apply_mesh_launch_console_focus_filter_style(self) -> None:
-        if not hasattr(self, "mesh_launch_pulse_ready_chip"):
+        if not hasattr(self, "mesh_launch_pulse_blocked_chip"):
             return
         selected = self.mesh_launch_console_focus_filter
         for mode, chip in [
-            ("ready", self.mesh_launch_pulse_ready_chip),
             ("blocked", self.mesh_launch_pulse_blocked_chip),
             ("review", self.mesh_launch_pulse_review_chip),
             ("offline", self.mesh_launch_pulse_offline_chip),
