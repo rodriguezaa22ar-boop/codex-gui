@@ -1,5 +1,7 @@
 # Codex Control
 
+![CI](https://github.com/rodriguezaa22ar-boop/codex-gui/actions/workflows/ci.yml/badge.svg)
+
 Codex Control is a local GTK workstation for the Codex CLI on Linux.
 
 It uses an embedded VTE terminal when available, with Konsole as a detached
@@ -21,6 +23,12 @@ codex-gui --self-check            # text report
 codex-gui --self-check --json      # machine-readable report
 codex-gui --self-check --project /path/to/project  # target project
 codex-gui --force-start            # force launch despite warning-level checks
+```
+
+Run the full local quality gate from shell:
+
+```bash
+bash scripts/ci-gate.sh
 ```
 
 Or directly:

@@ -23,6 +23,7 @@ import subprocess
 import tempfile
 import threading
 import warnings
+from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
@@ -1534,6 +1535,17 @@ class CodexControl(Gtk.Application):
             self.mesh_launch_console_focus_filter = "all"
         if self.mesh_launch_console_focus_filter != "all":
             self.mesh_launch_console_blocked_only = False
+        self.mesh_launch_console_focus_history: deque[str] = deque(maxlen=5)
+        raw_history = self.config.get("mesh_launch_console_focus_history", [])
+        if isinstance(raw_history, (list, tuple)):
+            for value in raw_history:
+                candidate = str(value).strip().lower()
+                if candidate in {"all", "ready", "blocked", "review", "offline"}:
+                    self.mesh_launch_console_focus_history.append(candidate)
+        if not self.mesh_launch_console_focus_history:
+            self.mesh_launch_console_focus_history.append(self.mesh_launch_console_focus_filter)
+        elif self.mesh_launch_console_focus_history[-1] != self.mesh_launch_console_focus_filter:
+            self.mesh_launch_console_focus_history.append(self.mesh_launch_console_focus_filter)
         self.mesh_live_refresh = bool(self.config.get("mesh_live_refresh", True))
         try:
             self.mesh_live_refresh_seconds = max(10, min(300, int(self.config.get("mesh_live_refresh_seconds", 30))))
@@ -1899,7 +1911,14 @@ class CodexControl(Gtk.Application):
             ("show-runs", lambda *_args: self.show_page("runs")),
             ("show-monitor", lambda *_args: self.show_page("monitor")),
             ("toggle-focus", lambda *_args: self.on_toggle_focus_mode(Gtk.Button())),
-        ]
+            ("mesh-launch-focus-cycle", lambda *_args: self.on_mesh_launch_focus_cycle(Gtk.Button())),
+            ("mesh-launch-focus-ready", lambda *_args: self.on_mesh_launch_focus_ready(Gtk.Button())),
+            ("mesh-launch-focus-all", lambda *_args: self.on_mesh_launch_focus_all(Gtk.Button())),
+            ("mesh-launch-focus-blocked", lambda *_args: self.on_mesh_launch_focus_blocked(Gtk.Button())),
+            ("mesh-launch-focus-review", lambda *_args: self.on_mesh_launch_focus_review(Gtk.Button())),
+            ("mesh-launch-focus-offline", lambda *_args: self.on_mesh_launch_focus_offline(Gtk.Button())),
+            ("mesh-launch-focus-back", lambda *_args: self.on_mesh_launch_focus_back(Gtk.Button())),
+    ]
         for name, callback in actions:
             action = Gio.SimpleAction.new(name, None)
             action.connect("activate", callback)
@@ -1916,6 +1935,13 @@ class CodexControl(Gtk.Application):
         self.set_accels_for_action("app.toggle-focus", ["<Control><Shift>F"])
         self.set_accels_for_action("app.focus-prompt", ["<Control>L"])
         self.set_accels_for_action("app.focus-project", ["<Control><Shift>L"])
+        self.set_accels_for_action("app.mesh-launch-focus-cycle", ["<Alt>Z"])
+        self.set_accels_for_action("app.mesh-launch-focus-ready", ["<Alt>1"])
+        self.set_accels_for_action("app.mesh-launch-focus-all", ["<Alt>0"])
+        self.set_accels_for_action("app.mesh-launch-focus-blocked", ["<Alt>B"])
+        self.set_accels_for_action("app.mesh-launch-focus-review", ["<Alt>R"])
+        self.set_accels_for_action("app.mesh-launch-focus-offline", ["<Alt>O"])
+        self.set_accels_for_action("app.mesh-launch-focus-back", ["<Alt>Left"])
 
     def build_topbar(self) -> Gtk.Widget:
         bar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=14)
@@ -4008,11 +4034,17 @@ class CodexControl(Gtk.Application):
         self.mesh_launch_console_meta_label = self.label("0 lanes", "muted", wrap=True)
         self.mesh_launch_console_prompt_label = self.label("Mission preview unavailable", "muted", wrap=True)
         self.mesh_launch_console_decision_label = self.label("Decision: check fleet before launch", "next-step-detail", wrap=True)
+        self.mesh_launch_console_focus_history_label = self.label(
+            self._mesh_launch_console_focus_history_text(),
+            "muted",
+            wrap=True,
+        )
         self.mesh_launch_blocker_timeline_label = self.label("Blocker timeline: none yet", "muted", wrap=True)
         launch_header.append(self.mesh_launch_console_status_label)
         launch_header.append(self.mesh_launch_console_meta_label)
         self.mesh_launch_console_focus_label = self.label("Focus: all", "muted")
         launch_header.append(self.mesh_launch_console_focus_label)
+        launch_header.append(self.mesh_launch_console_focus_history_label)
         launch_header.append(self.mesh_launch_console_prompt_label)
         launch_header.append(self.mesh_launch_console_decision_label)
         launch_header.append(self.mesh_launch_blocker_timeline_label)
@@ -4022,7 +4054,7 @@ class CodexControl(Gtk.Application):
         self.mesh_launch_pulse_ready_chip = self.make_button("0/0 ready")
         self.mesh_launch_pulse_ready_chip.connect("clicked", self.on_mesh_launch_pulse_focus_ready)
         self.mesh_launch_pulse_ready_chip.add_css_class("chip")
-        self.mesh_launch_pulse_ready_chip.set_tooltip_text("Show all lanes.")
+        self.mesh_launch_pulse_ready_chip.set_tooltip_text("Show ready lanes.")
         self.mesh_launch_pulse_blocked_chip = self.make_button("0 blocked")
         self.mesh_launch_pulse_blocked_chip.connect("clicked", self.on_mesh_launch_pulse_focus_blocked)
         self.mesh_launch_pulse_blocked_chip.add_css_class("chip")
@@ -4052,6 +4084,34 @@ class CodexControl(Gtk.Application):
             tooltip="Cycle through launch focus filters: all, blocked, review, offline.",
         )
         launch_filters.append(cycle_focus_button)
+        ready_focus_button = self.command_button(
+            "Ready",
+            self.on_mesh_launch_focus_ready,
+            icon_name="view-filter-symbolic",
+            tooltip="Show ready lanes. Shortcut: Alt+1",
+        )
+        launch_filters.append(ready_focus_button)
+        launch_focus_presets = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        launch_focus_presets.append(self.label("Preset", "muted"))
+        self.mesh_launch_console_focus_preset_dropdown = self.make_dropdown(
+            self._mesh_launch_console_focus_preset_options(),
+            self.mesh_launch_console_focus_filter,
+        )
+        self.mesh_launch_console_focus_preset_dropdown.connect(
+            "notify::selected",
+            self.on_mesh_launch_focus_preset_changed,
+        )
+        self.mesh_launch_console_focus_preset_dropdown.set_tooltip_text("Pick a focus preset for quick lane filtering.")
+        launch_focus_presets.append(self.mesh_launch_console_focus_preset_dropdown)
+        launch_filters.append(launch_focus_presets)
+        self.mesh_launch_console_focus_back_button = self.command_button(
+            "Back Focus",
+            self.on_mesh_launch_focus_back,
+            icon_name="go-previous-symbolic",
+            tooltip="Return to previous focus. Shortcut: Alt+Left",
+        )
+        self.mesh_launch_console_focus_back_button.set_sensitive(False)
+        launch_filters.append(self.mesh_launch_console_focus_back_button)
         self.mesh_launch_console_blocked_only_toggle = Gtk.ToggleButton(label="Blocked only")
         self.mesh_launch_console_blocked_only_toggle.set_active(self.mesh_launch_console_blocked_only)
         self.mesh_launch_console_blocked_only_toggle.connect(
@@ -4743,6 +4803,12 @@ class CodexControl(Gtk.Application):
             self.mesh_launch_console_focus_label.set_text(
                 f"Focus: {self._mesh_launch_console_focus_name(self.mesh_launch_console_focus_filter)}"
             )
+        if hasattr(self, "mesh_launch_console_focus_history_label"):
+            self.mesh_launch_console_focus_history_label.set_text(
+                self._mesh_launch_console_focus_history_text()
+            )
+        if hasattr(self, "mesh_launch_console_focus_back_button"):
+            self.mesh_launch_console_focus_back_button.set_sensitive(len(self.mesh_launch_console_focus_history) > 1)
         if hasattr(self, "mesh_launch_console_prompt_label"):
             self.mesh_launch_console_prompt_label.set_text(f"Mission: {prompt_preview}")
         if hasattr(self, "mesh_launch_console_decision_label"):
@@ -4936,8 +5002,7 @@ class CodexControl(Gtk.Application):
         if getattr(self, "_mesh_launch_console_filter_toggling", False):
             return
         if self.mesh_launch_console_focus_filter != "all":
-            self.mesh_launch_console_focus_filter = "all"
-            self._apply_mesh_launch_console_focus_filter_style()
+            self._set_mesh_launch_console_focus_filter("all")
         self.mesh_launch_console_blocked_only = bool(self.mesh_launch_console_blocked_only_toggle.get_active())
         self.save_current_state()
         self.render_mesh_launch_console()
@@ -4973,6 +5038,41 @@ class CodexControl(Gtk.Application):
         }
         return names.get(focus, "all lanes")
 
+    def _mesh_launch_console_focus_preset_options(self) -> tuple[tuple[str, str], ...]:
+        return (
+            ("all", "All lanes"),
+            ("ready", "Ready lanes"),
+            ("blocked", "Blocked / unready"),
+            ("review", "Review required"),
+            ("offline", "Offline lanes"),
+        )
+
+    def _mesh_launch_console_focus_filter_value(self, focus: str) -> str:
+        normalized = focus.strip().lower()
+        return normalized if normalized in {"all", "ready", "blocked", "review", "offline"} else "all"
+
+    def _record_mesh_launch_console_focus_history(self, focus: str) -> None:
+        if not focus:
+            return
+        normalized = self._mesh_launch_console_focus_filter_value(focus)
+        if self.mesh_launch_console_focus_history and self.mesh_launch_console_focus_history[-1] == normalized:
+            return
+        self.mesh_launch_console_focus_history.append(normalized)
+
+    def _sync_mesh_launch_console_focus_preset(self, focus: str) -> None:
+        if not hasattr(self, "mesh_launch_console_focus_preset_dropdown"):
+            return
+        self._mesh_launch_console_filter_toggling = True
+        self.set_dropdown(self.mesh_launch_console_focus_preset_dropdown, focus)
+        self._mesh_launch_console_filter_toggling = False
+
+    def _mesh_launch_console_focus_history_text(self) -> str:
+        if not self.mesh_launch_console_focus_history:
+            return "Focus trail: all"
+        return "Focus trail: " + " > ".join(
+            self._mesh_launch_console_focus_name(focus) for focus in self.mesh_launch_console_focus_history
+        )
+
     def on_cycle_mesh_launch_focus(self, _button: Gtk.Button) -> None:
         cycle = ("all", "blocked", "review", "offline")
         current = self.mesh_launch_console_focus_filter if self.mesh_launch_console_focus_filter in cycle else "all"
@@ -4981,6 +5081,43 @@ class CodexControl(Gtk.Application):
         except ValueError:
             index = 0
         self._set_mesh_launch_console_focus_filter(cycle[(index + 1) % len(cycle)])
+
+    def on_mesh_launch_focus_cycle(self, _button: Gtk.Button) -> None:
+        self.on_cycle_mesh_launch_focus(_button)
+
+    def on_mesh_launch_focus_ready(self, _button: Gtk.Button) -> None:
+        self._set_mesh_launch_console_focus_filter("ready")
+
+    def on_mesh_launch_focus_all(self, _button: Gtk.Button) -> None:
+        self._set_mesh_launch_console_focus_filter("all")
+
+    def on_mesh_launch_focus_blocked(self, _button: Gtk.Button) -> None:
+        self._set_mesh_launch_console_focus_filter("blocked")
+
+    def on_mesh_launch_focus_review(self, _button: Gtk.Button) -> None:
+        self._set_mesh_launch_console_focus_filter("review")
+
+    def on_mesh_launch_focus_offline(self, _button: Gtk.Button) -> None:
+        self._set_mesh_launch_console_focus_filter("offline")
+
+    def on_mesh_launch_focus_back(self, _button: Gtk.Button) -> None:
+        if len(self.mesh_launch_console_focus_history) <= 1:
+            return
+        self.mesh_launch_console_focus_history.pop()
+        previous = self.mesh_launch_console_focus_history[-1]
+        self._set_mesh_launch_console_focus_filter(previous, record_history=False)
+
+    def on_mesh_launch_focus_preset_changed(
+        self,
+        dropdown: Gtk.DropDown,
+        *_args: object,
+    ) -> None:
+        if getattr(self, "_mesh_launch_console_filter_toggling", False):
+            return
+        selected = self.dropdown_value(dropdown)
+        if not selected:
+            return
+        self._set_mesh_launch_console_focus_filter(selected)
 
     def _apply_mesh_launch_console_focus_filter_style(self) -> None:
         if not hasattr(self, "mesh_launch_pulse_ready_chip"):
@@ -5005,13 +5142,21 @@ class CodexControl(Gtk.Application):
             self.mesh_launch_console_blocked_only_toggle.set_active(False)
             self._mesh_launch_console_filter_toggling = False
             self.mesh_launch_console_blocked_only = False
+        self._sync_mesh_launch_console_focus_preset(self.mesh_launch_console_focus_filter)
 
-    def _set_mesh_launch_console_focus_filter(self, focus: str) -> None:
-        if focus not in {"all", "ready", "blocked", "review", "offline"}:
-            focus = "all"
+    def _set_mesh_launch_console_focus_filter(
+        self,
+        focus: str,
+        *,
+        record_history: bool = True,
+    ) -> None:
+        focus = self._mesh_launch_console_focus_filter_value(focus)
         if self.mesh_launch_console_focus_filter == focus:
+            self._sync_mesh_launch_console_focus_preset(focus)
             return
         self.mesh_launch_console_focus_filter = focus
+        if record_history:
+            self._record_mesh_launch_console_focus_history(focus)
         if focus != "all":
             self.mesh_launch_console_blocked_only = False
         self._apply_mesh_launch_console_focus_filter_style()
@@ -5019,7 +5164,7 @@ class CodexControl(Gtk.Application):
         self.render_mesh_launch_console()
 
     def on_mesh_launch_pulse_focus_ready(self, _button: Gtk.Button) -> None:
-        self._set_mesh_launch_console_focus_filter("all")
+        self._set_mesh_launch_console_focus_filter("ready")
 
     def on_mesh_launch_pulse_focus_blocked(self, _button: Gtk.Button) -> None:
         self._set_mesh_launch_console_focus_filter("blocked")
@@ -8712,6 +8857,7 @@ class CodexControl(Gtk.Application):
             "mesh_team_only": self.mesh_team_only,
             "mesh_launch_console_blocked_only": self.mesh_launch_console_blocked_only,
             "mesh_launch_console_focus_filter": self.mesh_launch_console_focus_filter,
+            "mesh_launch_console_focus_history": list(self.mesh_launch_console_focus_history),
             "mesh_live_refresh": self.mesh_live_refresh,
             "mesh_live_refresh_seconds": self.mesh_live_refresh_seconds,
             "layout": layout_to_config(self.current_layout_state()),

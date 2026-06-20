@@ -8,6 +8,8 @@ Use this before tagging or sharing Codex Control with other users.
 - `python3 -m unittest discover -s tests` passes.
 - `python3 -m py_compile *.py` passes.
 - `codex doctor --summary --ascii` passes on the release machine.
+- `scripts/ci-gate.sh` passes on at least one supported Python version.
+- CI workflow `ci.yml` is green on the release commit.
 - The app launches with `codex-gui` from a graphical session with an active
   display.
 - Headless SSH verification does not treat a missing display / GTK init failure
