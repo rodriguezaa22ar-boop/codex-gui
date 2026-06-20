@@ -4011,7 +4011,10 @@ class CodexControl(Gtk.Application):
         self.mesh_launch_blocker_timeline_label = self.label("Blocker timeline: none yet", "muted", wrap=True)
         launch_header.append(self.mesh_launch_console_status_label)
         launch_header.append(self.mesh_launch_console_meta_label)
-        self.mesh_launch_console_focus_label = self.label("Focus: all lanes", "muted")
+        self.mesh_launch_console_focus_label = self.label(
+            f"Focus: {self._mesh_launch_console_focus_name(self.mesh_launch_console_focus_filter)}",
+            "muted",
+        )
         launch_header.append(self.mesh_launch_console_focus_label)
         launch_header.append(self.mesh_launch_console_prompt_label)
         launch_header.append(self.mesh_launch_console_decision_label)

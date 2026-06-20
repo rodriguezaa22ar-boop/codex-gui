@@ -366,7 +366,7 @@ class GuiSourceTests(unittest.TestCase):
         build = ast.unparse(build_mesh)
         self.assertIn("mesh_launch_console_focus_filter", ast.unparse(build_mesh))
         self.assertIn("mesh_launch_console_focus_label", build)
-        self.assertIn("Focus: all lanes", build)
+        self.assertIn("_mesh_launch_console_focus_name(self.mesh_launch_console_focus_filter)", build)
         self.assertIn("on_mesh_launch_pulse_focus_ready", build)
         self.assertIn("on_mesh_launch_pulse_focus_blocked", build)
         self.assertIn("on_mesh_launch_pulse_focus_review", build)
