@@ -501,6 +501,46 @@ class DeviceMeshTests(unittest.TestCase):
         self.assertEqual(remote_row.blocker_category, "needs-probe")
         self.assertLess(remote_row.action_priority, 90)
 
+    def test_mesh_readiness_report_classifies_saved_blocker_notes_without_raw_note(self) -> None:
+        auth = DeviceRecord(
+            id="auth",
+            name="Auth",
+            host="atlas-auth.tailnet",
+            status="blocked",
+            note="ao@atlas-auth: Permission denied (publickey). PRIVATE_RAW_OUTPUT SENSITIVE_MARKER",
+        )
+        missing_codex = DeviceRecord(
+            id="codex",
+            name="Codex",
+            host="atlas-codex.tailnet",
+            status="blocked",
+            note="codex executable not found PRIVATE_RAW_OUTPUT",
+        )
+        stale = DeviceRecord(
+            id="stale",
+            name="Stale",
+            host="atlas-stale.tailnet",
+            status="review",
+            note="## main...origin/main [behind 1] PRIVATE_RAW_OUTPUT",
+        )
+
+        report = mesh_readiness_report((auth, missing_codex, stale), {})
+        by_device = {row.device_id: row for row in report.rows}
+
+        self.assertEqual(by_device[auth.id].status, "blocked")
+        self.assertEqual(by_device[auth.id].blocker_category, "ssh-auth-denied")
+        self.assertEqual(by_device[missing_codex.id].blocker_category, "missing-codex")
+        self.assertEqual(by_device[stale.id].status, "review")
+        self.assertEqual(by_device[stale.id].blocker_category, "stale-checkout")
+
+        detail = report.detail_text()
+        self.assertIn("ssh-auth-denied", detail)
+        self.assertIn("missing-codex", detail)
+        self.assertIn("stale-checkout", detail)
+        self.assertNotIn("PRIVATE_RAW_OUTPUT", detail)
+        self.assertNotIn("SENSITIVE_MARKER", detail)
+        self.assertNotIn("Permission denied", detail)
+
     def test_mesh_readiness_report_exposes_action_priority(self) -> None:
         auth_device = DeviceRecord(id="auth", name="Auth", host="atlas-auth.tailnet")
         offline_device = DeviceRecord(id="offline", name="Offline", host="atlas-offline.tailnet", status="offline")
