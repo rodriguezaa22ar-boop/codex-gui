@@ -33,6 +33,10 @@ def _thread_start_targets_worker(node: ast.AST) -> bool:
 
 
 class GuiSourceTests(unittest.TestCase):
+    def test_mesh_launch_focus_selection_class_exists_in_visual_stylesheet(self) -> None:
+        visual = Path("codex_visual.py").read_text(encoding="utf-8")
+        self.assertIn(".chip-selected", visual)
+
     def test_tailnet_discovery_starts_worker_from_handler_scope(self) -> None:
         source = Path("codex_gui.py").read_text(encoding="utf-8")
         method = _method_named(ast.parse(source), "on_discover_tailnet")

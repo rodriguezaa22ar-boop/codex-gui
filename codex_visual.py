@@ -399,6 +399,11 @@ button:hover {
   border-radius: 999px;
 }
 
+.chip-selected {
+  border-color: #7aa7d9;
+  box-shadow: inset 0 0 0 1px #7aa7d9;
+}
+
 .chip-danger {
   background: @cc_danger_bg;
   color: @cc_danger_text;
