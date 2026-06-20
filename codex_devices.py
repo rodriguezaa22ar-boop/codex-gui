@@ -102,6 +102,39 @@ class MeshReadinessRow:
     def is_ready(self) -> bool:
         return self.status == "ready"
 
+    @property
+    def readiness(self) -> str:
+        if _is_local_host(self.host) and self.status == "ready":
+            return "local-ready"
+        if self.status == "ready" and self.blocker_category == "stale-checkout":
+            return "stale-checkout"
+        if self.status == "review" and self.blocker_category == "missing-project":
+            return "missing-project"
+        if self.status == "review" and self.blocker_category == "missing-codex":
+            return "missing-codex"
+        if self.status == "review":
+            return "needs-review"
+        if self.status == "offline":
+            return "offline-or-timeout"
+        if self.status == "blocked":
+            return {
+                "tailscale-approval": "blocked-tailscale-approval",
+                "ssh-auth": "blocked-ssh-auth",
+                "dns": "blocked-dns",
+                "connection-refused": "blocked-connection-refused",
+            }.get(self.blocker_category, "blocked-ssh")
+        if self.status == "ready":
+            return "ready"
+        return "needs-check"
+
+    @property
+    def blocker(self) -> str:
+        return self.summary
+
+    @property
+    def next_action(self) -> str:
+        return self.next_actions[0] if self.next_actions else ""
+
 
 @dataclass(frozen=True)
 class MeshReadinessReport:
@@ -125,6 +158,14 @@ class MeshReadinessReport:
         return sum(1 for row in self.rows if row.status == "blocked")
 
     @property
+    def warning_count(self) -> int:
+        return sum(
+            1
+            for row in self.rows
+            if row.readiness in {"missing-project", "missing-codex", "stale-checkout", "needs-review"}
+        )
+
+    @property
     def total(self) -> int:
         return len(self.rows)
 
@@ -140,6 +181,16 @@ class MeshReadinessReport:
 
     def by_device(self, device_id: str) -> MeshReadinessRow | None:
         return next((row for row in self.rows if row.device_id == device_id), None)
+
+    @property
+    def entries(self) -> tuple[MeshReadinessRow, ...]:
+        return self.rows
+
+    def summary_text(self) -> str:
+        return (
+            f"{self.total} device(s) | {self.ready_count} ready | "
+            f"{self.warning_count} warning | {self.blocked_count} blocked"
+        )
 
     def detail_text(self) -> str:
         lines = [
@@ -570,6 +621,170 @@ def mesh_readiness_report(
         for device in devices
     ]
     return MeshReadinessReport(generated=now(), rows=tuple(rows))
+
+
+def build_mesh_readiness_report(devices: tuple[DeviceRecord, ...]) -> MeshReadinessReport:
+    rows: list[MeshReadinessRow] = []
+    for device in devices:
+        summary = device.note or "Not checked yet."
+        if _is_local_host(device.host) and device.status == "ready":
+            readiness = "local-ready"
+            blocker = "Local execution"
+            action = "Use local execution path for local workflows."
+        else:
+            readiness, blocker, action = readiness_from_probe_summary(device.status, summary)
+
+        status = {
+            "local-ready": "ready",
+            "ready": "ready",
+            "stale-checkout": "ready",
+            "missing-project": "review",
+            "missing-codex": "review",
+            "needs-review": "review",
+            "offline-or-timeout": "offline",
+            "blocked-tailscale-approval": "blocked",
+            "blocked-ssh-auth": "blocked",
+            "blocked-dns": "blocked",
+            "blocked-connection-refused": "blocked",
+            "blocked-ssh": "blocked",
+            "needs-check": "unknown",
+        }.get(readiness, "unknown")
+        category = {
+            "local-ready": "local-ready",
+            "ready": "ready",
+            "stale-checkout": "stale-checkout",
+            "missing-project": "missing-project",
+            "missing-codex": "missing-codex",
+            "needs-review": "needs-review",
+            "offline-or-timeout": "offline-or-timeout",
+            "blocked-tailscale-approval": "tailscale-approval",
+            "blocked-ssh-auth": "ssh-auth",
+            "blocked-dns": "dns",
+            "blocked-connection-refused": "connection-refused",
+            "blocked-ssh": "ssh-blocked",
+            "needs-check": "needs-probe",
+        }.get(readiness, "needs-review")
+        rows.append(
+            MeshReadinessRow(
+                device_id=device.id,
+                device_name=device.name,
+                host=device.host,
+                status=status,
+                blocker_category=category,
+                action_priority=_readiness_action_priority(status, category),
+                summary=summary if blocker == summary else blocker,
+                next_actions=(action,) if action else (),
+                checked=device.updated,
+                source="saved",
+            )
+        )
+    return MeshReadinessReport(generated=now(), rows=tuple(rows))
+
+
+def mesh_readiness_markdown(report: MeshReadinessReport) -> str:
+    lines = ["# Mesh readiness", "", report.summary_text()]
+    if not report.entries:
+        lines.append("- no devices")
+    else:
+        for entry in report.entries:
+            lines.append(f"- {entry.device_name} ({entry.host}): {entry.blocker}")
+            lines.append(f"  next: {entry.next_action}")
+            if entry.summary:
+                lines.append(f"  detail: {entry.summary}")
+    return "\n".join(lines) + "\n"
+
+
+def readiness_from_probe_summary(status: str, summary: str) -> tuple[str, str, str]:
+    text = summary.lower()
+    if status == "ready":
+        if "behind" in text or "stale" in text or "diverged" in text or "detached" in text:
+            return (
+                "stale-checkout",
+                "Branch appears stale",
+                "Push/pull to align with remote branches before dispatching this lane.",
+            )
+        return ("ready", "Ready for remote execution", "No blocker. Dispatch lane and run as needed.")
+
+    if status == "review":
+        if "project missing" in text or "project_exists=no" in text:
+            return (
+                "missing-project",
+                "Project path missing",
+                "Create/sync the project root path and retry Check Fleet.",
+            )
+        if "not a git repository" in text:
+            return (
+                "missing-project",
+                "Project root is not a repository",
+                "Point project_root at a valid project directory and retry Check Fleet.",
+            )
+        if "codex" in text and ("not found" in text or "missing" in text):
+            return (
+                "missing-codex",
+                "Codex CLI missing",
+                "Install Codex or fix PATH/codex_bin for this target.",
+            )
+        return (
+            "needs-review",
+            "Needs review",
+            "Inspect device output and resolve the review condition.",
+        )
+
+    if status == "offline":
+        return (
+            "offline-or-timeout",
+            "Offline",
+            "Bring the device online, then rerun Check Fleet.",
+        )
+
+    if status == "blocked":
+        if "requires an additional check" in text or "approval required" in text:
+            return (
+                "blocked-tailscale-approval",
+                "Tailscale approval required",
+                "Approve the Tailscale SSH request from this identity in the browser.",
+            )
+        if "auth denied" in text or "permission denied" in text or "publickey" in text:
+            return (
+                "blocked-ssh-auth",
+                "SSH auth denied",
+                "Add this machine's public key to the device authorized_keys.",
+            )
+        if "timed out" in text:
+            return (
+                "offline-or-timeout",
+                "Probe timed out",
+                "Check connectivity and firewall, then retry Check Fleet.",
+            )
+        if "cannot be resolved" in text or "could not resolve hostname" in text:
+            return (
+                "blocked-dns",
+                "DNS/host resolution failed",
+                "Validate hostname and Tailscale DNS mapping.",
+            )
+        if "refused" in text:
+            return (
+                "blocked-connection-refused",
+                "SSH service unavailable",
+                "Check sshd availability and target firewall policy.",
+            )
+        if "codex" in text and "not found" in text:
+            return (
+                "missing-codex",
+                "Codex CLI missing",
+                "Install Codex or fix PATH/codex_bin for this target.",
+            )
+        return (
+            "blocked-ssh",
+            "SSH blocked",
+            "Inspect SSH command output on the target and rerun Check Fleet.",
+        )
+
+    return (
+        "needs-check",
+        "Needs a fleet check",
+        "Run Check Fleet to get a current readiness verdict.",
+    )
 
 
 def slugify(value: str) -> str:
