@@ -85,6 +85,22 @@ codex doctor --summary --ascii
 For GUI verification, run `codex-gui` or `python3 codex_gui.py` from a real
 desktop session, not from a display-less SSH shell.
 
+## Multi-device launch utility
+
+Installable command:
+
+```bash
+codex-launch-agents --devices scripts/launch_agents.yaml.example --prompts-dir role_prompts --repo-path ~/project
+```
+
+Useful flags:
+
+- `--sync-repo` to refresh remote checkout before launch
+- `--collect-results` to run `git status --porcelain` and include modified files
+- `--max-retries` and `--backoff-seconds` for SSH/launch retry control
+
+`scripts/launch_agents.yaml.example` provides a starting configuration.
+
 The app's Quality Gate also runs a setup readiness check that reports missing
 runtime pieces before you rely on the workstation.
 
