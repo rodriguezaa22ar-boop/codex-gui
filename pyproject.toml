@@ -19,6 +19,7 @@ build-backend = "setuptools.build_meta"
 [project.scripts]
 codex-gui = "codex_launcher:main"
 codex-team-ops = "codex_team_ops:main"
+codex-launch-agents = "codex_launch_agents:main"
 
 [tool.codex-control]
 entrypoint = "codex_gui.py"
@@ -48,6 +49,7 @@ py-modules = [
   "codex_setup",
   "codex_team",
   "codex_team_ops",
+  "codex_launch_agents",
   "codex_visual",
   "codex_workstation",
 ]

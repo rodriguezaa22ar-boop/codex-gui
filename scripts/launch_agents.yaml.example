@@ -1,0 +1,27 @@
+- host: 192.168.1.101
+  user: ao
+  role: Planner
+  profile: safe-explore
+  key: ~/.ssh/id_ed25519
+  port: 22
+
+- host: 192.168.1.102
+  user: ao
+  role: Implementer
+  profile: maximum-power
+  key: ~/.ssh/id_ed25519
+  port: 22
+
+- host: 192.168.1.103
+  user: ao
+  role: Reviewer
+  profile: pro-default
+  key: ~/.ssh/id_ed25519
+  port: 22
+
+- host: 192.168.1.104
+  user: ao
+  role: QA
+  profile: spark-fast
+  key: ~/.ssh/id_ed25519
+  port: 22
