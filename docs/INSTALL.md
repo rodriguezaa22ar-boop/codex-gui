@@ -8,6 +8,7 @@ for a real terminal-backed Codex workflow, not a hosted chat replacement.
 - Python 3.11 or newer
 - GTK 4 and PyGObject
 - Codex CLI available as `codex`
+- `paramiko>=5` and `PyYAML>=6` for multi-device orchestration helpers
 - A terminal fallback such as Konsole, GNOME Console, GNOME Terminal, or xterm
 - A graphical session with an active Wayland or X11 display for `codex-gui`
 - Git, if you want project intelligence, mesh sync, and public repo workflows

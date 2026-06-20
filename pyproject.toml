@@ -4,6 +4,10 @@ version = "2.4.0"
 description = "Maximum-power local GUI workstation for the Codex CLI"
 requires-python = ">=3.11"
 readme = "README.md"
+dependencies = [
+  "paramiko>=5.0",
+  "PyYAML>=6.0",
+]
 license = { file = "LICENSE" }
 authors = [{ name = "ao" }]
 keywords = ["codex", "gtk", "workstation", "tailscale", "agents"]
