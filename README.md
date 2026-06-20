@@ -31,6 +31,14 @@ Run the full local quality gate from shell:
 bash scripts/ci-gate.sh
 ```
 
+If the desktop launcher metadata is missing after install or upgrade, regenerate
+both launcher and desktop entry metadata:
+
+```bash
+bash scripts/refresh-codex-gui-launcher.sh
+bash scripts/install-codex-gui-desktop-entry.sh
+```
+
 Or directly:
 
 ```bash

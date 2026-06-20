@@ -52,6 +52,12 @@ If your environment is still resolving an outdated launcher script, repair it wi
 bash scripts/refresh-codex-gui-launcher.sh
 ```
 
+After install, refresh desktop integration:
+
+```bash
+bash scripts/install-codex-gui-desktop-entry.sh
+```
+
 `pip install .` uses the PEP 517 build requirements from `pyproject.toml`.
 On a networked host, pip can download `setuptools>=68` and `wheel` if they are
 missing. On an offline, restricted, or freshly provisioned worker, install those

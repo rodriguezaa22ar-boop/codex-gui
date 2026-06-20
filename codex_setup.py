@@ -215,7 +215,13 @@ def _desktop_check(desktop_file: Path | None) -> SetupCheck:
     if desktop_file is None:
         return SetupCheck("desktop", "Desktop Entry", "note", "No desktop entry path was provided.")
     if not desktop_file.exists():
-        return SetupCheck("desktop", "Desktop Entry", "note", f"{desktop_file} is not installed yet.", "Create the desktop entry after installing the app.")
+        return SetupCheck(
+            "desktop",
+            "Desktop Entry",
+            "note",
+            f"{desktop_file} is not installed yet.",
+            "Run `bash scripts/install-codex-gui-desktop-entry.sh` after install.",
+        )
     validator = shutil.which("desktop-file-validate")
     if not validator:
         return SetupCheck("desktop", "Desktop Entry", "note", "desktop-file-validate is not installed.")
