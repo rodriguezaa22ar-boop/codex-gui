@@ -4,6 +4,7 @@ import socket
 import tempfile
 import unittest
 from pathlib import Path
+from types import ModuleType
 
 LAUNCH_AGENTS_PATH = Path(__file__).resolve().parents[1] / "scripts" / "launch_agents.py"
 
@@ -13,6 +14,11 @@ def _load_launch_agents_module():
     if spec is None or spec.loader is None:
         raise RuntimeError("Unable to load launch_agents script module")
     module = importlib.util.module_from_spec(spec)
+    import sys
+
+    sys.modules[spec.name] = module
+    if not isinstance(module, ModuleType):
+        raise RuntimeError("Invalid launch_agents module object")
     spec.loader.exec_module(module)
     return module
 
