@@ -34,3 +34,10 @@ if command -v codex >/dev/null 2>&1; then
 else
   echo "Codex CLI not installed; skipping codex doctor."
 fi
+
+if command -v desktop-file-validate >/dev/null 2>&1 && [ -x scripts/install-codex-gui-desktop-entry.sh ]; then
+  echo "::group::Desktop entry"
+  bash scripts/install-codex-gui-desktop-entry.sh >/dev/null
+  desktop-file-validate "$HOME/.local/share/applications/codex-gui.desktop" || true
+  echo "::endgroup::"
+fi
