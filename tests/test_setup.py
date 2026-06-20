@@ -4,7 +4,7 @@ import sys
 from pathlib import Path
 from unittest.mock import patch
 
-from codex_setup import SetupCheck, SetupReport, build_setup_report
+from codex_setup import SetupCheck, SetupReport, _desktop_check, build_setup_report
 
 
 class SetupReportTests(unittest.TestCase):
@@ -147,6 +147,16 @@ class SetupReportTests(unittest.TestCase):
             launcher_check = next(check for check in report.checks if check.id == "launcher")
             self.assertEqual(launcher_check.status, "warn")
             self.assertIn("python3 -m pip install", launcher_check.fix)
+
+    def test_desktop_check_missing_file_reports_repair_script(self) -> None:
+        desktop_file = Path("/tmp") / "does-not-exist-codex-gui.desktop"
+        if desktop_file.exists():
+            self.fail(f"{desktop_file} unexpectedly exists")
+
+        check = _desktop_check(desktop_file)
+        self.assertEqual(check.id, "desktop")
+        self.assertEqual(check.status, "note")
+        self.assertIn("install-codex-gui-desktop-entry.sh", check.fix)
 
 
 if __name__ == "__main__":
