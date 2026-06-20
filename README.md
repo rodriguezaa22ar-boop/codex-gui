@@ -159,13 +159,15 @@ python3 codex_team_ops.py --json prepare --check
 python3 codex_team_ops.py --json sync
 python3 codex_team_ops.py --json launch
 python3 codex_team_ops.py --json collect
-python3 codex_team_ops.py --json doctor
+python3 codex_team_ops.py --json doctor --check
 python3 codex_team_ops.py --json summary
 ```
 
 `doctor` returns the shared mesh readiness summary plus sanitized per-device
 readiness rows with blocker categories, action priorities, and next actions, so
 commander scripts can act without reading raw probe output.
+Use plain `doctor` when you want a saved-state report only; add `--check` when
+the report should probe saved devices first and include fresh readiness counts.
 Use `python3 codex_team_ops.py --json check --no-persist` for verifier or
 read-only validation lanes that must probe devices without updating `devices.json`.
 

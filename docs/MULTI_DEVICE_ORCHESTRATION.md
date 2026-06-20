@@ -74,13 +74,15 @@ python3 codex_team_ops.py --json prepare --check
 python3 codex_team_ops.py --json sync
 python3 codex_team_ops.py --json launch --sync
 python3 codex_team_ops.py --json collect
-python3 codex_team_ops.py --json doctor
+python3 codex_team_ops.py --json doctor --check
 python3 codex_team_ops.py --json summary
 ```
 
 `doctor` includes sanitized readiness rows for each saved device, including
 blocker categories, action priorities, and next actions; it does not emit raw
 SSH or probe output.
+Use plain `doctor` for a saved-state report that does not touch remote devices.
+Use `doctor --check` when you need live mesh readiness in the doctor JSON.
 Use `python3 codex_team_ops.py --json check --no-persist` in read-only verifier
 lanes when probing is useful but `devices.json` must not be updated.
 If `doctor` reports stale bus targets or offline lanes from a run you have
