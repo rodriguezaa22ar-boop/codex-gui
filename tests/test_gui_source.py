@@ -376,11 +376,13 @@ class GuiSourceTests(unittest.TestCase):
         self.assertIn("self._launch_console_focus_filter(", ast.unparse(render_assignments))
         self.assertIn("focus_filter=", timeline_lines)
         self.assertIn("_set_mesh_launch_console_focus_filter", ast.unparse(on_ready))
+        self.assertIn("_set_mesh_launch_console_focus_filter('ready')", ast.unparse(on_ready))
         self.assertIn("_set_mesh_launch_console_focus_filter", ast.unparse(on_blocked))
         self.assertIn("_set_mesh_launch_console_focus_filter", ast.unparse(on_review))
         self.assertIn("_set_mesh_launch_console_focus_filter", ast.unparse(on_offline))
         self.assertIn("_mesh_launch_console_focus_name", ast.unparse(focus_name))
         self.assertIn("_set_mesh_launch_console_focus_filter", ast.unparse(cycle))
+        self.assertIn("'ready'", ast.unparse(cycle))
         blocked_only_toggle = _method_named(tree, "on_launch_console_blocked_only_toggled")
         self.assertIn("mesh_launch_console_blocked_only_toggle", ast.unparse(blocked_only_toggle))
 

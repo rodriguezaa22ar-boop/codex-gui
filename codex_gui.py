@@ -4022,7 +4022,7 @@ class CodexControl(Gtk.Application):
         self.mesh_launch_pulse_ready_chip = self.make_button("0/0 ready")
         self.mesh_launch_pulse_ready_chip.connect("clicked", self.on_mesh_launch_pulse_focus_ready)
         self.mesh_launch_pulse_ready_chip.add_css_class("chip")
-        self.mesh_launch_pulse_ready_chip.set_tooltip_text("Show all lanes.")
+        self.mesh_launch_pulse_ready_chip.set_tooltip_text("Show ready lanes.")
         self.mesh_launch_pulse_blocked_chip = self.make_button("0 blocked")
         self.mesh_launch_pulse_blocked_chip.connect("clicked", self.on_mesh_launch_pulse_focus_blocked)
         self.mesh_launch_pulse_blocked_chip.add_css_class("chip")
@@ -4974,7 +4974,7 @@ class CodexControl(Gtk.Application):
         return names.get(focus, "all lanes")
 
     def on_cycle_mesh_launch_focus(self, _button: Gtk.Button) -> None:
-        cycle = ("all", "blocked", "review", "offline")
+        cycle = ("all", "ready", "blocked", "review", "offline")
         current = self.mesh_launch_console_focus_filter if self.mesh_launch_console_focus_filter in cycle else "all"
         try:
             index = cycle.index(current)
@@ -4988,6 +4988,7 @@ class CodexControl(Gtk.Application):
         selected = self.mesh_launch_console_focus_filter
         for mode, chip in [
             ("all", self.mesh_launch_pulse_ready_chip),
+            ("ready", self.mesh_launch_pulse_ready_chip),
             ("blocked", self.mesh_launch_pulse_blocked_chip),
             ("review", self.mesh_launch_pulse_review_chip),
             ("offline", self.mesh_launch_pulse_offline_chip),
@@ -5019,7 +5020,7 @@ class CodexControl(Gtk.Application):
         self.render_mesh_launch_console()
 
     def on_mesh_launch_pulse_focus_ready(self, _button: Gtk.Button) -> None:
-        self._set_mesh_launch_console_focus_filter("all")
+        self._set_mesh_launch_console_focus_filter("ready")
 
     def on_mesh_launch_pulse_focus_blocked(self, _button: Gtk.Button) -> None:
         self._set_mesh_launch_console_focus_filter("blocked")
