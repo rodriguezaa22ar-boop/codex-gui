@@ -9,6 +9,7 @@ for a real terminal-backed Codex workflow, not a hosted chat replacement.
 - GTK 4 and PyGObject
 - Codex CLI available as `codex`
 - A terminal fallback such as Konsole, GNOME Console, GNOME Terminal, or xterm
+- A graphical session with an active Wayland or X11 display for `codex-gui`
 - Git, if you want project intelligence, mesh sync, and public repo workflows
 - Python packaging build tooling for local installs: `setuptools>=68` and
   `wheel`
