@@ -4,8 +4,9 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import time
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
@@ -58,6 +59,157 @@ class TeamRole:
         return f"{self.focus} Boundary: {self.boundary}"
 
 
+@dataclass(frozen=True)
+class TeamBusTargetStatus:
+    lane_slug: str
+    device_name: str
+    target: str
+    status: str
+    detail: str
+    artifact_path: str = ""
+    artifact_sha256: str = ""
+    artifact_remote_sha256: str = ""
+    ts: int = 0
+
+    @property
+    def is_success(self) -> bool:
+        return self.status in {"synced", "local"}
+
+    @property
+    def is_failure(self) -> bool:
+        return self.status == "failed"
+
+    def detail_line(self) -> str:
+        return f"{self.device_name}: {self.status} | {self.detail}"
+
+
+@dataclass(frozen=True)
+class TeamBusReport:
+    run_id: str
+    team_dir: str
+    bus_path: str
+    sent: int
+    failures: tuple[str, ...]
+    generated: str
+    generated_epoch: int
+    targets: tuple[TeamBusTargetStatus, ...] = ()
+
+    @property
+    def synced_count(self) -> int:
+        return sum(1 for target in self.targets if target.is_success)
+
+    @property
+    def failed_count(self) -> int:
+        return sum(1 for target in self.targets if target.is_failure)
+
+    @property
+    def stale_count(self) -> int:
+        return sum(1 for target in self.targets if target.status == "stale")
+
+    def target_for_device(self, device_name: str) -> TeamBusTargetStatus | None:
+        return next((
+            item for item in self.targets
+            if item.device_name == device_name
+        ), None)
+
+    def device_status_map(self) -> dict[str, str]:
+        return {item.device_name: item.status for item in self.targets}
+
+
+@dataclass(frozen=True)
+class TeamOperatorSummary:
+    headline: str
+    next_action: str
+    status: str
+    lane_text: str
+    bus_text: str
+
+
+def team_lane_status_counts(run_status: TeamRunStatus | None) -> dict[str, int]:
+    if run_status is None:
+        return {}
+    counts: dict[str, int] = {}
+    for lane in run_status.lanes:
+        counts[lane.status] = counts.get(lane.status, 0) + 1
+    return counts
+
+
+def team_operator_summary(
+    run_status: TeamRunStatus | None,
+    bus_report: TeamBusReport | None = None,
+    *,
+    ready_devices: int = 0,
+    saved_runs: int = 0,
+    assignment_count: int = 0,
+    summary_reviewed: bool = False,
+) -> TeamOperatorSummary:
+    if run_status is None:
+        lane_text = f"{assignment_count} lane(s)" if assignment_count else "no lanes"
+        if ready_devices <= 0:
+            return TeamOperatorSummary(
+                headline=f"{ready_devices} ready trusted device(s). Run fleet check before preparing a team.",
+                next_action="Check Fleet",
+                status="review",
+                lane_text=lane_text,
+                bus_text="bus not started",
+            )
+        return TeamOperatorSummary(
+            headline=f"{ready_devices} ready trusted device(s). {saved_runs} saved team run(s).",
+            next_action="Prepare Team",
+            status="ready",
+            lane_text=lane_text,
+            bus_text="bus not started",
+        )
+
+    lane_count = run_status.lane_count
+    collected = run_status.collected_count
+    counts = team_lane_status_counts(run_status)
+    failed = counts.get("failed", 0)
+    prepared = counts.get("prepared", 0)
+    finished = counts.get("finished", 0)
+    lane_bits = []
+    for label, count in (
+        ("collected", collected),
+        ("finished", finished),
+        ("prepared", prepared),
+        ("failed", failed),
+    ):
+        if count:
+            lane_bits.append(f"{count} {label}")
+    lane_text = " / ".join(lane_bits) if lane_bits else f"{lane_count} lane(s)"
+
+    if bus_report is None:
+        bus_text = "bus not synced"
+        if failed:
+            return TeamOperatorSummary(run_status.summary_line(), "Inspect Failures", "blocked", lane_text, bus_text)
+        if summary_reviewed:
+            return TeamOperatorSummary(run_status.summary_line(), "Prepare Team", "ready", lane_text, bus_text)
+        if collected >= lane_count and lane_count:
+            return TeamOperatorSummary(run_status.summary_line(), "Sync Bus", "ready", lane_text, bus_text)
+        if prepared == lane_count and lane_count:
+            return TeamOperatorSummary(run_status.summary_line(), "Launch Team", "ready", lane_text, bus_text)
+        return TeamOperatorSummary(run_status.summary_line(), "Collect Team", "review", lane_text, bus_text)
+
+    bus_total = len(bus_report.targets)
+    legacy_failures = len(bus_report.failures)
+    bus_text = f"{bus_report.synced_count} synced / {bus_report.failed_count} failed / {bus_report.stale_count} stale"
+    if bus_total:
+        bus_text += f" of {bus_total}"
+    elif legacy_failures:
+        bus_text += f" | {legacy_failures} failure(s)"
+    if summary_reviewed:
+        return TeamOperatorSummary(run_status.summary_line(), "Prepare Team", "ready", lane_text, bus_text)
+    if bus_report.failed_count or bus_report.stale_count or legacy_failures:
+        return TeamOperatorSummary(run_status.summary_line(), "Repair Bus", "blocked", lane_text, bus_text)
+    if prepared == lane_count and lane_count:
+        return TeamOperatorSummary(run_status.summary_line(), "Launch Team", "ready", lane_text, bus_text)
+    if collected >= lane_count and lane_count:
+        if summary_reviewed:
+            return TeamOperatorSummary(run_status.summary_line(), "Prepare Team", "ready", lane_text, bus_text)
+        return TeamOperatorSummary(run_status.summary_line(), "Review Summary", "ready", lane_text, bus_text)
+    return TeamOperatorSummary(run_status.summary_line(), "Collect Team", "review", lane_text, bus_text)
+
+
 TEAM_ROLES: tuple[TeamRole, ...] = (
     TeamRole(
         id="coordinator",
@@ -104,12 +256,34 @@ TEAM_ROLES: tuple[TeamRole, ...] = (
 
 FALLBACK_ROLE_IDS = ("architect", "backend-builder", "reviewer", "ui-polish", "verifier")
 
+ROLE_PRESET_HINTS = {
+    "coordinator": "maximum-power",
+    "backend-builder": "maximum-power",
+    "ui-polish": "maximum-power",
+    "verifier": "pro-default",
+    "architect": "safe-review",
+    "reviewer": "deep-review",
+}
+
+
+def role_profile_hint(role_id: str) -> str:
+    return ROLE_PRESET_HINTS.get(role_id, "maximum-power")
+
+
+def _safe_str(value: Any) -> str:
+    text = str(value).strip()
+    return text.replace("\n", " ")
+
 
 def team_role_by_id(role_id: str) -> TeamRole:
     return next((role for role in TEAM_ROLES if role.id == role_id), TEAM_ROLES[0])
 
 
 def team_role_for_device(name: str, host: str, index: int = 0) -> TeamRole:
+    name_identity = name.lower()
+    for role in TEAM_ROLES:
+        if role.match_terms and any(term in name_identity for term in role.match_terms):
+            return role
     identity = f"{name} {host}".lower()
     for role in TEAM_ROLES:
         if role.match_terms and any(term in identity for term in role.match_terms):
@@ -130,6 +304,87 @@ def team_roles_markdown() -> str:
             "",
         ])
     return "\n".join(lines).rstrip() + "\n"
+
+
+TEAM_CHAT_FILE = "team-chat.md"
+
+
+def write_role_bootstrap(
+    team_dir: Path,
+    assignments: tuple[dict[str, str], ...] | None = None,
+) -> Path:
+    manifest = team_manifest(team_dir)
+    manifest_assignments = team_assignments(team_dir) if assignments is None else assignments
+    run_id = str(manifest.get("run_id") or str(team_dir.name))
+    generated = time.strftime("%Y-%m-%dT%H:%M:%S%z")
+    lines = [
+        "# Codex Team Role Bootstrap",
+        "",
+        f"Run: {run_id}",
+        f"Project: {manifest.get('project', 'unknown')}",
+        f"Generated: {generated}",
+        "",
+        "## Lane Bootstrap",
+        "",
+    ]
+    lane_payload: list[dict[str, str]] = []
+    for assignment in manifest_assignments:
+        role_id = assignment.get("role_id", "")
+        role = team_role_by_id(role_id)
+        role_profile = assignment.get("role_profile", role_profile_hint(role.id))
+        role_title = assignment.get("role_title", role.title)
+        role_focus = assignment.get("role_focus", role.focus)
+        role_boundary = assignment.get("role_boundary", role.boundary)
+        device_name = assignment.get("device_name", "unknown")
+        lane_slug = assignment.get("lane_slug", "")
+        lines.extend([
+            f"- {device_name} / {lane_slug}",
+            f"  - role_id: {role_id}",
+            f"  - role_title: {role_title}",
+            f"  - role_profile: {role_profile}",
+            f"  - role_focus: {_safe_str(role_focus)}",
+            f"  - role_boundary: {_safe_str(role_boundary)}",
+            f"  - startup: codex -p {role_profile}",
+            "",
+        ])
+        lane_payload.append({
+            "lane_slug": lane_slug,
+            "device_name": device_name,
+            "role_id": role_id,
+            "role_title": role_title,
+            "role_profile": role_profile,
+            "role_focus": role_focus,
+            "role_boundary": role_boundary,
+            "startup_command": f"codex -p {role_profile}",
+        })
+
+    payload = {
+        "run_id": run_id,
+        "generated": generated,
+        "project": str(manifest.get("project", "")),
+        "lane_count": len(manifest_assignments),
+        "roles": lane_payload,
+    }
+    out_dir = team_dir / "out"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        out_dir.chmod(0o700)
+    except OSError:
+        pass
+    markdown_path = out_dir / "role-bootstrap.md"
+    json_path = out_dir / "role-bootstrap.json"
+    markdown_text = "\n".join(lines).rstrip() + "\n"
+    markdown_path.write_text(markdown_text, encoding="utf-8")
+    json_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+    try:
+        markdown_path.chmod(0o600)
+    except OSError:
+        pass
+    try:
+        json_path.chmod(0o600)
+    except OSError:
+        pass
+    return json_path
 
 
 def _read_json(path: Path) -> dict[str, Any]:
@@ -153,6 +408,20 @@ def _file_size(path: Path) -> int:
         return path.stat().st_size
     except OSError:
         return 0
+
+
+def _file_sha256(path: Path) -> str:
+    try:
+        h = hashlib.sha256()
+    except Exception:  # noqa: BLE001
+        return ""
+    try:
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                h.update(chunk)
+    except OSError:
+        return ""
+    return h.hexdigest()
 
 
 def team_manifest(team_dir: Path) -> dict[str, Any]:
@@ -288,13 +557,75 @@ def write_team_summary(team_dir: Path) -> Path:
         if not lane.handoff_path and not lane.final_path:
             lines.append("No collected handoff or final message yet.")
             lines.append("")
+    text = "\n".join(lines).rstrip() + "\n"
     output = team_dir / "summary.md"
-    output.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+    try:
+        output.write_text(text, encoding="utf-8")
+    except OSError:
+        output = team_dir / "out" / "team-summary.md"
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(text, encoding="utf-8")
     try:
         output.chmod(0o600)
     except OSError:
         pass
     return output
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def team_summary_review_path(team_dir: Path) -> Path:
+    return team_dir / "summary-reviewed.json"
+
+
+def mark_team_summary_reviewed(team_dir: Path) -> Path:
+    summary_path = write_team_summary(team_dir)
+    status = inspect_team_run(team_dir)
+    marker = team_summary_review_path(team_dir)
+    payload = {
+        "schema": "codex-team-summary-review/v1",
+        "run_id": status.run_id,
+        "summary_path": str(summary_path),
+        "summary_sha256": _sha256_file(summary_path),
+        "reviewed_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+    }
+    marker_text = json.dumps(payload, indent=2, sort_keys=True) + "\n"
+    try:
+        marker.write_text(marker_text, encoding="utf-8")
+    except OSError:
+        marker = summary_path.parent / "summary-reviewed.json"
+        marker.write_text(marker_text, encoding="utf-8")
+    try:
+        marker.chmod(0o600)
+    except OSError:
+        pass
+    return marker
+
+
+def is_team_summary_reviewed(team_dir: Path) -> bool:
+    candidates = (
+        (team_dir / "summary.md", team_summary_review_path(team_dir)),
+        (team_dir / "out" / "team-summary.md", team_dir / "out" / "summary-reviewed.json"),
+    )
+    for summary_path, marker in candidates:
+        if not summary_path.exists() or not marker.exists():
+            continue
+        try:
+            payload = json.loads(marker.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if payload.get("schema") != "codex-team-summary-review/v1":
+            continue
+        if str(payload.get("summary_sha256") or "") != _sha256_file(summary_path):
+            continue
+        return str(payload.get("run_id") or "") == inspect_team_run(team_dir).run_id
+    return False
 
 
 def write_handoff_bus(team_dir: Path) -> Path:
@@ -305,7 +636,8 @@ def write_handoff_bus(team_dir: Path) -> Path:
     out_dir.mkdir(parents=True, exist_ok=True)
     bus_path = out_dir / "handoff-bus.md"
     summary_copy = out_dir / "team-summary.md"
-    summary_copy.write_text(summary_path.read_text(encoding="utf-8", errors="replace"), encoding="utf-8")
+    if summary_path != summary_copy:
+        summary_copy.write_text(summary_path.read_text(encoding="utf-8", errors="replace"), encoding="utf-8")
     lines = [
         "# Codex Team Handoff Bus",
         "",
@@ -319,6 +651,7 @@ def write_handoff_bus(team_dir: Path) -> Path:
         "- Read `team-summary.md` for the full current team summary.",
         "- Avoid duplicating teammate work already described below.",
         "- If you continue, write a fresh lane handoff and final message.",
+        "- Read `team-chat.md` for live role-level updates between lanes.",
         "- Keep secrets, tokens, passwords, and sudo codes out of handoffs.",
         "",
         "## Lane Handoffs",
@@ -362,13 +695,73 @@ def write_handoff_bus(team_dir: Path) -> Path:
     return bus_path
 
 
-def write_bus_report(team_dir: Path, *, sent: int, failures: list[str], bus_path: Path) -> Path:
+def load_bus_report(team_dir: Path) -> TeamBusReport | None:
+    raw = _read_json(team_dir / "out" / "handoff-bus-report.json")
+    if not raw:
+        return None
+    run_id = str(raw.get("run_id") or inspect_team_run(team_dir).run_id)
+    targets: list[TeamBusTargetStatus] = []
+    raw_targets = raw.get("targets")
+    if isinstance(raw_targets, list):
+        for item in raw_targets:
+            if not isinstance(item, dict):
+                continue
+            targets.append(TeamBusTargetStatus(
+                lane_slug=str(item.get("lane_slug", "")),
+                device_name=str(item.get("device_name", "")),
+                target=str(item.get("target", "")),
+                status=str(item.get("status", "")),
+                detail=str(item.get("detail", "")),
+                artifact_path=str(item.get("artifact_path", "")),
+                artifact_sha256=str(item.get("artifact_sha256", "")),
+                artifact_remote_sha256=str(item.get("artifact_remote_sha256", "")),
+                ts=int(item.get("ts", 0) or 0),
+            ))
+    return TeamBusReport(
+        run_id=run_id,
+        team_dir=str(raw.get("team_dir") or team_dir),
+        bus_path=str(raw.get("bus_path") or team_dir / "out" / "handoff-bus.md"),
+        sent=int(raw.get("sent", 0) or 0),
+        failures=tuple(str(item) for item in raw.get("failures", ()) if isinstance(item, str)),
+        generated=str(raw.get("generated") or time.strftime('%Y-%m-%dT%H:%M:%S%z')),
+        generated_epoch=int(raw.get("generated_epoch") or 0),
+        targets=tuple(targets),
+    )
+
+
+def write_bus_report(
+    team_dir: Path,
+    *,
+    sent: int,
+    failures: list[str],
+    bus_path: Path,
+    target_statuses: tuple[TeamBusTargetStatus, ...] | list[TeamBusTargetStatus] = (),
+) -> Path:
+    target_records = tuple(target_statuses)
+    if not target_records:
+        target_records = tuple(
+            TeamBusTargetStatus(
+                lane_slug="",
+                device_name=str(failure.split(":", 1)[0].strip() or "legacy"),
+                target=str(failure),
+                status="failed",
+                detail=failure,
+                artifact_path=str(bus_path),
+                artifact_sha256=_file_sha256(bus_path),
+                artifact_remote_sha256="",
+                ts=int(time.time()),
+            )
+            for failure in failures
+        )
+    generated = int(time.time())
     report = {
         "run_id": inspect_team_run(team_dir).run_id,
         "team_dir": str(team_dir),
         "bus_path": str(bus_path),
         "sent": sent,
         "failures": failures,
+        "targets": [asdict(item) for item in target_records],
+        "generated_epoch": generated,
         "generated": time.strftime('%Y-%m-%dT%H:%M:%S%z'),
     }
     path = team_dir / "out" / "handoff-bus-report.json"
@@ -378,3 +771,78 @@ def write_bus_report(team_dir: Path, *, sent: int, failures: list[str], bus_path
     except OSError:
         pass
     return path
+
+
+def team_chat_path(team_dir: Path) -> Path:
+    return team_dir / "out" / TEAM_CHAT_FILE
+
+
+def read_team_chat(team_dir: Path, max_lines: int = 200) -> str:
+    path = team_chat_path(team_dir)
+    if not path.exists():
+        return ""
+    try:
+        raw = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+    lines = [line for line in raw.splitlines() if line.strip()]
+    if max_lines > 0 and len(lines) > max_lines:
+        lines = lines[-max_lines:]
+    return "\n".join(lines).rstrip() + ("\n" if lines else "")
+
+
+def merge_team_chat_texts(*texts: str) -> str:
+    seen: set[str] = set()
+    merged: list[str] = []
+    for raw in texts:
+        for line in raw.splitlines():
+            text = line.strip()
+            if not text:
+                continue
+            if text in seen:
+                continue
+            seen.add(text)
+            merged.append(text)
+    return "\n".join(merged).rstrip() + ("\n" if merged else "")
+
+
+def write_team_chat_entry(
+    team_dir: Path,
+    *,
+    sender: str,
+    lane: str,
+    message: str,
+) -> Path:
+    cleaned_sender = str(sender).strip().replace("\n", " ") or "operator"
+    cleaned_lane = str(lane).strip().replace("\n", " ") or "lane"
+    cleaned_message = " ".join(str(message).strip().splitlines())
+    chat_path = team_chat_path(team_dir)
+    out_dir = chat_path.parent
+    out_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        out_dir.chmod(0o700)
+    except OSError:
+        pass
+    if not chat_path.exists():
+        header = [
+            "# Codex Team Chat",
+            "",
+            f"Team: {team_dir.name}",
+            f"Started: {time.strftime('%Y-%m-%dT%H:%M:%S%z')}",
+            "",
+            "Instructions: concise team updates, blockers, and next steps.",
+            "",
+        ]
+        chat_path.write_text("\n".join(header).rstrip() + "\n", encoding="utf-8")
+    if cleaned_message:
+        line = (
+            f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] "
+            f"{cleaned_sender} ({cleaned_lane}): {cleaned_message}"
+        )
+        with chat_path.open("a", encoding="utf-8") as handle:
+            handle.write(line + "\n")
+    try:
+        chat_path.chmod(0o600)
+    except OSError:
+        pass
+    return chat_path

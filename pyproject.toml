@@ -13,7 +13,8 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project.scripts]
-codex-gui = "codex_gui:main"
+codex-gui = "codex_launcher:main"
+codex-team-ops = "codex_team_ops:main"
 
 [tool.codex-control]
 entrypoint = "codex_gui.py"
@@ -21,6 +22,7 @@ launcher = "~/.local/bin/codex-gui"
 
 [tool.setuptools]
 py-modules = [
+  "codex_launcher",
   "codex_actions",
   "codex_agents",
   "codex_autopilot",
@@ -41,6 +43,7 @@ py-modules = [
   "codex_sessions",
   "codex_setup",
   "codex_team",
+  "codex_team_ops",
   "codex_visual",
   "codex_workstation",
 ]

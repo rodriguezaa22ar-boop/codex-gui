@@ -60,6 +60,7 @@ Best current assignments:
 - Harden worker setup for Ubuntu, NixOS, and clean clone laptops.
 - Make SSH/Tailscale failures self-explanatory and actionable.
 - Keep team sync, handoff bus, and collection behavior reversible.
+- Avoid duplicating the active `atlas-main` launch-console pulse UX slice.
 
 ### `atlas-main`: Product / GTK UX Engineer
 
@@ -87,6 +88,7 @@ Best current assignments:
 - Add role badges, readiness timeline, and next-action buttons per device.
 - Make the Command Palette expose the team workflow cleanly.
 - Polish error, empty, loading, and blocked states.
+- Finish the in-progress launch-console readiness pulse before starting a new UI slice.
 
 ### Fourth Laptop: Verifier / Release Engineer
 
@@ -112,6 +114,7 @@ Best current assignments:
 - Run the install guide exactly as written.
 - Verify the desktop app starts.
 - Report missing packages, bad commands, and unclear docs.
+- Keep direct GitHub pull working; cockpit is no longer on bundle-only fallback.
 
 Phones are out of scope for this project. They can approve Tailscale or read
 GitHub, but they are not Codex workers for this build.
@@ -129,6 +132,16 @@ lane/release-verify
 The commander can commit directly to `main` only for integration, docs, release
 notes, and small coordination changes. Worker devices should not free-edit
 `main`.
+
+## Orchestration + Push Protocol
+
+The authoritative 4-device workflow is now documented in
+`docs/MULTI_DEVICE_ORCHESTRATION.md`.
+
+Quick rule:
+
+- Workers: branch, scope, test, commit, push lane branch.
+- Commander: pull main, review lane, run integration checks, merge, run full checks, push main.
 
 ## Standard Worker Loop
 

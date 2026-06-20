@@ -14,6 +14,8 @@ import hashlib
 import json
 import os
 import shlex
+import sys
+import time
 import shutil
 import signal
 import sqlite3
@@ -23,7 +25,7 @@ import threading
 import warnings
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import gi
 
@@ -72,6 +74,8 @@ from codex_devices import (
     DeviceRecord,
     DeviceProbe,
     MemoryItem,
+    MeshReadinessRow,
+    MeshReadinessReport,
     devices_from_tailscale_status_json,
     import_memory_text,
     local_agent_command,
@@ -80,15 +84,18 @@ from codex_devices import (
     load_memory,
     merge_discovered_devices,
     memory_markdown,
-    mesh_state,
+    mesh_readiness_report,
     new_device,
     parse_probe_output,
     remote_agent_command,
+    remote_file_sha256sum_command,
     remote_team_dir,
     remove_device,
     rsync_memory_command,
     rsync_project_command,
     rsync_team_package_command,
+    rsync_team_chat_command,
+    rsync_team_chat_pull_command,
     rsync_team_results_command,
     save_devices,
     save_memory,
@@ -128,7 +135,7 @@ from codex_quality import (
     save_quality_report,
 )
 from codex_roadmap import Roadmap, RoadmapMilestone, build_roadmap
-from codex_setup import build_setup_report
+from codex_setup import SetupReport, build_setup_report
 from codex_preflight import PreflightReport, build_preflight_report, codex_available
 from codex_prompting import PromptVariant, enhance_prompt, model_variant_request, parse_model_variants
 from codex_receipts import (
@@ -164,14 +171,26 @@ from codex_sessions import (
     upsert_session,
 )
 from codex_team import (
+    TeamBusTargetStatus,
+    TeamBusReport,
+    is_team_summary_reviewed,
     inspect_team_run,
+    read_team_chat,
+    load_bus_report,
     latest_team_run_dir,
+    mark_team_summary_reviewed,
+    merge_team_chat_texts,
+    role_profile_hint,
+    team_operator_summary,
     team_role_for_device,
     team_run_dirs,
+    write_role_bootstrap,
     write_bus_report,
     write_handoff_bus,
     write_team_summary,
+    write_team_chat_entry,
 )
+from codex_team_ops import build_team_doctor_report
 from codex_visual import visual_system_css
 from codex_workstation import (
     ActionFeedback,
@@ -240,6 +259,17 @@ NAV_ITEMS = (
     ("health", "Health", "security-high-symbolic"),
 )
 
+PRIMARY_NAV_PAGES = {
+    "launch",
+    "mesh",
+    "quality",
+    "mission",
+    "runs",
+    "monitor",
+    "projects",
+    "git",
+}
+
 MODELS = [
     ("config", "Config default"),
     ("gpt-5.5", "GPT-5.5 - best default"),
@@ -247,6 +277,14 @@ MODELS = [
     ("gpt-5.4-mini", "GPT-5.4 mini - fast scans"),
     ("gpt-5.4", "GPT-5.4 - compatibility"),
 ]
+
+MESH_FILTER_OPTIONS = (
+    ("all", "All"),
+    ("ready", "Ready"),
+    ("review", "Review"),
+    ("blocked", "Blocked"),
+    ("offline", "Offline"),
+)
 
 REASONING = [
     ("config", "Config default"),
@@ -519,6 +557,14 @@ window {
   border: 1px solid #354554;
   border-radius: 999px;
   padding: 6px 9px;
+}
+
+.chip-flow {
+  background: transparent;
+}
+
+.chip-flow flowboxchild {
+  padding: 0;
 }
 
 .chip-strong {
@@ -1477,6 +1523,24 @@ class CodexControl(Gtk.Application):
         self.config = load_json(CONFIG_FILE)
         self.layout_state: WorkstationLayout = layout_from_config(self.config)
         self.codex_bin = which_codex()
+        self.mesh_filter_mode = self.config.get("mesh_filter_mode", "all")
+        if self.mesh_filter_mode not in {"all", "ready", "review", "blocked", "offline"}:
+            self.mesh_filter_mode = "all"
+        self.mesh_team_only = bool(self.config.get("mesh_team_only", False))
+        self.focus_mode = bool(self.config.get("focus_mode", False))
+        self.mesh_launch_console_blocked_only = bool(self.config.get("mesh_launch_console_blocked_only", False))
+        self.mesh_launch_console_focus_filter = self.config.get("mesh_launch_console_focus_filter", "all")
+        if self.mesh_launch_console_focus_filter not in {"all", "ready", "blocked", "review", "offline"}:
+            self.mesh_launch_console_focus_filter = "all"
+        if self.mesh_launch_console_focus_filter != "all":
+            self.mesh_launch_console_blocked_only = False
+        self.mesh_live_refresh = bool(self.config.get("mesh_live_refresh", True))
+        try:
+            self.mesh_live_refresh_seconds = max(10, min(300, int(self.config.get("mesh_live_refresh_seconds", 30))))
+        except (TypeError, ValueError):
+            self.mesh_live_refresh_seconds = 30
+        self.mesh_live_refresh_busy = False
+        self.mesh_live_refresh_timer_id = 0
         self.window: Gtk.ApplicationWindow | None = None
         self.status_label: Gtk.Label | None = None
         self.stack: Gtk.Stack | None = None
@@ -1489,6 +1553,7 @@ class CodexControl(Gtk.Application):
         self.git_buffer: Gtk.TextBuffer | None = None
         self.mesh_detail_buffer: Gtk.TextBuffer | None = None
         self.memory_buffer: Gtk.TextBuffer | None = None
+        self.mesh_team_chat_buffer: Gtk.TextBuffer | None = None
         self.terminal: Any | None = None
         self.headless_proc: subprocess.Popen[str] | None = None
         self.projects: list[ProjectInfo] = []
@@ -1535,18 +1600,22 @@ class CodexControl(Gtk.Application):
         self.selected_device: DeviceRecord | None = self.devices[0] if self.devices else None
         self.memory_items: tuple[MemoryItem, ...] = load_memory(MEMORY_FILE)
         self.mesh_probe_records: dict[str, DeviceProbe] = {}
+        self._mesh_filter_toggling = False
+        self._mesh_launch_console_filter_toggling = False
         self.mesh_team_run_id = ""
         self.mesh_team_dir: Path | None = None
         self.mesh_team_assignments: list[dict[str, str]] = []
         self.mesh_team_last_bus_sent = 0
         self.mesh_team_last_bus_failures: list[str] = []
         self.mesh_team_last_bus_path: Path | None = None
+        self.mesh_team_last_bus_report: TeamBusReport | None = None
         latest_team_dir = latest_team_run_dir(TEAM_DIR)
         if latest_team_dir is not None:
             latest_status = inspect_team_run(latest_team_dir)
             self.mesh_team_run_id = latest_status.run_id
             self.mesh_team_dir = latest_team_dir
             self.mesh_team_assignments = [dict(item) for item in latest_status.assignments]
+            self.mesh_team_last_bus_report = load_bus_report(latest_team_dir)
         self.mission_blueprint: MissionBlueprint | None = None
         self.autopilot_plan: AutopilotPlan | None = None
         self.autopilot_prompt = ""
@@ -1559,6 +1628,9 @@ class CodexControl(Gtk.Application):
         self.operator_signal_labels: list[tuple[Gtk.Label, Gtk.Label, Gtk.Label]] = []
         self.operator_signal_cards: list[Gtk.Widget] = []
         self.nav_rows: dict[str, Gtk.ListBoxRow] = {}
+        self.nav_lists: list[Gtk.ListBox] = []
+        self.sidebar_widget: Gtk.Widget | None = None
+        self.focus_button: Gtk.Button | None = None
         self.health_summary: dict[str, Any] = {}
         self.headless_run_id = ""
         self.execution_run_ids: dict[str, str] = {}
@@ -1581,7 +1653,8 @@ class CodexControl(Gtk.Application):
         self.stack.set_hexpand(True)
         self.stack.set_vexpand(True)
         self.stack.set_transition_type(Gtk.StackTransitionType.CROSSFADE)
-        body.append(self.build_sidebar())
+        self.sidebar_widget = self.build_sidebar()
+        body.append(self.sidebar_widget)
         body.append(self.stack)
         root.append(body)
 
@@ -1613,6 +1686,9 @@ class CodexControl(Gtk.Application):
         self.show_page("launch")
         self.install_actions()
         self.refresh_all()
+        self.apply_focus_mode()
+        self.ensure_mesh_live_refresh_timer()
+        GLib.idle_add(self.on_run_setup_check)
         self.save_current_state()
 
     def install_css(self) -> None:
@@ -1641,29 +1717,53 @@ class CodexControl(Gtk.Application):
         self.nav_list.add_css_class("nav-list")
         self.nav_list.set_selection_mode(Gtk.SelectionMode.SINGLE)
         self.nav_rows = {}
+        self.nav_lists = [self.nav_list]
         for page_name, title, icon_name in NAV_ITEMS:
-            row = Gtk.ListBoxRow()
-            row.page_name = page_name
-            row.add_css_class("nav-row")
-            content = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
-            content.set_valign(Gtk.Align.CENTER)
-            image = Gtk.Image.new_from_icon_name(icon_name)
-            image.add_css_class("nav-icon")
-            image.set_pixel_size(16)
-            label = Gtk.Label(label=title, xalign=0)
-            label.set_hexpand(True)
-            content.append(image)
-            content.append(label)
-            row.set_child(content)
+            if page_name not in PRIMARY_NAV_PAGES:
+                continue
+            row = self.build_nav_row(page_name, title, icon_name)
             self.nav_list.append(row)
             self.nav_rows[page_name] = row
         self.nav_list.connect("row-selected", self.on_nav_selected)
         nav.append(self.nav_list)
 
+        more = Gtk.Expander(label="More")
+        more.add_css_class("nav-more")
+        self.nav_more_expander = more
+        secondary_list = Gtk.ListBox()
+        secondary_list.add_css_class("nav-list")
+        secondary_list.set_selection_mode(Gtk.SelectionMode.SINGLE)
+        self.nav_lists.append(secondary_list)
+        for page_name, title, icon_name in NAV_ITEMS:
+            if page_name in PRIMARY_NAV_PAGES:
+                continue
+            row = self.build_nav_row(page_name, title, icon_name)
+            secondary_list.append(row)
+            self.nav_rows[page_name] = row
+        secondary_list.connect("row-selected", self.on_nav_selected)
+        more.set_child(secondary_list)
+        nav.append(more)
+
         spacer = Gtk.Box()
         spacer.set_vexpand(True)
         nav.append(spacer)
         return nav
+
+    def build_nav_row(self, page_name: str, title: str, icon_name: str) -> Gtk.ListBoxRow:
+        row = Gtk.ListBoxRow()
+        row.page_name = page_name
+        row.add_css_class("nav-row")
+        content = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        content.set_valign(Gtk.Align.CENTER)
+        image = Gtk.Image.new_from_icon_name(icon_name)
+        image.add_css_class("nav-icon")
+        image.set_pixel_size(16)
+        label = Gtk.Label(label=title, xalign=0)
+        label.set_hexpand(True)
+        content.append(image)
+        content.append(label)
+        row.set_child(content)
+        return row
 
     def on_nav_selected(self, _listbox: Gtk.ListBox, row: Gtk.ListBoxRow | None) -> None:
         if row is not None:
@@ -1671,6 +1771,7 @@ class CodexControl(Gtk.Application):
 
     def make_button(self, label: str, icon_name: str | None = None) -> Gtk.Button:
         button = Gtk.Button()
+        button.set_tooltip_text(label)
         if icon_name is None:
             button.set_label(label)
             return button
@@ -1679,11 +1780,65 @@ class CodexControl(Gtk.Application):
         image = Gtk.Image.new_from_icon_name(icon_name)
         image.set_pixel_size(15)
         text = Gtk.Label(label=label)
+        text.set_ellipsize(Pango.EllipsizeMode.END)
+        text.set_max_width_chars(16)
+        text.set_tooltip_text(label)
         button.text_label = text
         content.append(image)
         content.append(text)
         button.set_child(content)
         return button
+
+    def command_button(
+        self,
+        label: str,
+        handler: Callable[[Gtk.Button], None],
+        *,
+        primary: bool = False,
+        icon_name: str | None = None,
+        tooltip: str | None = None,
+    ) -> Gtk.Button:
+        button = self.make_button(label, icon_name)
+        button.add_css_class("primary" if primary else "secondary")
+        if tooltip:
+            button.set_tooltip_text(tooltip)
+        button.connect("clicked", handler)
+        return button
+
+    def command_grid(
+        self,
+        actions: list[tuple[str, Callable[[Gtk.Button], None], bool, str | None, str | None]],
+        *,
+        columns: int = 4,
+    ) -> Gtk.Grid:
+        grid = Gtk.Grid(column_spacing=8, row_spacing=8)
+        grid.add_css_class("command-grid")
+        grid.set_column_homogeneous(True)
+        grid.command_buttons = []
+        for index, (label, handler, primary, icon_name, tooltip) in enumerate(actions):
+            button = self.command_button(label, handler, primary=primary, icon_name=icon_name, tooltip=tooltip)
+            grid.command_buttons.append(button)
+            grid.attach(
+                button,
+                index % columns,
+                index // columns,
+                1,
+                1,
+            )
+        return grid
+
+    def flow_row(self, spacing: int = 6) -> Gtk.FlowBox:
+        flow = Gtk.FlowBox()
+        flow.add_css_class("chip-flow")
+        flow.set_selection_mode(Gtk.SelectionMode.NONE)
+        flow.set_column_spacing(spacing)
+        flow.set_row_spacing(spacing)
+        flow.set_max_children_per_line(12)
+        flow.set_homogeneous(False)
+        return flow
+
+    def flow_append(self, flow: Gtk.FlowBox, widget: Gtk.Widget) -> None:
+        flow.append(widget)
 
     def set_button_text(self, button: Gtk.Button, label: str) -> None:
         text_label = getattr(button, "text_label", None)
@@ -1691,6 +1846,21 @@ class CodexControl(Gtk.Application):
             text_label.set_text(label)
         else:
             button.set_label(label)
+
+    def apply_focus_mode(self) -> None:
+        if self.sidebar_widget is not None:
+            self.sidebar_widget.set_visible(not self.focus_mode)
+        if self.focus_button is not None:
+            self.set_button_text(self.focus_button, "Exit Focus" if self.focus_mode else "Focus")
+            self.focus_button.remove_css_class("primary")
+            self.focus_button.remove_css_class("secondary")
+            self.focus_button.add_css_class("primary" if self.focus_mode else "secondary")
+
+    def on_toggle_focus_mode(self, _button: Gtk.Button) -> None:
+        self.focus_mode = not self.focus_mode
+        self.apply_focus_mode()
+        self.save_current_state()
+        self.set_status("Focus mode enabled" if self.focus_mode else "Focus mode disabled")
 
     def install_actions(self) -> None:
         actions = [
@@ -1716,12 +1886,19 @@ class CodexControl(Gtk.Application):
             ("mesh-collect-team", lambda *_args: self.on_collect_mesh_team(Gtk.Button())),
             ("mesh-sync-bus", lambda *_args: self.on_sync_mesh_handoff_bus(Gtk.Button())),
             ("mesh-retry-bus", lambda *_args: self.on_retry_mesh_handoff_bus(Gtk.Button())),
+            ("mesh-verify-bus", lambda *_args: self.on_verify_mesh_bus_integrity(Gtk.Button())),
+            ("mesh-sync-chat", lambda *_args: self.on_sync_team_chat(Gtk.Button())),
+            ("mesh-refresh-chat", lambda *_args: self.on_refresh_team_chat(Gtk.Button())),
+            ("mesh-copy-chat", lambda *_args: self.on_copy_team_chat(Gtk.Button())),
+            ("mesh-copy-bus-report", lambda *_args: self.on_copy_mesh_team_bus_report(Gtk.Button())),
+            ("mesh-copy-role-bootstrap", lambda *_args: self.on_copy_role_bootstrap(Gtk.Button())),
             ("mesh-summary", lambda *_args: self.on_copy_mesh_team_summary(Gtk.Button())),
             ("mesh-open", lambda *_args: self.on_open_mesh_team(Gtk.Button())),
             ("show-preflight", lambda *_args: self.show_page("preflight")),
             ("show-quality", lambda *_args: self.show_page("quality")),
             ("show-runs", lambda *_args: self.show_page("runs")),
             ("show-monitor", lambda *_args: self.show_page("monitor")),
+            ("toggle-focus", lambda *_args: self.on_toggle_focus_mode(Gtk.Button())),
         ]
         for name, callback in actions:
             action = Gio.SimpleAction.new(name, None)
@@ -1736,6 +1913,7 @@ class CodexControl(Gtk.Application):
         self.set_accels_for_action("app.show-roadmap", ["<Control><Shift>M"])
         self.set_accels_for_action("app.show-orchestrate", ["<Control><Shift>O"])
         self.set_accels_for_action("app.show-mesh", ["<Control><Shift>D"])
+        self.set_accels_for_action("app.toggle-focus", ["<Control><Shift>F"])
         self.set_accels_for_action("app.focus-prompt", ["<Control>L"])
         self.set_accels_for_action("app.focus-project", ["<Control><Shift>L"])
 
@@ -1758,12 +1936,16 @@ class CodexControl(Gtk.Application):
 
         refresh = self.make_button("Refresh", "view-refresh-symbolic")
         refresh.connect("clicked", lambda _b: self.refresh_all())
+        self.focus_button = self.make_button("Focus", "view-fullscreen-symbolic")
+        self.focus_button.add_css_class("secondary")
+        self.focus_button.connect("clicked", self.on_toggle_focus_mode)
         launch = self.make_button("Run", "media-playback-start-symbolic")
         launch.add_css_class("primary")
         launch.connect("clicked", self.on_run_embedded)
         self.status_label = Gtk.Label(label="Starting...")
         self.status_label.add_css_class("status-pill")
         bar.append(refresh)
+        bar.append(self.focus_button)
         bar.append(launch)
         bar.append(self.status_label)
         return bar
@@ -1787,6 +1969,12 @@ class CodexControl(Gtk.Application):
         label.set_wrap(wrap)
         if css:
             label.add_css_class(css)
+        return label
+
+    def muted_meta_label(self, text: str) -> Gtk.Label:
+        label = self.label(text, "muted")
+        label.set_ellipsize(Pango.EllipsizeMode.MIDDLE)
+        label.set_tooltip_text(text)
         return label
 
     def make_dropdown(self, values: list[tuple[str, str]], active_id: str) -> Gtk.DropDown:
@@ -1897,6 +2085,8 @@ class CodexControl(Gtk.Application):
         execute = self.make_button("Execute", "media-playback-start-symbolic")
         execute.add_css_class("primary")
         execute.connect("clicked", self.on_execute_selected_action)
+        execute.set_sensitive(False)
+        self.palette_execute_buttons = [execute]
         clear = self.make_button("Clear", "edit-clear-symbolic")
         clear.add_css_class("secondary")
         clear.connect("clicked", self.on_clear_action_query)
@@ -1909,11 +2099,21 @@ class CodexControl(Gtk.Application):
         summary.add_css_class("action-palette")
         self.palette_summary_label = self.label("Search every major Codex Control capability.", "action-detail", wrap=True)
         summary.append(self.palette_summary_label)
-        groups = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        groups = self.flow_row()
         for group, count in action_groups():
-            groups.append(self.chip_label(f"{group} {count}", "chip"))
+            self.flow_append(groups, self.chip_label(f"{group} {count}", "chip"))
         summary.append(groups)
+        self.palette_readiness_label = self.label("Readiness: calculating actions", "action-preview-detail", wrap=True)
+        summary.append(self.palette_readiness_label)
         box.append(summary)
+
+        self.palette_next_step_banner = self.next_step_banner(
+            "Select a command",
+            "Search narrows to ready actions first; Execute runs the highlighted action.",
+            "Execute",
+            self.on_execute_selected_action,
+        )
+        box.append(self.palette_next_step_banner)
 
         paned = self.configure_paned(Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL), "palette", 540)
 
@@ -1932,10 +2132,12 @@ class CodexControl(Gtk.Application):
         self.palette_action_title_label = self.label("No action selected", "action-title", wrap=True)
         self.palette_action_group_label = self.chip_label("idle", "chip")
         self.palette_action_detail_label = self.label("Search or select an action.", "action-detail", wrap=True)
-        detail_header = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        detail_header = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
         self.palette_action_title_label.set_hexpand(True)
         detail_header.append(self.palette_action_title_label)
-        detail_header.append(self.palette_action_group_label)
+        action_chip_flow = self.flow_row()
+        self.flow_append(action_chip_flow, self.palette_action_group_label)
+        detail_header.append(action_chip_flow)
         detail.append(detail_header)
         detail.append(self.palette_action_detail_label)
         detail.append(self.label("Action ID", "section"))
@@ -1943,22 +2145,29 @@ class CodexControl(Gtk.Application):
         detail.append(self.palette_action_id_label)
         preview = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
         preview.add_css_class("action-preview")
-        preview_header = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        preview_header = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
         self.palette_preview_title_label = self.label("Would Run", "action-preview-title", wrap=True)
         self.palette_preview_title_label.set_hexpand(True)
         self.palette_preview_status_label = self.chip_label("ready", "chip")
         self.palette_preview_surface_label = self.chip_label("surface", "chip")
         self.palette_preview_risk_label = self.chip_label("risk", "chip")
         preview_header.append(self.palette_preview_title_label)
-        preview_header.append(self.palette_preview_status_label)
-        preview_header.append(self.palette_preview_surface_label)
-        preview_header.append(self.palette_preview_risk_label)
+        preview_chip_flow = self.flow_row()
+        self.flow_append(preview_chip_flow, self.palette_preview_status_label)
+        self.flow_append(preview_chip_flow, self.palette_preview_surface_label)
+        self.flow_append(preview_chip_flow, self.palette_preview_risk_label)
+        preview_header.append(preview_chip_flow)
         preview.append(preview_header)
         self.palette_preview_summary_label = self.label("Select an action to preview its effect.", "action-preview-detail", wrap=True)
+        self.palette_preview_decision_label = self.label("Decision: select an action", "next-step-detail", wrap=True)
         self.palette_preview_requirements_label = self.label("Ready", "action-preview-detail", wrap=True)
         self.palette_preview_command_label = self.label("-", "action-preview-command", wrap=True)
+        self.palette_preview_command_label.set_lines(4)
+        self.palette_preview_command_label.set_ellipsize(Pango.EllipsizeMode.MIDDLE)
         preview.append(self.palette_preview_summary_label)
+        preview.append(self.palette_preview_decision_label)
         preview.append(self.palette_preview_requirements_label)
+        preview.append(self.label("Command Preview", "section"))
         preview.append(self.palette_preview_command_label)
         detail.append(preview)
         feedback = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
@@ -1971,14 +2180,16 @@ class CodexControl(Gtk.Application):
         detail.append(feedback)
         history = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
         history.add_css_class("action-history")
-        history_header = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        history_header = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
         self.palette_history_title_label = self.label("Last Result", "action-history-title", wrap=True)
         self.palette_history_title_label.set_hexpand(True)
         self.palette_history_status_label = self.chip_label("none", "chip")
         self.palette_history_time_label = self.chip_label("never", "chip")
         history_header.append(self.palette_history_title_label)
-        history_header.append(self.palette_history_status_label)
-        history_header.append(self.palette_history_time_label)
+        history_chip_flow = self.flow_row()
+        self.flow_append(history_chip_flow, self.palette_history_status_label)
+        self.flow_append(history_chip_flow, self.palette_history_time_label)
+        history_header.append(history_chip_flow)
         history.append(history_header)
         self.palette_history_detail_label = self.label("No action history yet.", "action-history-detail", wrap=True)
         self.palette_history_command_label = self.label("-", "action-history-command", wrap=True)
@@ -1990,9 +2201,12 @@ class CodexControl(Gtk.Application):
             ("Copy", self.on_copy_palette_history, False),
             ("Open Log", self.on_open_palette_history, False),
         ]:
-            button = Gtk.Button(label=label)
-            button.add_css_class("primary" if primary else "secondary")
-            button.connect("clicked", handler)
+            button = self.command_button(
+                label,
+                handler,
+                primary=primary,
+                icon_name="media-playback-start-symbolic" if label == "Rerun" else "edit-copy-symbolic" if label == "Copy" else "document-open-symbolic",
+            )
             history_controls.append(button)
         history.append(history_controls)
         detail.append(history)
@@ -2175,28 +2389,43 @@ class CodexControl(Gtk.Application):
     def build_quality_page(self) -> Gtk.Widget:
         box = self.page_box()
         toolbar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-        for label, handler, primary in [
-            ("Run Gate", self.on_run_quality_gate, True),
-            ("Copy Report", self.on_copy_quality_report, False),
-            ("Refresh Plan", self.on_refresh_quality_gate, False),
+        for label, handler, primary, icon_name, tooltip in [
+            ("Run Gate", self.on_run_quality_gate, True, "media-playback-start-symbolic", "Run the current quality checks."),
+            ("Copy Report", self.on_copy_quality_report, False, "edit-copy-symbolic", "Copy the latest quality report."),
+            ("Refresh Plan", self.on_refresh_quality_gate, False, "view-refresh-symbolic", "Rebuild the quality plan."),
         ]:
-            button = Gtk.Button(label=label)
-            button.add_css_class("primary" if primary else "secondary")
-            button.connect("clicked", handler)
+            button = self.command_button(label, handler, primary=primary, icon_name=icon_name, tooltip=tooltip)
             toolbar.append(button)
         box.append(toolbar)
 
         summary = self.panel("Quality Gate")
         summary.add_css_class("quality-gate")
-        header = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        header = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
         self.quality_page_summary_label = self.label("No quality report yet", "quality-title", wrap=True)
         self.quality_page_summary_label.set_hexpand(True)
         self.quality_page_score_label = self.chip_label("not run", "chip")
         self.quality_page_status_label = self.chip_label("idle", "chip")
+        self.quality_page_pass_label = self.chip_label("0 pass", "chip")
+        self.quality_page_fail_label = self.chip_label("0 fail", "chip")
         header.append(self.quality_page_summary_label)
-        header.append(self.quality_page_score_label)
-        header.append(self.quality_page_status_label)
+        quality_chip_flow = self.flow_row()
+        self.flow_append(quality_chip_flow, self.quality_page_score_label)
+        self.flow_append(quality_chip_flow, self.quality_page_status_label)
+        self.flow_append(quality_chip_flow, self.quality_page_pass_label)
+        self.flow_append(quality_chip_flow, self.quality_page_fail_label)
+        header.append(quality_chip_flow)
         summary.append(header)
+        self.quality_page_detail_label = self.label("Plan is ready. Run Gate to create a report.", "quality-check-detail", wrap=True)
+        summary.append(self.quality_page_detail_label)
+        self.quality_page_artifact_label = self.label("Artifact: plan preview", "action-preview-detail", wrap=True)
+        summary.append(self.quality_page_artifact_label)
+        self.quality_next_step_banner = self.next_step_banner(
+            "Run the gate",
+            "The current plan is ready; run checks before handing this workstation state to another lane.",
+            "Run Gate",
+            self.on_run_quality_gate,
+        )
+        summary.append(self.quality_next_step_banner)
         box.append(summary)
 
         paned = self.configure_paned(Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL), "quality", 470)
@@ -2627,6 +2856,7 @@ class CodexControl(Gtk.Application):
         self.personality_combo = self.make_dropdown(PERSONALITIES, self.config.get("personality", "config"))
         self.action_combo = self.make_dropdown(ACTIONS, self.config.get("action", "interactive"))
 
+        outer.append(self.build_power_banner())
         outer.append(self.build_operator_console())
         outer.append(self.build_mission_panel())
         outer.append(self.build_mission_architect_panel())
@@ -2652,6 +2882,7 @@ class CodexControl(Gtk.Application):
     def build_operator_console(self) -> Gtk.Widget:
         panel = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=14)
         panel.add_css_class("operator-console")
+        panel.add_css_class("launch-cockpit")
 
         header = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
         copy = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=3)
@@ -2687,19 +2918,50 @@ class CodexControl(Gtk.Application):
             self.operator_signal_cards.append(card)
         panel.append(grid)
 
-        action_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-        for label, icon_name, handler, primary in [
-            ("Run Max", "media-playback-start-symbolic", self.on_run_embedded, True),
-            ("Prepare Auto", "document-new-symbolic", self.on_prepare_autopilot, False),
-            ("Track Auto", "view-refresh-symbolic", self.on_track_autopilot, False),
-            ("Review", "edit-find-symbolic", lambda button: self.on_run_action_button(button, "review"), False),
-            ("Preflight", "checkbox-checked-symbolic", self.on_show_preflight, False),
-        ]:
-            button = self.make_button(label, icon_name)
-            button.add_css_class("primary" if primary else "secondary")
-            button.connect("clicked", handler)
-            action_row.append(button)
-        panel.append(action_row)
+        workflow = Gtk.FlowBox()
+        workflow.add_css_class("workflow-strip")
+        workflow.set_selection_mode(Gtk.SelectionMode.NONE)
+        workflow.set_max_children_per_line(4)
+        workflow.set_min_children_per_line(2)
+        workflow.set_row_spacing(8)
+        workflow.set_column_spacing(8)
+        workflow.set_homogeneous(True)
+        self.operator_workflow_labels: dict[str, tuple[Gtk.Label, Gtk.Label, Gtk.Label]] = {}
+        self.operator_workflow_cards: dict[str, Gtk.Box] = {}
+        for stage_key in ("project", "readiness", "autopilot", "ledger"):
+            card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+            card.add_css_class("workflow-stage")
+            title = self.label(stage_key.capitalize(), "workflow-stage-title")
+            value = self.label("checking", "workflow-stage-value")
+            detail = self.label("", "workflow-stage-detail", wrap=True)
+            value.set_wrap(True)
+            detail.set_wrap(True)
+            card.append(title)
+            card.append(value)
+            card.append(detail)
+            workflow.insert(card, -1)
+            self.operator_workflow_labels[stage_key] = (title, value, detail)
+            self.operator_workflow_cards[stage_key] = card
+        panel.append(workflow)
+
+        self.operator_next_step_banner = self.next_step_banner(
+            "Next step",
+            "Review readiness, then launch the selected Codex run path.",
+            "Run Max",
+            self.on_run_embedded,
+        )
+        panel.append(self.operator_next_step_banner)
+
+        action_grid = self.command_grid([
+            ("Run Max", self.on_run_embedded, True, "media-playback-start-symbolic", "Launch the selected prompt in the embedded terminal."),
+            ("Prepare Auto", self.on_prepare_autopilot, False, "document-new-symbolic", "Build a durable autopilot package from the current mission."),
+            ("Track Auto", self.on_track_autopilot, False, "view-refresh-symbolic", "Refresh and inspect the latest autopilot package."),
+            ("Review", lambda button: self.on_run_action_button(button, "review"), False, "edit-find-symbolic", "Run Codex review for the current project."),
+            ("Preflight", self.on_show_preflight, False, "checkbox-checked-symbolic", "Open launch readiness details."),
+            ("Save Session", self.on_save_workspace_session, False, "document-save-symbolic", "Store the current project and prompt as a reusable session."),
+        ], columns=3)
+        action_grid.add_css_class("launch-hero-actions")
+        panel.append(action_grid)
         self.render_operator_brief()
         return panel
 
@@ -2741,29 +3003,35 @@ class CodexControl(Gtk.Application):
         top_row.append(browse)
         command_bar.append(top_row)
 
-        action_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-        max_power = Gtk.Button(label="Max Power")
-        max_power.add_css_class("accent")
-        max_power.connect("clicked", self.on_fast_profile, "interactive", "maximum-power")
-        action_row.append(max_power)
-        for label, action, primary in [
-            ("Start", "interactive", True),
-            ("Review", "review", False),
-            ("Resume", "resume", False),
-            ("Exec", "exec", False),
+        self.mission_focus_flow = self.flow_row()
+        self.mission_project_chip = self.chip_label("project pending", "chip")
+        self.mission_mode_chip = self.chip_label("mode pending", "mode-pill")
+        self.mission_validation_chip = self.chip_label("validation pending", "chip")
+        self.mission_thread_chip = self.chip_label("threads pending", "chip")
+        for chip in [
+            self.mission_project_chip,
+            self.mission_mode_chip,
+            self.mission_validation_chip,
+            self.mission_thread_chip,
         ]:
-            button = Gtk.Button(label=label)
-            if primary:
-                button.add_css_class("primary")
-            else:
-                button.add_css_class("secondary")
-            button.connect("clicked", self.on_run_action_button, action)
-            action_row.append(button)
-        detach = Gtk.Button(label="Detach")
-        detach.add_css_class("secondary")
-        detach.connect("clicked", self.on_run_external)
-        action_row.append(detach)
-        command_bar.append(action_row)
+            self.flow_append(self.mission_focus_flow, chip)
+        command_bar.append(self.mission_focus_flow)
+
+        self.mission_path_label = self.label("Project path will appear here.", "muted", wrap=True)
+        self.mission_path_label.set_ellipsize(Pango.EllipsizeMode.START)
+        self.mission_validation_label = self.label("Validation and thread guidance will update with project scans.", "muted", wrap=True)
+        command_bar.append(self.mission_path_label)
+        command_bar.append(self.mission_validation_label)
+
+        action_grid = self.command_grid([
+            ("Run", lambda button: self.on_run_action_button(button, "interactive"), True, "media-playback-start-symbolic", "Start an interactive Codex session in the selected project."),
+            ("Exec", lambda button: self.on_run_action_button(button, "exec"), False, "system-run-symbolic", "Run a one-shot Codex execution."),
+            ("Review", lambda button: self.on_run_action_button(button, "review"), False, "edit-find-symbolic", "Review the current project."),
+            ("Resume", lambda button: self.on_run_action_button(button, "resume"), False, "view-refresh-symbolic", "Resume the most recent thread."),
+            ("Detach", self.on_run_external, False, "utilities-terminal-symbolic", "Launch the same run in an external terminal."),
+            ("Max Power", lambda button: self.on_fast_profile(button, "interactive", "maximum-power"), False, "flashlight-symbolic", "Apply the maximum-power profile and launch."),
+        ], columns=3)
+        command_bar.append(action_grid)
         return command_bar
 
     def build_preflight_panel(self) -> Gtk.Widget:
@@ -2833,7 +3101,7 @@ class CodexControl(Gtk.Application):
         terminal_panel = self.panel()
         terminal_panel.add_css_class("terminal-panel")
         terminal_panel.set_vexpand(True)
-        terminal_panel.set_size_request(-1, 340)
+        terminal_panel.set_size_request(-1, 400)
         header = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
         title = self.label("Terminal", "section")
         self.terminal_cwd_label = self.label(self.selected_project(), "muted")
@@ -2858,15 +3126,34 @@ class CodexControl(Gtk.Application):
     def build_composer_panel(self) -> Gtk.Widget:
         composer = self.panel("Ask Codex")
         composer.add_css_class("composer")
-        button_grid = Gtk.Grid(column_spacing=8, row_spacing=8)
-        for index, (name, prompt) in enumerate(PROMPTS.items()):
+        primary_template_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        for name in ("Best", "Build", "Fix"):
+            prompt = PROMPTS[name]
             button = Gtk.Button(label=name)
             button.add_css_class("secondary")
             if name == "Best":
                 button.add_css_class("accent")
             button.connect("clicked", self.on_prompt_template, prompt, name)
+            primary_template_row.append(button)
+        composer.append(primary_template_row)
+
+        self.composer_summary_label = self.label("Prompt summary updating", "muted", wrap=True)
+        composer.append(self.composer_summary_label)
+
+        template_expander = Gtk.Expander(label="Prompt templates")
+        button_grid = Gtk.Grid(column_spacing=8, row_spacing=8)
+        secondary_prompts = [
+            (name, prompt)
+            for name, prompt in PROMPTS.items()
+            if name not in {"Best", "Build", "Fix"}
+        ]
+        for index, (name, prompt) in enumerate(secondary_prompts):
+            button = Gtk.Button(label=name)
+            button.add_css_class("secondary")
+            button.connect("clicked", self.on_prompt_template, prompt, name)
             button_grid.attach(button, index % 4, index // 4, 1, 1)
-        composer.append(button_grid)
+        template_expander.set_child(button_grid)
+        composer.append(template_expander)
 
         self.prompt_view = Gtk.TextView()
         self.prompt_view.add_css_class("composer-view")
@@ -2887,6 +3174,19 @@ class CodexControl(Gtk.Application):
         for label, handler, primary in [
             ("Run Max", self.on_run_embedded, True),
             ("Enhance", self.on_enhance_prompt, False),
+        ]:
+            button = Gtk.Button(label=label)
+            if primary:
+                button.add_css_class("primary")
+            else:
+                button.add_css_class("secondary")
+            button.connect("clicked", handler)
+            button_row.append(button)
+        composer.append(button_row)
+
+        run_options = Gtk.Expander(label="Run options")
+        option_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        for label, handler, primary in [
             ("AI Enhance", self.on_ai_enhance_prompt, False),
             ("Detach", self.on_run_external, False),
             ("Exec JSON", self.on_run_headless, False),
@@ -2898,8 +3198,9 @@ class CodexControl(Gtk.Application):
             else:
                 button.add_css_class("secondary")
             button.connect("clicked", handler)
-            button_row.append(button)
-        composer.append(button_row)
+            option_row.append(button)
+        run_options.set_child(option_row)
+        composer.append(run_options)
         return composer
 
     def build_control_rail(self) -> Gtk.Widget:
@@ -2907,21 +3208,21 @@ class CodexControl(Gtk.Application):
         rail.add_css_class("side-rail")
         rail.set_size_request(self.layout_state.rail_width - 20, -1)
         rail.append(self.build_session_workspace_panel())
+        rail.append(self.build_project_intelligence_panel())
+        rail.append(self.build_command_preview_panel())
+        rail.append(self.build_quality_gate_panel())
+        rail.append(self.build_autopilot_panel())
         rail.append(self.build_launch_package_panel())
         rail.append(self.build_roadmap_panel())
         rail.append(self.build_context_packet_panel())
         rail.append(self.build_palette_panel())
-        rail.append(self.build_quality_gate_panel())
-        rail.append(self.build_autopilot_panel())
         rail.append(self.build_command_ledger_panel())
         rail.append(self.build_receipt_vault_panel())
         rail.append(self.build_agent_studio_panel())
         rail.append(self.build_agent_results_panel())
-        rail.append(self.build_project_intelligence_panel())
         rail.append(self.build_prompt_choices_panel())
         rail.append(self.build_power_controls_panel())
         rail.append(self.build_quick_launch_panel())
-        rail.append(self.build_command_preview_panel())
         scroll = Gtk.ScrolledWindow()
         scroll.set_size_request(self.layout_state.rail_width, -1)
         scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
@@ -2937,14 +3238,17 @@ class CodexControl(Gtk.Application):
         panel.append(self.palette_compact_entry)
 
         controls = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-        for label, handler, primary in [
-            ("Run", self.on_execute_selected_action, True),
-            ("Open", lambda button: self.show_palette(), False),
-            ("Clear", self.on_clear_action_query, False),
+        for label, handler, primary, icon_name in [
+            ("Run", self.on_execute_selected_action, True, "media-playback-start-symbolic"),
+            ("Open", lambda button: self.show_palette(), False, "document-open-symbolic"),
+            ("Clear", self.on_clear_action_query, False, "edit-clear-symbolic"),
         ]:
-            button = Gtk.Button(label=label)
-            button.add_css_class("primary" if primary else "secondary")
-            button.connect("clicked", handler)
+            button = self.command_button(label, handler, primary=primary, icon_name=icon_name)
+            if label == "Run":
+                button.set_sensitive(False)
+                buttons = getattr(self, "palette_execute_buttons", [])
+                buttons.append(button)
+                self.palette_execute_buttons = buttons
             controls.append(button)
         panel.append(controls)
         self.palette_compact_preview_label = self.label("Preview: select an action", "action-preview-detail", wrap=True)
@@ -3094,6 +3398,8 @@ class CodexControl(Gtk.Application):
         panel.add_css_class("quality-gate")
         self.quality_status_label = self.label("No quality report yet", "muted", wrap=True)
         panel.append(self.quality_status_label)
+        self.quality_signal_label = self.label("Plan ready", "quality-check-detail", wrap=True)
+        panel.append(self.quality_signal_label)
 
         controls = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
         for label, handler, primary in [
@@ -3462,7 +3768,58 @@ class CodexControl(Gtk.Application):
     def chip_label(self, text: str, css: str = "chip") -> Gtk.Label:
         label = Gtk.Label(label=text)
         label.add_css_class(css)
+        label.set_ellipsize(Pango.EllipsizeMode.END)
+        label.set_max_width_chars(24)
+        label.set_tooltip_text(text)
         return label
+
+    def next_step_banner(
+        self,
+        title: str,
+        detail: str,
+        action_label: str,
+        handler: Callable[[Gtk.Button], None],
+    ) -> Gtk.Box:
+        banner = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        banner.add_css_class("next-step-banner")
+        copy = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=3)
+        copy.set_hexpand(True)
+        title_label = self.label(title, "next-step-title", wrap=True)
+        detail_label = self.label(detail, "next-step-detail", wrap=True)
+        copy.append(title_label)
+        copy.append(detail_label)
+        button = self.make_button(action_label, "go-next-symbolic")
+        button.add_css_class("primary")
+        button.connect("clicked", handler)
+        banner.append(copy)
+        banner.append(button)
+        banner.title_label = title_label
+        banner.detail_label = detail_label
+        banner.action_button = button
+        return banner
+
+    def update_next_step_banner(
+        self,
+        banner: Gtk.Widget,
+        title: str,
+        detail: str,
+        action_label: str | None = None,
+        enabled: bool = True,
+    ) -> None:
+        title_label = getattr(banner, "title_label", None)
+        detail_label = getattr(banner, "detail_label", None)
+        action_button = getattr(banner, "action_button", None)
+        if title_label is not None:
+            title_label.set_text(title)
+            title_label.set_tooltip_text(title)
+        if detail_label is not None:
+            detail_label.set_text(detail)
+            detail_label.set_tooltip_text(detail)
+        if action_button is not None:
+            if action_label is not None:
+                self.set_button_text(action_button, action_label)
+            action_button.set_sensitive(enabled)
+            action_button.set_tooltip_text("" if enabled else detail)
 
     def build_terminal_widget(self) -> Gtk.Widget:
         if Vte is None:
@@ -3487,36 +3844,57 @@ class CodexControl(Gtk.Application):
 
         summary = self.panel()
         summary.add_css_class("mesh-summary")
+        initial_readiness = mesh_readiness_report(self.devices, self.mesh_probe_records)
+        initial_operator = self.current_team_operator_summary()
         top = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
         title_col = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=3)
         title_col.set_hexpand(True)
         title_col.append(self.label("Device Mesh", "operator-title"))
-        self.mesh_summary_label = self.label(mesh_state(self.devices, self.memory_items).summary(), "muted", wrap=True)
+        self.mesh_summary_label = self.label(f"{initial_readiness.summary} | {len(self.memory_items)} memory item(s)", "muted", wrap=True)
         title_col.append(self.mesh_summary_label)
         top.append(title_col)
         self.mesh_device_count_label = self.chip_label("0 devices", "chip")
         self.mesh_memory_count_label = self.chip_label("0 memories", "chip")
         self.mesh_selected_label = self.chip_label("none selected", "chip")
-        for chip in [self.mesh_device_count_label, self.mesh_memory_count_label, self.mesh_selected_label]:
-            top.append(chip)
-        summary.append(top)
-        actions = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-        for label, handler, primary in [
-            ("Refresh", self.on_refresh_mesh, False),
-            ("Discover Tailnet", self.on_discover_tailnet, True),
-            ("Check Fleet", self.on_check_fleet, False),
-            ("Prepare Team", self.on_prepare_mesh_team, True),
-            ("Launch Team", self.on_launch_mesh_team, False),
-            ("Collect Team", self.on_collect_mesh_team, False),
-            ("Save Memory", self.on_save_memory, True),
-            ("Copy Memory", self.on_copy_memory, False),
-            ("Open Memory", self.on_open_memory, False),
-            ("Open Devices", self.on_open_devices, False),
+        self.mesh_ready_count_label = self.chip_label(
+            f"{initial_readiness.ready_count} ready",
+            "chip-strong" if initial_readiness.ready_count else "chip",
+        )
+        self.mesh_lane_count_label = self.chip_label(
+            initial_operator.lane_text,
+            self.chip_css_for_status(initial_operator.status),
+        )
+        self.mesh_bus_health_label = self.chip_label(
+            initial_operator.bus_text,
+            self.chip_css_for_status(initial_operator.status),
+        )
+        self.mesh_next_action_label = self.chip_label(f"Next: {initial_operator.next_action}", "mode-pill")
+        chip_flow = self.flow_row()
+        for chip in [
+            self.mesh_device_count_label,
+            self.mesh_memory_count_label,
+            self.mesh_selected_label,
+            self.mesh_ready_count_label,
+            self.mesh_lane_count_label,
+            self.mesh_bus_health_label,
+            self.mesh_next_action_label,
         ]:
-            button = Gtk.Button(label=label)
-            button.add_css_class("primary" if primary else "secondary")
-            button.connect("clicked", handler)
-            actions.append(button)
+            self.flow_append(chip_flow, chip)
+        top.append(chip_flow)
+        summary.append(top)
+        actions = self.command_grid([
+            ("Refresh", self.on_refresh_mesh, False, "view-refresh-symbolic", "Refresh mesh state."),
+            ("Discover", self.on_discover_tailnet, True, "network-workgroup-symbolic", "Import Tailnet devices."),
+            ("Check Fleet", self.on_check_fleet, False, "emblem-ok-symbolic", "Probe trusted devices."),
+            ("Prepare", self.on_prepare_mesh_team, True, "document-new-symbolic", "Create team lanes and prompts."),
+            ("Launch", self.on_launch_mesh_team, False, "media-playback-start-symbolic", "Launch prepared team lanes."),
+            ("Collect", self.on_collect_mesh_team, False, "folder-download-symbolic", "Collect remote lane outputs."),
+            ("Save Memory", self.on_save_memory, True, "document-save-symbolic", "Persist portable memory."),
+            ("Copy Memory", self.on_copy_memory, False, "edit-copy-symbolic", "Copy portable memory."),
+            ("Open Memory", self.on_open_memory, False, "folder-open-symbolic", "Open memory file."),
+            ("Open Devices", self.on_open_devices, False, "document-open-symbolic", "Open devices file."),
+        ], columns=5)
+        actions.add_css_class("mesh-summary-actions")
         summary.append(actions)
         box.append(summary)
 
@@ -3550,18 +3928,24 @@ class CodexControl(Gtk.Application):
         ]:
             form.append(self.form_row(label, widget))
         device_buttons = Gtk.Grid(column_spacing=8, row_spacing=8)
-        for index, (label, handler, primary) in enumerate([
-            ("New", self.on_new_device_form, False),
-            ("Add/Update", self.on_add_device, True),
-            ("Remove", self.on_remove_device, False),
-            ("Copy Test", self.on_copy_device_test, False),
-            ("Copy Launch", self.on_copy_device_launch, False),
-            ("Sync Memory", self.on_sync_memory_to_device, False),
-            ("Open Session", self.on_open_device_session, False),
+        device_buttons.add_css_class("command-grid")
+        device_buttons.set_column_homogeneous(True)
+        self.mesh_selected_device_buttons: list[Gtk.Button] = []
+        for index, (label, handler, primary, icon_name, tooltip) in enumerate([
+            ("New", self.on_new_device_form, False, "list-add-symbolic", "Clear the device form."),
+            ("Add/Update", self.on_add_device, True, "document-save-symbolic", "Save this device record."),
+            ("Remove", self.on_remove_device, False, "edit-delete-symbolic", "Remove the selected device."),
+            ("Check", self.on_check_selected_device, True, "emblem-ok-symbolic", "Probe the selected device."),
+            ("Check Visible", self.on_check_visible_devices, True, "view-list-symbolic", "Probe devices matching current filters."),
+            ("Copy Test", self.on_copy_device_test, False, "edit-copy-symbolic", "Copy the selected device test command."),
+            ("Copy Launch", self.on_copy_device_launch, False, "utilities-terminal-symbolic", "Copy the selected device launch command."),
+            ("Sync Memory", self.on_sync_memory_to_device, False, "send-to-symbolic", "Push portable memory to the selected device."),
+            ("Open Session", self.on_open_device_session, False, "utilities-terminal-symbolic", "Open a terminal session for the selected device."),
         ]):
-            button = Gtk.Button(label=label)
-            button.add_css_class("primary" if primary else "secondary")
-            button.connect("clicked", handler)
+            button = self.command_button(label, handler, primary=primary, icon_name=icon_name, tooltip=tooltip)
+            if label in {"Remove", "Check", "Copy Test", "Copy Launch", "Sync Memory", "Open Session"}:
+                button.set_tooltip_text("Select a device first.")
+                self.mesh_selected_device_buttons.append(button)
             device_buttons.attach(button, index % 3, index // 3, 1, 1)
         form.append(device_buttons)
         left.append(form)
@@ -3571,6 +3955,21 @@ class CodexControl(Gtk.Application):
         self.device_list.add_css_class("device-list")
         self.device_list.set_selection_mode(Gtk.SelectionMode.SINGLE)
         self.device_list.connect("row-selected", self.on_device_selected)
+        self.mesh_filter_buttons: dict[str, Gtk.ToggleButton] = {}
+        filter_bar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        for filter_key, filter_label in MESH_FILTER_OPTIONS:
+            button = Gtk.ToggleButton(label=f"{filter_label} 0")
+            button.set_active(filter_key == self.mesh_filter_mode)
+            button.connect("toggled", self.on_mesh_filter_toggled, filter_key)
+            self.mesh_filter_buttons[filter_key] = button
+            filter_bar.append(button)
+        self.mesh_team_only_toggle = Gtk.ToggleButton(label="Team-only")
+        self.mesh_team_only_toggle.set_active(self.mesh_team_only)
+        self.mesh_team_only_toggle.connect("toggled", self.on_mesh_team_only_toggled)
+        filter_bar.append(self.mesh_team_only_toggle)
+        self.refresh_mesh_filter_bar(mesh_readiness_report(self.devices, self.mesh_probe_records))
+        devices_panel.append(filter_bar)
+
         device_scroll = Gtk.ScrolledWindow()
         device_scroll.set_min_content_width(360)
         device_scroll.set_vexpand(True)
@@ -3594,23 +3993,154 @@ class CodexControl(Gtk.Application):
         team.add_css_class("team-panel")
         self.mesh_team_status_label = self.label("No team package yet", "muted", wrap=True)
         team.append(self.mesh_team_status_label)
-        team_buttons = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-        for label, handler, primary in [
-            ("Check", self.on_check_fleet, False),
-            ("Latest", self.on_load_latest_mesh_team, False),
-            ("Prepare", self.on_prepare_mesh_team, True),
-            ("Launch", self.on_launch_mesh_team, False),
-            ("Collect", self.on_collect_mesh_team, False),
-            ("Bus", self.on_sync_mesh_handoff_bus, False),
-            ("Retry Bus", self.on_retry_mesh_handoff_bus, False),
-            ("Summary", self.on_copy_mesh_team_summary, False),
-            ("Open", self.on_open_mesh_team, False),
+        self.mesh_next_step_banner = self.next_step_banner(
+            "Probe the fleet",
+            "Run Check Fleet to confirm which trusted devices can accept Codex lanes.",
+            "Check Fleet",
+            self.on_check_fleet,
+        )
+        team.append(self.mesh_next_step_banner)
+        launch_console = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        launch_console.add_css_class("workflow-panel")
+        launch_header = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        launch_header.append(self.label("Launch Console", "section"))
+        self.mesh_launch_console_status_label = self.label("No team staged", "muted", wrap=True)
+        self.mesh_launch_console_meta_label = self.label("0 lanes", "muted", wrap=True)
+        self.mesh_launch_console_prompt_label = self.label("Mission preview unavailable", "muted", wrap=True)
+        self.mesh_launch_console_decision_label = self.label("Decision: check fleet before launch", "next-step-detail", wrap=True)
+        self.mesh_launch_blocker_timeline_label = self.label("Blocker timeline: none yet", "muted", wrap=True)
+        launch_header.append(self.mesh_launch_console_status_label)
+        launch_header.append(self.mesh_launch_console_meta_label)
+        self.mesh_launch_console_focus_label = self.label("Focus: all", "muted")
+        launch_header.append(self.mesh_launch_console_focus_label)
+        launch_header.append(self.mesh_launch_console_prompt_label)
+        launch_header.append(self.mesh_launch_console_decision_label)
+        launch_header.append(self.mesh_launch_blocker_timeline_label)
+        self.mesh_launch_pulse_label = self.label("Fleet pulse: readying status...", "muted", wrap=True)
+        launch_header.append(self.mesh_launch_pulse_label)
+        pulse_flow = self.flow_row()
+        self.mesh_launch_pulse_ready_chip = self.make_button("0/0 ready")
+        self.mesh_launch_pulse_ready_chip.connect("clicked", self.on_mesh_launch_pulse_focus_ready)
+        self.mesh_launch_pulse_ready_chip.add_css_class("chip")
+        self.mesh_launch_pulse_ready_chip.set_tooltip_text("Show all lanes.")
+        self.mesh_launch_pulse_blocked_chip = self.make_button("0 blocked")
+        self.mesh_launch_pulse_blocked_chip.connect("clicked", self.on_mesh_launch_pulse_focus_blocked)
+        self.mesh_launch_pulse_blocked_chip.add_css_class("chip")
+        self.mesh_launch_pulse_blocked_chip.set_tooltip_text("Show blocked / unready lanes.")
+        self.mesh_launch_pulse_review_chip = self.make_button("0 review")
+        self.mesh_launch_pulse_review_chip.connect("clicked", self.on_mesh_launch_pulse_focus_review)
+        self.mesh_launch_pulse_review_chip.add_css_class("chip")
+        self.mesh_launch_pulse_review_chip.set_tooltip_text("Show review-required lanes.")
+        self.mesh_launch_pulse_offline_chip = self.make_button("0 offline")
+        self.mesh_launch_pulse_offline_chip.connect("clicked", self.on_mesh_launch_pulse_focus_offline)
+        self.mesh_launch_pulse_offline_chip.add_css_class("chip")
+        self.mesh_launch_pulse_offline_chip.set_tooltip_text("Show offline lanes.")
+        self._apply_mesh_launch_console_focus_filter_style()
+        for chip in [
+            self.mesh_launch_pulse_ready_chip,
+            self.mesh_launch_pulse_blocked_chip,
+            self.mesh_launch_pulse_review_chip,
+            self.mesh_launch_pulse_offline_chip,
         ]:
-            button = Gtk.Button(label=label)
-            button.add_css_class("primary" if primary else "secondary")
-            button.connect("clicked", handler)
-            team_buttons.append(button)
-        team.append(team_buttons)
+            self.flow_append(pulse_flow, chip)
+        launch_header.append(pulse_flow)
+        launch_filters = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        cycle_focus_button = self.command_button(
+            "Cycle Focus",
+            self.on_cycle_mesh_launch_focus,
+            icon_name="view-refresh-symbolic",
+            tooltip="Cycle through launch focus filters: all, blocked, review, offline.",
+        )
+        launch_filters.append(cycle_focus_button)
+        self.mesh_launch_console_blocked_only_toggle = Gtk.ToggleButton(label="Blocked only")
+        self.mesh_launch_console_blocked_only_toggle.set_active(self.mesh_launch_console_blocked_only)
+        self.mesh_launch_console_blocked_only_toggle.connect(
+            "toggled",
+            self.on_launch_console_blocked_only_toggled,
+        )
+        launch_filters.append(self.mesh_launch_console_blocked_only_toggle)
+        recheck_blocked_button = self.command_button(
+            "Recheck Blocked",
+            self.on_recheck_launch_blocked_lanes,
+            icon_name="view-refresh-symbolic",
+            tooltip="Recheck only lanes that are blocked / not ready.",
+        )
+        launch_filters.append(recheck_blocked_button)
+        launch_header.append(launch_filters)
+        launch_console.append(launch_header)
+        self.mesh_launch_stage_chips: dict[str, Gtk.Label] = {}
+        stage_flow = self.flow_row()
+        for stage_key, stage_label in [
+            ("check", "1 Check"),
+            ("prepare", "2 Prepare"),
+            ("sync", "3 Sync"),
+            ("launch", "4 Launch"),
+            ("collect", "5 Collect"),
+            ("review", "6 Review"),
+        ]:
+            chip = self.chip_label(stage_label, "chip")
+            self.mesh_launch_stage_chips[stage_key] = chip
+            self.flow_append(stage_flow, chip)
+        launch_console.append(stage_flow)
+        self.mesh_launch_console_list = Gtk.ListBox()
+        self.mesh_launch_console_list.add_css_class("team-list")
+        launch_scroll = Gtk.ScrolledWindow()
+        launch_scroll.set_min_content_height(145)
+        launch_scroll.set_size_request(-1, 165)
+        launch_scroll.set_vexpand(False)
+        launch_scroll.set_child(self.mesh_launch_console_list)
+        launch_console.append(launch_scroll)
+        console_buttons = self.command_grid([
+            ("Prepare", self.on_prepare_mesh_team, True, "document-new-symbolic", "Create lanes for all ready trusted devices."),
+            ("Sync", self.on_sync_mesh_handoff_bus, False, "send-to-symbolic", "Sync the handoff bus for the active team."),
+            ("Launch", self.on_launch_mesh_team, False, "media-playback-start-symbolic", "Launch prepared team lanes."),
+            ("Collect", self.on_collect_mesh_team, False, "folder-download-symbolic", "Collect lane outputs."),
+            ("Review", self.on_review_mesh_team_summary, False, "emblem-ok-symbolic", "Mark the team summary as reviewed."),
+        ], columns=5)
+        self.mesh_launch_console_buttons = getattr(console_buttons, "command_buttons", [])[1:]
+        launch_console.append(console_buttons)
+        team.append(launch_console)
+        team_actions = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        team_actions.add_css_class("workflow-panel")
+        team_actions.append(self.label("Team Workflow", "section"))
+        team_actions.append(self.label("Probe, prepare, launch, collect", "muted", wrap=True))
+        self.mesh_prepared_team_buttons: list[Gtk.Button] = []
+        team_buttons = self.command_grid([
+            ("Check", self.on_check_fleet, False, "emblem-ok-symbolic", "Probe trusted devices."),
+            ("Latest", self.on_load_latest_mesh_team, False, "document-open-recent-symbolic", "Load the latest saved team run."),
+            ("Prepare", self.on_prepare_mesh_team, True, "document-new-symbolic", "Create lanes for all ready trusted devices."),
+            ("Visible", self.on_prepare_visible_mesh_team, False, "view-filter-symbolic", "Create lanes from the visible ready set."),
+            ("Launch", self.on_launch_mesh_team, False, "media-playback-start-symbolic", "Launch prepared lanes."),
+            ("Collect", self.on_collect_mesh_team, False, "folder-download-symbolic", "Collect lane outputs."),
+            ("Review", self.on_review_mesh_team_summary, False, "emblem-ok-symbolic", "Mark the latest team summary as reviewed."),
+        ], columns=6)
+        for button in getattr(team_buttons, "command_buttons", [])[4:]:
+            button.set_tooltip_text("Prepare or load a team first.")
+            self.mesh_prepared_team_buttons.append(button)
+        self.mesh_prepared_team_buttons.extend(getattr(self, "mesh_launch_console_buttons", []))
+        team_actions.append(team_buttons)
+        team.append(team_actions)
+
+        bus_actions = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        bus_actions.add_css_class("workflow-panel")
+        bus_actions.append(self.label("Handoff Bus", "section"))
+        bus_actions.append(self.label("Share artifacts and repair stale targets", "muted", wrap=True))
+        bus_buttons = self.command_grid([
+            ("Sync", self.on_sync_mesh_handoff_bus, False, "send-to-symbolic", "Sync handoff bus to team devices."),
+            ("Verify", self.on_verify_mesh_bus_integrity, False, "security-high-symbolic", "Verify local and remote bus hashes."),
+            ("Repair", self.on_retry_mesh_handoff_bus, False, "view-refresh-symbolic", "Retry failed or stale bus targets."),
+            ("Preview", self.on_preview_mesh_bus_repair, False, "document-preview-symbolic", "Copy a bus repair preview."),
+            ("Report", self.on_copy_mesh_team_bus_report, False, "edit-copy-symbolic", "Copy bus report JSON."),
+            ("Bootstrap", self.on_copy_role_bootstrap, False, "edit-copy-symbolic", "Copy role bootstrap handoff."),
+            ("Summary", self.on_copy_mesh_team_summary, False, "text-x-generic-symbolic", "Copy team summary."),
+            ("Stream", self.on_sync_team_chat, False, "mail-send-symbolic", "Broadcast the team stream."),
+            ("Open", self.on_open_mesh_team, False, "folder-open-symbolic", "Open the team run folder."),
+        ], columns=5)
+        for button in getattr(bus_buttons, "command_buttons", []):
+            button.set_tooltip_text(button.get_tooltip_text() or "Prepare or load a team first.")
+            self.mesh_prepared_team_buttons.append(button)
+        bus_actions.append(bus_buttons)
+        team.append(bus_actions)
         self.mesh_team_list = Gtk.ListBox()
         self.mesh_team_list.add_css_class("team-list")
         team_scroll = Gtk.ScrolledWindow()
@@ -3620,6 +4150,58 @@ class CodexControl(Gtk.Application):
         team_scroll.set_child(self.mesh_team_list)
         team.append(team_scroll)
         right.append(team)
+
+        stream = self.panel("Team Stream")
+        stream.add_css_class("team-stream-panel")
+        self.mesh_team_chat_status_label = self.label("No team stream yet", "muted", wrap=True)
+        stream.append(self.mesh_team_chat_status_label)
+        live_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        live_row.append(self.label("Live refresh", "muted"))
+        self.mesh_live_refresh_switch = Gtk.Switch()
+        self.mesh_live_refresh_switch.set_active(self.mesh_live_refresh)
+        self.mesh_live_refresh_switch.connect("state-set", self.on_mesh_live_refresh_toggled)
+        live_row.append(self.mesh_live_refresh_switch)
+        self.mesh_live_refresh_label = self.label(f"every {self.mesh_live_refresh_seconds}s", "muted")
+        live_row.append(self.mesh_live_refresh_label)
+        stream.append(live_row)
+        self.mesh_chat_view = self.code_text_view(editable=False)
+        self.mesh_team_chat_buffer = self.mesh_chat_view.get_buffer()
+        chat_scroll = Gtk.ScrolledWindow()
+        chat_scroll.set_min_content_height(170)
+        chat_scroll.set_size_request(-1, 210)
+        chat_scroll.set_vexpand(False)
+        chat_scroll.set_child(self.mesh_chat_view)
+        stream.append(chat_scroll)
+        chat_controls = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        self.mesh_chat_entry = Gtk.Entry()
+        self.mesh_chat_entry.set_placeholder_text("Post team status, blockers, next step.")
+        self.mesh_chat_entry.set_hexpand(True)
+        self.mesh_chat_entry.connect("activate", self.on_post_team_chat)
+        post_chat = self.command_button(
+            "Post",
+            self.on_post_team_chat,
+            primary=True,
+            icon_name="mail-send-symbolic",
+            tooltip="Post this update to the team stream.",
+        )
+        refresh_chat = self.command_button(
+            "Refresh",
+            self.on_refresh_team_chat,
+            icon_name="view-refresh-symbolic",
+            tooltip="Refresh the team stream from the loaded run.",
+        )
+        copy_chat = self.command_button(
+            "Copy",
+            self.on_copy_team_chat,
+            icon_name="edit-copy-symbolic",
+            tooltip="Copy the visible team stream.",
+        )
+        chat_controls.append(self.mesh_chat_entry)
+        chat_controls.append(post_chat)
+        chat_controls.append(refresh_chat)
+        chat_controls.append(copy_chat)
+        stream.append(chat_controls)
+        right.append(stream)
 
         memory = self.panel("Portable Memory")
         memory.add_css_class("memory-panel")
@@ -3636,9 +4218,12 @@ class CodexControl(Gtk.Application):
         self.memory_import_entry = Gtk.Entry()
         self.memory_import_entry.set_placeholder_text("Paste one memory line or key: value")
         self.memory_import_entry.set_hexpand(True)
-        import_button = Gtk.Button(label="Import")
-        import_button.add_css_class("secondary")
-        import_button.connect("clicked", self.on_import_memory)
+        import_button = self.command_button(
+            "Import",
+            self.on_import_memory,
+            icon_name="document-import-symbolic",
+            tooltip="Import the typed memory line into portable memory.",
+        )
         import_row.append(self.memory_import_entry)
         import_row.append(import_button)
         memory.append(import_row)
@@ -3655,12 +4240,103 @@ class CodexControl(Gtk.Application):
         return box
 
     def selected_mesh_device(self) -> DeviceRecord | None:
+        readiness = mesh_readiness_report(self.devices, self.mesh_probe_records)
+        candidates = self._filtered_mesh_devices(readiness)
         if self.selected_device is not None:
-            return self.selected_device
-        return self.devices[0] if self.devices else None
+            return next((device for device in candidates if device.id == self.selected_device.id), candidates[0] if candidates else None)
+        return candidates[0] if candidates else None
+
+    def _mesh_readiness_status(self, device: DeviceRecord, readiness: MeshReadinessReport) -> str:
+        row = readiness.by_device(device.id)
+        return row.status if row is not None else device.status
+
+    def _mesh_device_matches_filter(self, device: DeviceRecord, readiness: MeshReadinessReport) -> bool:
+        if self.mesh_team_only:
+            return self.trusted_mesh_device(device) and self._mesh_readiness_status(device, readiness) == "ready"
+        if self.mesh_filter_mode == "all":
+            return True
+        if self.mesh_filter_mode == "review":
+            return self._mesh_readiness_status(device, readiness) in {"review", "unknown"}
+        return self._mesh_readiness_status(device, readiness) == self.mesh_filter_mode
+
+    def _filtered_mesh_devices(self, readiness: MeshReadinessReport) -> list[DeviceRecord]:
+        return [device for device in self.devices if self._mesh_device_matches_filter(device, readiness)]
+
+    def _mesh_freshness_label(self, checked: int) -> tuple[str, str]:
+        if not checked:
+            return "not checked", "chip"
+        age = max(0, int(time.time()) - int(checked))
+        if age < 90:
+            return f"fresh {age}s", "chip-strong"
+        minutes = max(1, age // 60)
+        if age < 900:
+            return f"{minutes}m old", "chip"
+        return f"stale {minutes}m", "chip-danger"
+
+    def refresh_mesh_filter_bar(self, readiness: MeshReadinessReport) -> None:
+        counts = {
+            "all": readiness.total,
+            "ready": readiness.ready_count,
+            "review": readiness.review_count,
+            "blocked": readiness.blocked_count,
+            "offline": readiness.offline_count,
+        }
+        for filter_key, label in MESH_FILTER_OPTIONS:
+            button = self.mesh_filter_buttons.get(filter_key)
+            if button is None:
+                continue
+            button.set_label(f"{label} {counts.get(filter_key, 0)}")
+            button.remove_css_class("primary")
+            button.remove_css_class("secondary")
+            button.add_css_class("secondary")
+            if not self.mesh_team_only and filter_key == self.mesh_filter_mode:
+                button.remove_css_class("secondary")
+                button.add_css_class("primary")
+            if self.mesh_team_only:
+                button.add_css_class("secondary")
+        self.mesh_team_only_toggle.remove_css_class("primary")
+        self.mesh_team_only_toggle.remove_css_class("secondary")
+        self.mesh_team_only_toggle.add_css_class("secondary")
+        if self.mesh_team_only:
+            self.mesh_team_only_toggle.remove_css_class("secondary")
+            self.mesh_team_only_toggle.add_css_class("primary")
+
+    def _mesh_device_role(self, device: DeviceRecord) -> str:
+        for index, item in enumerate(self.devices):
+            if item.id == device.id:
+                return team_role_for_device(item.name, item.host, index).title
+        return team_role_for_device(device.name, device.host).title
+
+    def _mesh_device_role_chip(self, device: DeviceRecord) -> str:
+        return self._mesh_device_role(device).replace(" / ", "/")
 
     def is_local_mesh_device(self, device: DeviceRecord) -> bool:
         return device.host.strip().lower() in {"localhost", "127.0.0.1", "::1"}
+
+    def on_mesh_filter_toggled(self, button: Gtk.ToggleButton, filter_key: str) -> None:
+        if self._mesh_filter_toggling:
+            return
+        if not button.get_active():
+            if self.mesh_filter_mode == filter_key:
+                self._mesh_filter_toggling = True
+                button.set_active(True)
+                self._mesh_filter_toggling = False
+            return
+        self._mesh_filter_toggling = True
+        for key, current in self.mesh_filter_buttons.items():
+            if current is button:
+                continue
+            if current.get_active():
+                current.set_active(False)
+        self._mesh_filter_toggling = False
+        self.mesh_filter_mode = filter_key
+        self.save_current_state()
+        self.render_mesh()
+
+    def on_mesh_team_only_toggled(self, button: Gtk.ToggleButton) -> None:
+        self.mesh_team_only = button.get_active()
+        self.save_current_state()
+        self.render_mesh()
 
     def fill_device_form(self, device: DeviceRecord | None) -> None:
         if not hasattr(self, "device_name_entry"):
@@ -3724,16 +4400,24 @@ class CodexControl(Gtk.Application):
         if not hasattr(self, "device_list"):
             return
         self.clear_listbox(self.device_list)
+        readiness_report = mesh_readiness_report(self.devices, self.mesh_probe_records)
+        self.refresh_mesh_filter_bar(readiness_report)
+        filtered_devices = self._filtered_mesh_devices(readiness_report)
+        if self.selected_device is not None and all(device.id != self.selected_device.id for device in filtered_devices):
+            self.selected_device = filtered_devices[0] if filtered_devices else None
         selected_row: Gtk.ListBoxRow | None = None
-        if not self.devices:
+        if not filtered_devices:
             self.selected_device = None
             row = Gtk.ListBoxRow()
             row.add_css_class("device-row")
-            row.set_child(self.label("No devices connected yet", "muted", wrap=True))
+            if self.mesh_team_only:
+                row.set_child(self.label("No team-ready devices match current filters", "muted", wrap=True))
+            else:
+                row.set_child(self.label("No devices match current filters", "muted", wrap=True))
             self.device_list.append(row)
             self.fill_device_form(None)
             return
-        for device in self.devices:
+        for index, device in enumerate(filtered_devices):
             row = Gtk.ListBoxRow()
             row.device = device
             row.add_css_class("device-row")
@@ -3741,16 +4425,39 @@ class CodexControl(Gtk.Application):
             top = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
             title = self.label(device.name, "row-title")
             title.set_hexpand(True)
+            title.set_ellipsize(Pango.EllipsizeMode.END)
+            title.set_tooltip_text(device.name)
             status = self.chip_label(device.status, self.chip_css_for_status(device.status))
+            role = self.chip_label(self._mesh_device_role_chip(device), "mode-pill")
+            readiness = readiness_report.by_device(device.id)
+            fleet_status = self.chip_label(
+                readiness.status if readiness is not None else device.status,
+                self.chip_css_for_status(readiness.status if readiness is not None else device.status),
+            )
+            freshness_text, freshness_css = self._mesh_freshness_label(readiness.checked if readiness is not None else 0)
+            freshness = self.chip_label(freshness_text, freshness_css)
             top.append(title)
-            top.append(status)
-            target = self.label(f"{device.target()}:{device.port}", "muted")
-            target.set_ellipsize(Pango.EllipsizeMode.MIDDLE)
-            project = self.label(device.project_root, "muted")
-            project.set_ellipsize(Pango.EllipsizeMode.MIDDLE)
+            chip_flow = self.flow_row()
+            self.flow_append(chip_flow, status)
+            self.flow_append(chip_flow, role)
+            self.flow_append(chip_flow, fleet_status)
+            self.flow_append(chip_flow, freshness)
             content.append(top)
+            content.append(chip_flow)
+            target = self.muted_meta_label(f"{device.target()}:{device.port}")
+            project = self.muted_meta_label(device.project_root)
             content.append(target)
             content.append(project)
+            if readiness is not None:
+                readiness_bits = [f"Readiness: {readiness.blocker_category}"]
+                if readiness.next_actions:
+                    readiness_bits.append(readiness.next_actions[0])
+                readiness_line = " | ".join(bit for bit in readiness_bits if bit)
+                next_action = self.label(readiness_line, "muted", wrap=True)
+                next_action.set_lines(2)
+                next_action.set_ellipsize(Pango.EllipsizeMode.END)
+                next_action.set_tooltip_text("\n".join(readiness.next_actions) if readiness.next_actions else readiness.summary)
+                content.append(next_action)
             if device.note:
                 note = self.label(device.note, "muted", wrap=True)
                 note.set_lines(2)
@@ -3766,15 +4473,122 @@ class CodexControl(Gtk.Application):
         if selected_row is not None:
             self.device_list.select_row(selected_row)
 
+    def current_team_operator_summary(self, run_status=None):
+        ready = len(self.ready_mesh_devices())
+        saved = len(team_run_dirs(TEAM_DIR))
+        assignment_count = len(self.mesh_team_assignments)
+        if run_status is None and self.mesh_team_dir is not None:
+            run_status = inspect_team_run(self.mesh_team_dir)
+        return team_operator_summary(
+            run_status,
+            self._team_bus_report(),
+            ready_devices=ready,
+            saved_runs=saved,
+            assignment_count=assignment_count,
+            summary_reviewed=is_team_summary_reviewed(self.mesh_team_dir) if self.mesh_team_dir is not None else False,
+        )
+
+    def current_team_doctor_report(self) -> dict[str, Any]:
+        return build_team_doctor_report(self.devices)
+
+    def mesh_doctor_lane_text(self, report: dict[str, Any]) -> str:
+        counts = report.get("lane_counts", {})
+        total = int(counts.get("total") or 0)
+        if not total:
+            return "no lanes"
+        collected = int(counts.get("collected") or 0)
+        finished = int(counts.get("finished") or 0)
+        failed = int(counts.get("failed") or 0)
+        text = f"{collected} collected / {finished} finished"
+        if failed:
+            text += f" / {failed} failed"
+        return text
+
+    def mesh_doctor_bus_text(self, report: dict[str, Any]) -> str:
+        bus = report.get("bus_health", {})
+        targets = int(bus.get("targets") or 0)
+        if targets:
+            return (
+                f"{int(bus.get('synced') or 0)} synced / "
+                f"{int(bus.get('failed') or 0)} failed / "
+                f"{int(bus.get('stale') or 0)} stale of {targets}"
+            )
+        status = str(bus.get("status") or "not_started")
+        return status.replace("_", " ")
+
+    def refresh_mesh_operator_chips(self, readiness: MeshReadinessReport) -> None:
+        if not hasattr(self, "mesh_next_action_label"):
+            return
+        try:
+            doctor = self.current_team_doctor_report()
+        except Exception:  # noqa: BLE001
+            operator = self.current_team_operator_summary()
+            ready = readiness.ready_count
+            lane_text = operator.lane_text
+            bus_text = operator.bus_text
+            status = operator.status
+            next_action = operator.next_action
+            blockers = 0
+        else:
+            ready = int(doctor.get("ready_device_count") or readiness.ready_count)
+            lane_text = self.mesh_doctor_lane_text(doctor)
+            bus_text = self.mesh_doctor_bus_text(doctor)
+            status = str(doctor.get("status") or "review")
+            next_action = str(doctor.get("next_action") or "Check Fleet")
+            blockers = len(doctor.get("blockers") or [])
+        self.set_chip(
+            self.mesh_ready_count_label,
+            f"{ready} ready",
+            "chip-strong" if ready else "chip",
+        )
+        self.set_chip(
+            self.mesh_lane_count_label,
+            lane_text,
+            self.chip_css_for_status(status),
+        )
+        self.set_chip(
+            self.mesh_bus_health_label,
+            bus_text,
+            self.chip_css_for_status(status),
+        )
+        next_text = f"Next: {next_action}"
+        if blockers:
+            next_text += f" ({blockers} blocker{'s' if blockers != 1 else ''})"
+        self.set_chip(
+            self.mesh_next_action_label,
+            next_text,
+            "mode-pill",
+        )
+        if hasattr(self, "mesh_next_step_banner"):
+            detail = (
+                f"{readiness.ready_count} ready of {readiness.total} device(s). "
+                f"{lane_text}; bus {bus_text}."
+            )
+            if blockers:
+                detail += f" Resolve {blockers} blocker{'s' if blockers != 1 else ''} before launch."
+            self.update_next_step_banner(
+                self.mesh_next_step_banner,
+                next_action,
+                detail,
+                "Check Fleet",
+            )
+
     def render_mesh_detail(self) -> None:
         if not hasattr(self, "mesh_summary_label"):
             return
-        state = mesh_state(self.devices, self.memory_items)
-        self.mesh_summary_label.set_text(state.summary())
-        self.set_chip(self.mesh_device_count_label, f"{len(self.devices)} devices", "chip-strong" if self.devices else "chip")
+        readiness = mesh_readiness_report(self.devices, self.mesh_probe_records)
+        visible_devices = self._filtered_mesh_devices(readiness)
+        self.mesh_summary_label.set_text(f"{readiness.summary} | {len(self.memory_items)} memory item(s)")
+        self.refresh_mesh_operator_chips(readiness)
+        self.set_chip(
+            self.mesh_device_count_label,
+            f"{len(visible_devices)}/{len(self.devices)} devices",
+            "chip-strong" if visible_devices else "chip",
+        )
         self.set_chip(self.mesh_memory_count_label, f"{len(self.memory_items)} memories", "chip-strong" if self.memory_items else "chip")
         device = self.selected_mesh_device()
         self.set_chip(self.mesh_selected_label, device.name if device else "none selected", "mode-pill" if device else "chip")
+        self.refresh_mesh_action_sensitivity()
         if device is None:
             text = (
                 "No selected device.\n\n"
@@ -3798,6 +4612,7 @@ class CodexControl(Gtk.Application):
             f"Target: {device.target()}",
             f"Project: {device.project_root}",
             f"Codex: {device.codex_bin}",
+            f"Role: {self._mesh_device_role(device)}",
             f"Status: {device.status}",
             f"Note: {device.note or 'none'}",
             "",
@@ -3816,29 +4631,1007 @@ class CodexControl(Gtk.Application):
             f"Devices file: {DEVICES_FILE}",
             f"Portable memory: {MEMORY_FILE}",
         ]
+        readiness_row = readiness.by_device(device.id)
+        if readiness_row is not None:
+            detail.append(f"Fleet status: {readiness_row.status}")
+            detail.extend([
+                "",
+                "Fleet readiness",
+                f"Category: {readiness_row.blocker_category}",
+                f"Summary: {readiness_row.summary}",
+            ])
+            if readiness_row.next_actions:
+                detail.append("Next actions:")
+                detail.extend([f"- {item}" for item in readiness_row.next_actions])
         probe = self.mesh_probe_records.get(device.id)
         if probe is not None:
             detail.extend(["", "Last probe", probe.detail_text()])
         self.set_text(self.mesh_detail_buffer, "\n".join(detail) + "\n")
+
+    def refresh_mesh_action_sensitivity(self) -> None:
+        has_device = self.selected_mesh_device() is not None
+        has_team = self.mesh_team_dir is not None and bool(self.mesh_team_assignments) and bool(self.mesh_team_run_id)
+        for button in getattr(self, "mesh_selected_device_buttons", []):
+            button.set_sensitive(has_device)
+            if not has_device:
+                button.set_tooltip_text("Select a device first.")
+        for button in getattr(self, "mesh_prepared_team_buttons", []):
+            button.set_sensitive(has_team)
+            if not has_team:
+                button.set_tooltip_text("Prepare or load a team first.")
+
+    def refresh_mesh_launch_stage_strip(self, run_status=None, *, prepared: bool = False, operator=None) -> None:
+        if not hasattr(self, "mesh_launch_stage_chips"):
+            return
+        lane_count = len(getattr(run_status, "lanes", ()) or ())
+        collected = int(getattr(run_status, "collected_count", 0) or 0)
+        all_prepared = prepared and lane_count > 0 and all(
+            getattr(lane, "status", "") == "prepared" for lane in getattr(run_status, "lanes", ())
+        )
+        if prepared and lane_count == 0:
+            all_prepared = True
+        bus_report = self._team_bus_report() if prepared else None
+        bus_ready = bus_report is not None and not bus_report.failed_count and not bus_report.stale_count
+        failed = any(getattr(lane, "status", "") == "failed" for lane in getattr(run_status, "lanes", ()))
+        next_action = str(getattr(operator, "next_action", "") or "")
+        states = {
+            "check": len(self.ready_mesh_devices()) > 0,
+            "prepare": prepared,
+            "sync": bus_ready,
+            "launch": prepared and not all_prepared,
+            "collect": bool(lane_count and collected >= lane_count),
+            "review": next_action in {"Prepare Team"} and bool(collected),
+        }
+        labels = {
+            "check": "1 Check",
+            "prepare": "2 Prepare",
+            "sync": "3 Sync",
+            "launch": "4 Launch",
+            "collect": "5 Collect",
+            "review": "6 Review",
+        }
+        for key, chip in self.mesh_launch_stage_chips.items():
+            css = "chip-strong" if states.get(key) else "chip"
+            if failed and key in {"launch", "collect"}:
+                css = "chip-danger"
+            if next_action.lower().startswith(labels[key].split(maxsplit=1)[1].lower()):
+                css = "mode-pill"
+            self.set_chip(chip, labels[key], css)
 
     def render_mesh(self) -> None:
         self.render_device_list()
         if hasattr(self, "memory_buffer"):
             self.set_text(self.memory_buffer, memory_markdown(self.memory_items))
         self.render_mesh_detail()
+        self.render_mesh_team_chat()
         self.render_mesh_team()
+
+    def render_mesh_launch_console(self, run_status=None) -> None:
+        if not hasattr(self, "mesh_launch_console_list"):
+            return
+        self.clear_listbox(self.mesh_launch_console_list)
+        readiness = mesh_readiness_report(self.devices, self.mesh_probe_records)
+        prepared = bool(self.mesh_team_assignments and self.mesh_team_dir is not None and self.mesh_team_run_id)
+        assignments = list(self.mesh_team_assignments) if prepared else self.build_mesh_team_assignments()
+        display_assignments = self._mesh_launch_console_display_assignments(assignments, readiness=readiness)
+        operator = (
+            self.current_team_operator_summary(run_status)
+            if prepared
+            else team_operator_summary(
+                None,
+                ready_devices=len(self.ready_mesh_devices()),
+                saved_runs=len(team_run_dirs(TEAM_DIR)),
+                assignment_count=len(assignments),
+            )
+        )
+        prompt = self.mesh_base_prompt().strip().splitlines()
+        prompt_preview = prompt[0][:180] if prompt else "No mission prompt selected"
+        if hasattr(self, "mesh_launch_console_status_label"):
+            status_text = (
+                f"{self.mesh_team_run_id} | {operator.next_action}"
+                if prepared
+                else f"Proposed team | {operator.next_action}"
+            )
+            self.mesh_launch_console_status_label.set_text(status_text)
+        if hasattr(self, "mesh_launch_console_meta_label"):
+            ready = len(self.ready_mesh_devices())
+            mode = "prepared" if prepared else "preview"
+            self.mesh_launch_console_meta_label.set_text(
+                f"{len(assignments)} lane(s) | {len(display_assignments)} shown | {ready} ready device(s) | {mode} | bus {operator.bus_text}"
+            )
+        if hasattr(self, "mesh_launch_console_focus_label"):
+            self.mesh_launch_console_focus_label.set_text(
+                f"Focus: {self._mesh_launch_console_focus_name(self.mesh_launch_console_focus_filter)}"
+            )
+        if hasattr(self, "mesh_launch_console_prompt_label"):
+            self.mesh_launch_console_prompt_label.set_text(f"Mission: {prompt_preview}")
+        if hasattr(self, "mesh_launch_console_decision_label"):
+            launch_ready, _, blocked_reasons = self._mesh_launch_guard(assignments)
+            if not assignments:
+                decision = "Decision: no launchable lanes; check fleet or add a trusted ready device."
+            elif not prepared:
+                decision = f"Decision: prepare {len(assignments)} lane(s) across {len(self.ready_mesh_devices())} ready device(s)."
+            elif not launch_ready:
+                if blocked_reasons:
+                    compact = "; ".join(blocked_reasons[:2])
+                    if len(blocked_reasons) > 2:
+                        compact += f"; +{len(blocked_reasons) - 2} more"
+                    decision = f"Decision: launch blocked: {compact}"
+                else:
+                    decision = "Decision: launch blocked by mesh readiness, review fleet before launch."
+            else:
+                decision = f"Decision: {operator.next_action}; handoff bus {operator.bus_text}."
+            self.mesh_launch_console_decision_label.set_text(decision)
+            self.mesh_launch_console_decision_label.set_tooltip_text(decision)
+        if hasattr(self, "mesh_launch_blocker_timeline_label"):
+            timeline = self.mesh_launch_blocker_timeline_text(
+                assignments,
+                readiness=readiness,
+                only_blocked=self.mesh_launch_console_blocked_only,
+                focus_filter=self.mesh_launch_console_focus_filter,
+            )
+            if timeline:
+                timeline_text = f"Blocker timeline:\n{timeline}"
+                self.mesh_launch_blocker_timeline_label.set_text(timeline_text)
+                self.mesh_launch_blocker_timeline_label.set_tooltip_text(timeline)
+            else:
+                self.mesh_launch_blocker_timeline_label.set_text("Blocker timeline: ready")
+                self.mesh_launch_blocker_timeline_label.set_tooltip_text("All lanes are ready")
+        self.refresh_mesh_launch_stage_strip(run_status, prepared=prepared, operator=operator)
+        if hasattr(self, "mesh_launch_pulse_label"):
+            ready_count, blocked_count, review_count, offline_count, untrusted_count, pulse_summary, pulse_detail = (
+                self._mesh_launch_readiness_pulse(assignments, readiness=readiness)
+            )
+            self.mesh_launch_pulse_label.set_text(pulse_summary)
+            self.mesh_launch_pulse_label.set_tooltip_text(pulse_detail)
+            self.set_button_chip(
+                self.mesh_launch_pulse_ready_chip,
+                f"{ready_count}/{len(assignments)} ready",
+                "chip-strong" if blocked_count == 0 and untrusted_count == 0 and offline_count == 0 else "chip",
+            )
+            self.set_button_chip(
+                self.mesh_launch_pulse_blocked_chip,
+                f"{blocked_count} blocked",
+                "chip-danger" if blocked_count else "chip",
+            )
+            self.set_button_chip(
+                self.mesh_launch_pulse_review_chip,
+                f"{review_count} review",
+                "chip-danger" if review_count else "chip",
+            )
+            self.set_button_chip(
+                self.mesh_launch_pulse_offline_chip,
+                f"{offline_count} offline",
+                "chip-danger" if offline_count else "chip",
+            )
+            self._apply_mesh_launch_console_focus_filter_style()
+        if not display_assignments:
+            row = Gtk.ListBoxRow()
+            row.add_css_class("team-row")
+            if assignments:
+                row.set_child(
+                    self.label(
+                        "No displayed lanes match the launch console filter. "
+                        "Disable 'Blocked only' or recheck the fleet.",
+                        "muted",
+                        wrap=True,
+                    )
+                )
+            else:
+                row.set_child(
+                    self.label(
+                        "No launchable lanes. Run Check Fleet or add a trusted ready device.",
+                        "muted",
+                        wrap=True,
+                    )
+                )
+            self.mesh_launch_console_list.append(row)
+            return
+        project_path = Path(self.selected_project()).expanduser()
+        reason_map = self._mesh_launch_blocking_reason_map(assignments)
+        for assignment in display_assignments:
+            device = self.mesh_assignment_device(assignment)
+            readiness_row = readiness.by_device(device.id) if device is not None else None
+            lane_title = assignment.get("lane_title", "Lane")
+            device_name = assignment.get("device_name", "device")
+            row = Gtk.ListBoxRow()
+            row.add_css_class("team-row")
+            content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=5)
+            top = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+            title = self.label(
+                f"{assignment.get('role_title') or lane_title} | {device_name}",
+                "row-title",
+            )
+            title.set_hexpand(True)
+            title.set_ellipsize(Pango.EllipsizeMode.END)
+            title.set_tooltip_text(title.get_text())
+            top.append(title)
+            chip_flow = self.flow_row()
+            status = readiness_row.status if readiness_row is not None else "unknown"
+            self.flow_append(chip_flow, self.chip_label(status, self.chip_css_for_status(status)))
+            reason = reason_map.get((lane_title, device_name))
+            if reason:
+                self.flow_append(chip_flow, self.chip_label(f"blocked: {reason}", "chip-danger"))
+            self.flow_append(chip_flow, self.chip_label(assignment.get("role_profile", "profile"), "chip"))
+            if device is None:
+                sync_text = "missing device"
+                sync_css = "chip-danger"
+            elif self.should_sync_project_to_device(device, project_path):
+                sync_text = "sync required"
+                sync_css = "chip"
+            else:
+                sync_text = "local checkout"
+                sync_css = "chip-strong"
+            self.flow_append(chip_flow, self.chip_label(sync_text, sync_css))
+            self.flow_append(chip_flow, self.chip_label("handoff ready" if prepared else "handoff planned", "mode-pill"))
+            content.append(top)
+            content.append(chip_flow)
+            focus = assignment.get("role_focus") or assignment.get("focus", "")
+            boundary = assignment.get("role_boundary", "")
+            detail_bits = [
+                focus,
+                f"Boundary: {boundary}" if boundary else "",
+                f"Target: {assignment.get('target', 'target unknown')}",
+                f"Expected: out/{assignment.get('lane_slug', 'lane')}.handoff.md",
+            ]
+            detail = " | ".join(bit for bit in detail_bits if bit)
+            detail_label = self.label(detail, "muted", wrap=True)
+            detail_label.set_lines(3)
+            detail_label.set_ellipsize(Pango.EllipsizeMode.END)
+            detail_label.set_tooltip_text(detail)
+            content.append(detail_label)
+            if reason is not None and readiness_row is not None and readiness_row.next_actions:
+                action_hint = f"Next: {readiness_row.next_actions[0]}"
+                next_action_label = self.label(action_hint, "muted", wrap=True)
+                next_action_label.set_lines(2)
+                next_action_label.set_ellipsize(Pango.EllipsizeMode.END)
+                next_action_label.set_tooltip_text("\n".join(readiness_row.next_actions))
+                content.append(next_action_label)
+            if device is not None:
+                action_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+                if readiness_row is not None and readiness_row.status != "ready":
+                    fix_tooltip = ""
+                    if readiness_row.next_actions:
+                        fix_tooltip = readiness_row.next_actions[0]
+                    elif reason is not None:
+                        fix_tooltip = reason
+                    fix_btn = self.make_button("Fix Now", "emblem-ok-symbolic")
+                    fix_btn.connect(
+                        "clicked",
+                        lambda _b, device_id=device.id: self.on_mesh_lane_fix_now(device_id),
+                    )
+                    if fix_tooltip:
+                        fix_btn.set_tooltip_text(f"Suggested fix: {fix_tooltip}")
+                    else:
+                        fix_btn.set_tooltip_text("Run the fastest likely unblock path for this lane.")
+                    action_row.append(fix_btn)
+                recheck = self.make_button("Recheck", "view-refresh-symbolic")
+                recheck.connect("clicked", lambda _b, device_id=device.id: self.on_recheck_lane(device_id))
+                recheck.set_tooltip_text("Collect a fresh probe for this device.")
+                action_row.append(recheck)
+                open_session = self.make_button("Open Session", "utilities-terminal-symbolic")
+                open_session.connect(
+                    "clicked",
+                    lambda _b, device_id=device.id: self.on_open_launch_console_session(device_id),
+                )
+                open_session.set_tooltip_text("Open a terminal session to this device.")
+                action_row.append(open_session)
+                copy_launch = self.make_button("Copy Launch", "edit-copy-symbolic")
+                copy_launch.connect(
+                    "clicked",
+                    lambda _b, target_device_id=device.id: self.copy_mesh_text(
+                        self.launch_console_command_copy(
+                            next((item for item in self.devices if item.id == target_device_id), device),
+                        ),
+                        f"Launch command copied for {device.name}",
+                    ),
+                )
+                copy_launch.set_tooltip_text("Copy command used to open this lane’s session.")
+                action_row.append(copy_launch)
+                content.append(action_row)
+            row.set_child(content)
+            self.mesh_launch_console_list.append(row)
+
+    def on_launch_console_blocked_only_toggled(self, _button: Gtk.ToggleButton) -> None:
+        if getattr(self, "_mesh_launch_console_filter_toggling", False):
+            return
+        if self.mesh_launch_console_focus_filter != "all":
+            self.mesh_launch_console_focus_filter = "all"
+            self._apply_mesh_launch_console_focus_filter_style()
+        self.mesh_launch_console_blocked_only = bool(self.mesh_launch_console_blocked_only_toggle.get_active())
+        self.save_current_state()
+        self.render_mesh_launch_console()
+
+    def _launch_console_focus_filter(
+        self,
+        assignment: dict[str, str],
+        readiness: dict[str, MeshReadinessRow] | None = None,
+    ) -> str:
+        if readiness is None:
+            readiness = self._mesh_ready_rows()
+        device = self.mesh_assignment_device(assignment)
+        if device is None or not self.trusted_mesh_device(device):
+            return "blocked"
+        row = readiness.get(device.id)
+        if row is None:
+            return "blocked"
+        if row.status == "ready":
+            return "ready"
+        if row.status == "review":
+            return "review"
+        if row.status == "offline":
+            return "offline"
+        return "blocked"
+
+    def _mesh_launch_console_focus_name(self, focus: str) -> str:
+        names = {
+            "all": "all lanes",
+            "ready": "ready lanes",
+            "blocked": "blocked / unready",
+            "review": "review required",
+            "offline": "offline",
+        }
+        return names.get(focus, "all lanes")
+
+    def on_cycle_mesh_launch_focus(self, _button: Gtk.Button) -> None:
+        cycle = ("all", "blocked", "review", "offline")
+        current = self.mesh_launch_console_focus_filter if self.mesh_launch_console_focus_filter in cycle else "all"
+        try:
+            index = cycle.index(current)
+        except ValueError:
+            index = 0
+        self._set_mesh_launch_console_focus_filter(cycle[(index + 1) % len(cycle)])
+
+    def _apply_mesh_launch_console_focus_filter_style(self) -> None:
+        if not hasattr(self, "mesh_launch_pulse_ready_chip"):
+            return
+        selected = self.mesh_launch_console_focus_filter
+        for mode, chip in [
+            ("all", self.mesh_launch_pulse_ready_chip),
+            ("blocked", self.mesh_launch_pulse_blocked_chip),
+            ("review", self.mesh_launch_pulse_review_chip),
+            ("offline", self.mesh_launch_pulse_offline_chip),
+        ]:
+            if selected == mode:
+                chip.add_css_class("chip-strong")
+                chip.remove_css_class("chip-danger")
+                chip.add_css_class("chip")
+            else:
+                chip.remove_css_class("chip-strong")
+                chip.remove_css_class("chip-danger")
+                chip.add_css_class("chip")
+        if self.mesh_launch_console_focus_filter != "all" and hasattr(self, "mesh_launch_console_blocked_only_toggle"):
+            self._mesh_launch_console_filter_toggling = True
+            self.mesh_launch_console_blocked_only_toggle.set_active(False)
+            self._mesh_launch_console_filter_toggling = False
+            self.mesh_launch_console_blocked_only = False
+
+    def _set_mesh_launch_console_focus_filter(self, focus: str) -> None:
+        if focus not in {"all", "ready", "blocked", "review", "offline"}:
+            focus = "all"
+        if self.mesh_launch_console_focus_filter == focus:
+            return
+        self.mesh_launch_console_focus_filter = focus
+        if focus != "all":
+            self.mesh_launch_console_blocked_only = False
+        self._apply_mesh_launch_console_focus_filter_style()
+        self.save_current_state()
+        self.render_mesh_launch_console()
+
+    def on_mesh_launch_pulse_focus_ready(self, _button: Gtk.Button) -> None:
+        self._set_mesh_launch_console_focus_filter("all")
+
+    def on_mesh_launch_pulse_focus_blocked(self, _button: Gtk.Button) -> None:
+        self._set_mesh_launch_console_focus_filter("blocked")
+
+    def on_mesh_launch_pulse_focus_review(self, _button: Gtk.Button) -> None:
+        self._set_mesh_launch_console_focus_filter("review")
+
+    def on_mesh_launch_pulse_focus_offline(self, _button: Gtk.Button) -> None:
+        self._set_mesh_launch_console_focus_filter("offline")
+
+    def on_recheck_launch_blocked_lanes(self, _button: Gtk.Button) -> None:
+        readiness = mesh_readiness_report(self.devices, self.mesh_probe_records)
+        prepared = bool(self.mesh_team_assignments and self.mesh_team_dir is not None and self.mesh_team_run_id)
+        assignments = list(self.mesh_team_assignments) if prepared else self.build_mesh_team_assignments()
+        row_map = {row.device_id: row for row in readiness.rows}
+        blocked = []
+        for assignment in assignments:
+            device = self.mesh_assignment_device(assignment)
+            if device is None:
+                continue
+            row = row_map.get(device.id)
+            if row is None or row.status != "ready" or not self.trusted_mesh_device(device):
+                blocked.append(device.id)
+        seen: set[str] = set()
+        for device_id in blocked:
+            if device_id in seen:
+                continue
+            seen.add(device_id)
+            self.on_recheck_lane(device_id)
+        if seen:
+            self.set_mesh_team_status(f"Rechecking {len(seen)} blocked lane device(s).")
+            self.set_status("Rechecking blocked lanes")
+        else:
+            self.set_mesh_team_status("No blocked lanes to recheck.")
+            self.set_status("No blocked lanes detected in launch console.")
+
+    def _mesh_launch_console_display_assignments(
+        self,
+        assignments: list[dict[str, str]],
+        *,
+        readiness: MeshReadinessReport | None = None,
+        only_blocked: bool | None = None,
+        focus_filter: str | None = None,
+    ) -> list[dict[str, str]]:
+        readiness = readiness or mesh_readiness_report(self.devices, self.mesh_probe_records)
+        row_map = {row.device_id: row for row in readiness.rows}
+        blocked_filter = self.mesh_launch_console_blocked_only if only_blocked is None else only_blocked
+        focus = (focus_filter or self.mesh_launch_console_focus_filter).strip().lower()
+        if focus not in {"all", "ready", "blocked", "review", "offline"}:
+            focus = "all"
+
+        def is_blocked(assignment: dict[str, str]) -> bool:
+            device = self.mesh_assignment_device(assignment)
+            if device is None:
+                return True
+            if not self.trusted_mesh_device(device):
+                return True
+            row = row_map.get(device.id)
+            if row is None:
+                return True
+            return row.status != "ready"
+
+        def sort_key(assignment: dict[str, str]) -> tuple[int, str]:
+            device = self.mesh_assignment_device(assignment)
+            if device is None:
+                return (90, assignment.get("lane_title", "lane"))
+            row = row_map.get(device.id)
+            if row is None:
+                return (70, assignment.get("lane_title", "lane"))
+            if not self.trusted_mesh_device(device):
+                return (60, assignment.get("lane_title", "lane"))
+            if row.status == "ready":
+                return (99, assignment.get("lane_title", "lane"))
+            return (row.action_priority if row.action_priority else 50, assignment.get("lane_title", "lane"))
+
+        ordered = sorted(assignments, key=sort_key)
+        if focus == "all":
+            if not blocked_filter:
+                return ordered
+            return [assignment for assignment in ordered if is_blocked(assignment)]
+
+        def is_focus_match(assignment: dict[str, str]) -> bool:
+            return self._launch_console_focus_filter(assignment, readiness=row_map) == focus
+
+        return [assignment for assignment in ordered if is_focus_match(assignment)]
+
+    def _mesh_launch_readiness_pulse(
+        self,
+        assignments: list[dict[str, str]],
+        *,
+        readiness: MeshReadinessReport | None = None,
+        max_detail_lines: int = 5,
+    ) -> tuple[int, int, int, int, int, str, str]:
+        readiness = readiness or mesh_readiness_report(self.devices, self.mesh_probe_records)
+        row_by_device = {row.device_id: row for row in readiness.rows}
+        if not assignments:
+            return (0, 0, 0, 0, 0, "Fleet pulse: no lanes", "Prepare team lanes to evaluate launch readiness.")
+
+        ready_count = 0
+        review_count = 0
+        offline_count = 0
+        blocked_count = 0
+        untrusted_count = 0
+        detail_rows: list[str] = []
+
+        for assignment in assignments:
+            lane_title = assignment.get("lane_title", "Lane")
+            device_name = assignment.get("device_name", "device")
+            device = self.mesh_assignment_device(assignment)
+            if device is None:
+                blocked_count += 1
+                detail_rows.append(f"{lane_title} on {device_name}: missing device")
+                continue
+            if not self.trusted_mesh_device(device):
+                blocked_count += 1
+                untrusted_count += 1
+                detail_rows.append(f"{lane_title} on {device_name}: untrusted device")
+                continue
+            row = row_by_device.get(device.id)
+            if row is None:
+                blocked_count += 1
+                detail_rows.append(f"{lane_title} on {device_name}: readiness unknown")
+                continue
+            if row.status == "ready":
+                ready_count += 1
+            elif row.status == "offline":
+                blocked_count += 1
+                offline_count += 1
+                detail_rows.append(f"{lane_title} on {device_name}: offline")
+            elif row.status == "review":
+                blocked_count += 1
+                review_count += 1
+                detail_rows.append(
+                    f"{lane_title} on {device_name}: review required ({row.blocker_category or row.status})"
+                )
+            else:
+                blocked_count += 1
+                detail_rows.append(
+                    f"{lane_title} on {device_name}: {row.blocker_category or row.status}"
+                )
+
+        checked = [row.checked for row in row_by_device.values() if row.checked]
+        last_checked = human_time(max(checked)) if checked else "unknown"
+
+        if blocked_count == 0:
+            summary = f"Fleet pulse: all {ready_count}/{len(assignments)} lanes ready"
+            detail = f"Fleet pulse summary: all lanes ready | Last checked: {last_checked}"
+        else:
+            summary = (
+                f"Fleet pulse: {ready_count}/{len(assignments)} lanes ready "
+                f"| {blocked_count} blocked | {untrusted_count} untrusted | {offline_count} offline"
+            )
+            top_details = detail_rows[:max_detail_lines]
+            detail = (
+                f"Fleet pulse summary: {blocked_count} blocked | Last checked: {last_checked}\n"
+                + "\n".join(top_details)
+            )
+            if len(detail_rows) > max_detail_lines:
+                detail += f"\n+{len(detail_rows) - max_detail_lines} more issue(s)"
+        return (
+            ready_count,
+            blocked_count,
+            review_count,
+            offline_count,
+            untrusted_count,
+            summary,
+            detail,
+        )
+
+    def _mesh_team_lane_for_selected_device(self) -> tuple[str, str]:
+        device = self.selected_mesh_device()
+        if device is None:
+            return "operator", "orchestrator"
+        lane_slug = ""
+        for assignment in self.mesh_team_assignments:
+            if assignment.get("device_name") == device.name:
+                lane_slug = assignment.get("lane_slug", "")
+                break
+        return device.name, lane_slug or slugify(device.name)
+
+    def on_recheck_lane(self, device_id: str) -> None:
+        device = next((item for item in self.devices if item.id == device_id), None)
+        if device is None:
+            self.set_mesh_team_status("Device disappeared from roster", "warn")
+            self.set_status("Lane device missing", "warn")
+            return
+
+        self.set_mesh_team_status(f"Checking {device.name}...")
+
+        def worker() -> None:
+            probe = self.probe_mesh_device(device)
+            GLib.idle_add(self.apply_mesh_probe, device.id, probe)
+            GLib.idle_add(self.finish_mesh_check, device, probe.status)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def on_sync_launch_console_project(self, device_id: str) -> None:
+        device = next((item for item in self.devices if item.id == device_id), None)
+        if device is None:
+            self.set_mesh_team_status("Device disappeared from roster", "warn")
+            self.set_status("Lane device missing", "warn")
+            return
+        if self.is_local_mesh_device(device):
+            self.set_status("Local device already has project checkout")
+            self.set_mesh_team_status(f"Local lane target already available: {device.name}")
+            return
+
+        project_path = Path(self.selected_project()).expanduser()
+        if not project_path.exists():
+            self.set_status("Project path is not available", "warn")
+            self.set_mesh_team_status(f"Cannot sync project to {device.name}: missing local project path", "warn")
+            return
+
+        self.set_status(f"Syncing project to {device.name}")
+        self.set_mesh_team_status(f"Syncing project to {device.name}...")
+
+        def worker() -> None:
+            try:
+                result = run_cmd(list(rsync_project_command(project_path, device)), timeout=60)
+            except Exception as exc:  # noqa: BLE001
+                GLib.idle_add(
+                    self.set_mesh_team_status,
+                    f"Project sync failed for {device.name}: {exc}",
+                    "bad",
+                )
+                GLib.idle_add(self.set_status, f"Project sync failed for {device.name}: {exc}", "bad")
+                GLib.idle_add(self.render_mesh)
+                return
+            if result.returncode != 0:
+                detail = (result.stderr or result.stdout or "project sync failed").strip().splitlines()
+                message = detail[-1] if detail else "project sync failed"
+                GLib.idle_add(self.set_mesh_team_status, f"Project sync failed for {device.name}: {message}", "bad")
+                GLib.idle_add(self.set_status, f"Project sync failed for {device.name}: {message}", "bad")
+            else:
+                GLib.idle_add(self.set_mesh_team_status, f"Project synced to {device.name}")
+            GLib.idle_add(self.set_status, f"Project synced to {device.name}")
+            GLib.idle_add(self.render_mesh)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def on_open_launch_console_session(self, device_id: str) -> None:
+        device = next((item for item in self.devices if item.id == device_id), None)
+        if device is None:
+            self.set_mesh_team_status("Device disappeared from roster", "warn")
+            self.set_status("Lane device missing", "warn")
+            return
+
+        self.set_status(f"Opening session for {device.name}")
+        if self.is_local_mesh_device(device):
+            self.launch_external(["bash", "-i"], f"Codex {device.name}", stamp=False)
+            self.set_mesh_team_status(f"Opened local session for {device.name}")
+            return
+
+        self.launch_external(list(ssh_launch_command(device)), f"Codex {device.name}", stamp=False)
+        self.set_mesh_team_status(f"Opened session for {device.name}")
+
+    def launch_console_command_copy(self, device: DeviceRecord) -> str:
+        if self.is_local_mesh_device(device):
+            project_root = os.path.expanduser(device.project_root)
+            project = shlex.quote(project_root)
+            codex_bin = shlex.quote(device.codex_bin)
+            memory_path = shlex.quote(str(Path("~/.config/codex-gui/memory.md").expanduser()))
+            return (
+                f"cd {project} && "
+                f"{codex_bin} -C {project} "
+                f'\"Use the Codex Control portable memory at {memory_path} and continue the active project.\"'
+            )
+        return shell_join(list(ssh_launch_command(device)))
+
+    def on_mesh_lane_fix_now(self, device_id: str) -> None:
+        device = next((item for item in self.devices if item.id == device_id), None)
+        if device is None:
+            self.set_mesh_team_status("Device disappeared from roster", "warn")
+            self.set_status("Lane device missing", "warn")
+            return
+
+        row = self._mesh_ready_rows().get(device.id)
+        if row is None:
+            self.set_mesh_team_status("No readiness state for lane; rechecking now.")
+            self.on_recheck_lane(device.id)
+            return
+
+        if row.blocker_category == "missing-project":
+            self.set_mesh_team_status(f"Recommended fix: sync project to {device.name}.")
+            self.on_sync_launch_console_project(device.id)
+            return
+
+        if row.blocker_category == "missing-codex":
+            self.set_mesh_team_status(
+                f"Recommended fix: install codex on {device.name}, then run Check Fleet."
+            )
+            return
+
+        if row.blocker_category == "tailscale-approval-required":
+            link = ""
+            for item in row.next_actions:
+                if "Open Tailscale approval link:" in item:
+                    link = item.rsplit(":", 1)[-1].strip()
+                    break
+            if link:
+                self.copy_mesh_text(link, f"Tailscale approval link copied for {device.name}")
+                self.set_status(f"Approval link copied for {device.name}")
+            else:
+                self.set_status("Open approval link via row details, then recheck.")
+            self.on_recheck_lane(device.id)
+            return
+
+        self.set_mesh_team_status(f"Recommended fix: recheck readiness for {device.name}.")
+        self.on_recheck_lane(device.id)
+
+    def _team_chat_path(self, run_dir: Path | None = None) -> Path:
+        base = self.mesh_team_dir if run_dir is None else run_dir
+        return base / "out" / "team-chat.md"
+
+    def sync_team_chat_to_devices(self) -> None:
+        if self.mesh_team_dir is None or not self.mesh_team_assignments or not self.mesh_team_run_id:
+            return
+        assignments = list(self.mesh_team_assignments)
+        run_id = self.mesh_team_run_id
+        team_dir = self.mesh_team_dir
+        team_chat_path = self._team_chat_path(team_dir)
+        if not team_chat_path.exists():
+            return
+
+        def worker() -> None:
+            for assignment in assignments:
+                device = self.mesh_assignment_device(assignment)
+                if device is None or self.is_local_mesh_device(device):
+                    continue
+                try:
+                    run_cmd(list(rsync_team_chat_command(team_dir, device, run_id)), timeout=20)
+                except Exception:
+                    continue
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def collect_team_chat_from_devices(self, team_dir: Path, run_id: str) -> None:
+        collected = []
+        base_chat = ""
+        base_path = self._team_chat_path(team_dir)
+        if base_path.exists():
+            try:
+                base_chat = base_path.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                base_chat = ""
+        collected.append(base_chat)
+
+        for assignment in self.mesh_team_assignments:
+            if assignment.get("device_name", "").strip() == "":
+                continue
+            device = self.mesh_assignment_device(assignment)
+            if device is None or self.is_local_mesh_device(device):
+                continue
+            try:
+                run_cmd(list(rsync_team_chat_pull_command(team_dir, device, run_id)), timeout=20)
+            except Exception:
+                pass
+            device_path = team_dir / "collected" / slugify(device.name) / "team-chat.md"
+            if not device_path.exists():
+                continue
+            try:
+                collected.append(device_path.read_text(encoding="utf-8", errors="replace"))
+            except OSError:
+                continue
+        merged = merge_team_chat_texts(*collected)
+        if not merged:
+            return
+        base_path.write_text(merged, encoding="utf-8")
+
+    def render_mesh_team_chat(self) -> None:
+        if not hasattr(self, "mesh_team_chat_buffer"):
+            return
+        if self.mesh_team_dir is None:
+            self.set_text(self.mesh_team_chat_buffer, "No team run loaded.\nPrepare a team to begin a shared stream.")
+            if hasattr(self, "mesh_team_chat_status_label"):
+                self.mesh_team_chat_status_label.set_text("No team run loaded")
+            if hasattr(self, "mesh_live_refresh_label"):
+                self.mesh_live_refresh_label.set_text(f"{'on' if self.mesh_live_refresh else 'off'} | no team loaded")
+            return
+        text = read_team_chat(self.mesh_team_dir).strip()
+        if not text:
+            text = "# Team Stream\n\nNo chat entries yet. Use Post to send updates."
+        self.set_text(self.mesh_team_chat_buffer, text + ("\n" if text else ""))
+        if hasattr(self, "mesh_team_chat_status_label"):
+            self.mesh_team_chat_status_label.set_text(
+                f"{self.mesh_team_run_id} | stream active | {len(self.mesh_team_assignments)} lane(s)"
+            )
+        if hasattr(self, "mesh_live_refresh_label"):
+            self.mesh_live_refresh_label.set_text(f"{'on' if self.mesh_live_refresh else 'off'} | every {self.mesh_live_refresh_seconds}s")
+
+    def finish_team_chat_refresh(self, status_text: str = "") -> bool:
+        self.mesh_live_refresh_busy = False
+        self.render_mesh_team_chat()
+        self.render_mesh_detail()
+        if status_text:
+            self.set_status(status_text)
+        return False
+
+    def refresh_team_chat_async(self, *, status_text: str = "Team stream refreshed", quiet: bool = False) -> None:
+        if self.mesh_team_dir is None or not self.mesh_team_run_id:
+            self.render_mesh_team_chat()
+            if not quiet:
+                self.set_status("No team stream to refresh", "warn")
+            return
+        if self.mesh_live_refresh_busy:
+            if not quiet:
+                self.set_status("Team stream refresh already running", "warn")
+            return
+
+        team_dir = self.mesh_team_dir
+        run_id = self.mesh_team_run_id
+        self.mesh_live_refresh_busy = True
+
+        def worker() -> None:
+            try:
+                self.collect_team_chat_from_devices(team_dir, run_id)
+            finally:
+                GLib.idle_add(self.finish_team_chat_refresh, "" if quiet else status_text)
+
+        threading.Thread(target=worker, daemon=True).start()
+        if not quiet:
+            self.set_status("Refreshing team stream")
+
+    def on_refresh_team_chat(self, _button: Gtk.Button) -> None:
+        self.refresh_team_chat_async(status_text="Team stream refreshed")
+
+    def on_mesh_live_refresh_toggled(self, _switch: Gtk.Switch, state: bool) -> bool:
+        self.mesh_live_refresh = bool(state)
+        self.ensure_mesh_live_refresh_timer()
+        self.save_current_state()
+        self.render_mesh_team_chat()
+        self.set_status(f"Mesh live refresh {'enabled' if self.mesh_live_refresh else 'disabled'}")
+        return False
+
+    def ensure_mesh_live_refresh_timer(self) -> None:
+        if self.mesh_live_refresh_timer_id:
+            return
+        self.mesh_live_refresh_timer_id = GLib.timeout_add_seconds(
+            self.mesh_live_refresh_seconds,
+            self.on_mesh_live_refresh_tick,
+        )
+
+    def on_mesh_live_refresh_tick(self) -> bool:
+        if self.mesh_live_refresh:
+            self.refresh_team_chat_async(status_text="Team stream auto-refresh", quiet=True)
+        return True
+
+    def on_sync_team_chat(self, _button: Gtk.Button) -> None:
+        if self.mesh_team_dir is None or not self.mesh_team_assignments:
+            self.set_status("No team package loaded", "warn")
+            return
+        self.sync_team_chat_to_devices()
+        self.set_status("Broadcasting team stream")
+
+    def on_copy_team_chat(self, _button: Gtk.Button) -> None:
+        if self.mesh_team_dir is None:
+            self.set_status("No team run loaded", "warn")
+            return
+        self.render_mesh_team_chat()
+        text = self.text_from_buffer(self.mesh_team_chat_buffer)
+        if not text:
+            text = "No team stream content"
+        self.copy_mesh_text(text, "Team stream copied")
+        self.set_status("Team stream copied")
+
+    def on_post_team_chat(self, _button: Gtk.Button) -> None:
+        if self.mesh_team_dir is None:
+            self.set_status("No team run loaded", "warn")
+            return
+        if not hasattr(self, "mesh_chat_entry"):
+            self.set_status("Team chat input missing", "warn")
+            return
+        message = self.mesh_chat_entry.get_text().strip()
+        if not message:
+            self.set_status("Team update is empty", "warn")
+            return
+        sender, lane_slug = self._mesh_team_lane_for_selected_device()
+        try:
+            write_team_chat_entry(self.mesh_team_dir, sender=sender, lane=lane_slug, message=message)
+            self.mesh_chat_entry.set_text("")
+            self.render_mesh_team_chat()
+            self.sync_team_chat_to_devices()
+            self.set_status(f"Posted team update for {sender}")
+        except Exception as exc:  # noqa: BLE001
+            self.set_status(f"Failed to post team update: {exc}", "bad")
 
     def trusted_mesh_device(self, device: DeviceRecord) -> bool:
         identity = f"{device.name} {device.host} {device.note}".lower()
         return "atlas-security" not in identity and device.status != "untrusted"
 
-    def ready_mesh_devices(self) -> tuple[DeviceRecord, ...]:
-        ready_statuses = {"ready", "ok", "prepared", "launched", "done", "passed"}
+    def ready_mesh_devices(self, candidates: tuple[DeviceRecord, ...] | None = None) -> tuple[DeviceRecord, ...]:
+        readiness = mesh_readiness_report(self.devices, self.mesh_probe_records)
+        candidate_devices = self.devices if candidates is None else candidates
         return tuple(
-            device
-            for device in self.devices
-            if self.trusted_mesh_device(device) and device.status in ready_statuses
+            device for device in candidate_devices
+            if self.trusted_mesh_device(device) and (row := readiness.by_device(device.id)) is not None and row.status == "ready"
         )
+
+    def _mesh_ready_rows(self) -> dict[str, MeshReadinessRow]:
+        return {row.device_id: row for row in mesh_readiness_report(self.devices, self.mesh_probe_records).rows}
+
+    def _mesh_launch_guard(self, assignments: list[dict[str, str]]) -> tuple[bool, list[str], list[str]]:
+        rows = self._mesh_ready_rows()
+        blocked: list[str] = []
+        ready: list[str] = []
+        for assignment in assignments:
+            device = self.mesh_assignment_device(assignment)
+            if device is None:
+                blocked.append(f"{assignment.get('lane_title', 'lane')} | {assignment.get('device_name', 'device')} missing device")
+                continue
+            row = rows.get(device.id)
+            if row is None:
+                blocked.append(f"{assignment['lane_title']} | {assignment.get('device_name', 'device')} missing readiness")
+                continue
+            if row.status != "ready":
+                blocked.append(f"{assignment['lane_title']} | {assignment.get('device_name', 'device')} not ready ({row.status})")
+                continue
+            if not self.trusted_mesh_device(device):
+                blocked.append(f"{assignment['lane_title']} | {assignment.get('device_name', 'device')} untrusted")
+                continue
+            ready.append(assignment['lane_title'])
+        return (len(blocked) == 0 and bool(ready), ready, blocked)
+
+    def _mesh_launch_blocking_reason_map(self, assignments: list[dict[str, str]]) -> dict[tuple[str, str], str]:
+        _, _, blocked_reasons = self._mesh_launch_guard(assignments)
+        reasons: dict[tuple[str, str], str] = {}
+        for raw in blocked_reasons:
+            parts = raw.split(" | ", 2)
+            if len(parts) >= 3:
+                lane = parts[0].strip()
+                device = parts[1].strip()
+                reason = parts[2].strip()
+            elif len(parts) == 2:
+                lane = parts[0].strip()
+                device = "device"
+                reason = parts[1].strip()
+            else:
+                continue
+            if lane and reason:
+                reasons[(lane, device)] = reason
+        return reasons
+
+    def mesh_launch_blocker_timeline_text(
+        self,
+        assignments: list[dict[str, str]],
+        *,
+        readiness: MeshReadinessReport | None = None,
+        only_blocked: bool = False,
+        focus_filter: str = "all",
+    ) -> str:
+        all_readiness = readiness or mesh_readiness_report(self.devices, self.mesh_probe_records)
+        ordered = self._mesh_launch_console_display_assignments(
+            assignments,
+            readiness=all_readiness,
+            only_blocked=only_blocked,
+            focus_filter=focus_filter,
+        )
+        if not ordered:
+            if not assignments:
+                return "No lanes available. Add ready trusted devices and run Check Fleet."
+            if only_blocked:
+                return "No blocked lanes."
+            return "All lanes ready to launch."
+        row_by_device = {row.device_id: row for row in all_readiness.rows}
+        lines = self._mesh_launch_blocker_timeline_lines(ordered, row_by_device=row_by_device)
+
+        if not lines:
+            return "All lanes ready to launch."
+        return "\n".join(lines)
+
+    def _mesh_launch_blocker_timeline_lines(
+        self,
+        assignments: list[dict[str, str]],
+        *,
+        row_by_device: dict[str, MeshReadinessRow],
+    ) -> list[str]:
+        lines: list[str] = []
+        for index, assignment in enumerate(assignments, start=1):
+            lane = assignment.get("lane_title", "lane")
+            device_name = assignment.get("device_name", "device")
+            device = self.mesh_assignment_device(assignment)
+            if device is None:
+                lines.append(f"{index}. {lane} on {device_name}: missing device | action: check roster entry")
+                continue
+
+            row = row_by_device.get(device.id)
+            if row is None:
+                lines.append(
+                    f"{index}. {lane} on {device_name}: readiness unknown | action: run Check Fleet"
+                )
+                continue
+
+            when = human_time(row.checked)
+            if not self.trusted_mesh_device(device):
+                lines.append(
+                    f"{index}. {lane} on {device_name}: untrusted | checked {when} | action: trust or remove device"
+                )
+                continue
+            blocker = row.blocker_category or row.status
+            if row.status == "ready":
+                lines.append(f"{index}. {lane} on {device_name}: ready | checked {when}")
+                continue
+
+            next_action = row.next_actions[0] if row.next_actions else "Recheck readiness"
+            lines.append(f"{index}. {lane} on {device_name}: {blocker} | checked {when} | action: {next_action}")
+        return lines
+
+    def _mesh_team_seed_devices(self) -> tuple[DeviceRecord, ...]:
+        readiness = mesh_readiness_report(self.devices, self.mesh_probe_records)
+        if self.mesh_team_only or self.mesh_filter_mode != "all":
+            return tuple(self._filtered_mesh_devices(readiness))
+        return self.devices
 
     def focus_for_mesh_device(self, device: DeviceRecord, index: int) -> tuple[str, str]:
         role = team_role_for_device(device.name, device.host, index)
@@ -3858,15 +5651,20 @@ class CodexControl(Gtk.Application):
         device_id = assignment.get("device_id", "")
         return next((device for device in self.devices if device.id == device_id), None)
 
-    def build_mesh_team_assignments(self) -> list[dict[str, str]]:
+    def build_mesh_team_assignments(self, candidate_devices: tuple[DeviceRecord, ...] | None = None) -> list[dict[str, str]]:
         assignments: list[dict[str, str]] = []
-        for index, device in enumerate(self.ready_mesh_devices()):
+        for index, device in enumerate(self.ready_mesh_devices(candidate_devices)):
             lane_title, focus = self.focus_for_mesh_device(device, index)
             lane_slug = slugify(f"{lane_title}-{device.name}")
+            role = team_role_for_device(device.name, device.host, index)
             assignments.append({
                 "device_id": device.id,
                 "device_name": device.name,
-                "role_id": team_role_for_device(device.name, device.host, index).id,
+                "role_id": role.id,
+                "role_title": role.title,
+                "role_profile": role_profile_hint(role.id),
+                "role_focus": role.focus,
+                "role_boundary": role.boundary,
                 "target": f"{device.target()}:{device.port}",
                 "lane_title": lane_title,
                 "lane_slug": lane_slug,
@@ -3896,7 +5694,7 @@ class CodexControl(Gtk.Application):
                 pass
         base_prompt = self.mesh_base_prompt()
         assignment_lines = [
-            f"- {item['lane_title']} on {item['device_name']} ({item['target']}): {item['focus']}"
+            f"- {item.get('role_title', item['lane_title'])} on {item['device_name']} ({item['target']}): {item['focus']}"
             for item in assignments
         ]
         ledger = "\n".join([
@@ -3909,6 +5707,7 @@ class CodexControl(Gtk.Application):
             "Communication protocol:",
             "- Every lane reads this ledger before acting.",
             "- Every lane reads available files in `out/` before finalizing.",
+            "- Team chat lives at `out/team-chat.md`; post concise updates here as status changes.",
             "- Every lane writes a concise handoff to `out/<lane>.handoff.md`.",
             "- Collected outputs are pulled back to this run folder with Collect Team.",
             "- No secrets, tokens, passwords, sudo codes, or private credentials go into prompts, logs, or handoffs.",
@@ -3938,6 +5737,11 @@ class CodexControl(Gtk.Application):
                 run_id=run_id,
                 device=device,
                 teammates=teammates,
+                role_id=assignment.get("role_id", ""),
+                role_title=assignment.get("role_title", ""),
+                role_profile=assignment.get("role_profile", ""),
+                role_focus=assignment.get("role_focus", ""),
+                role_boundary=assignment.get("role_boundary", ""),
             )
             self.write_private_text(lanes_dir / f"{assignment['lane_slug']}.md", prompt)
         manifest = {
@@ -3948,15 +5752,20 @@ class CodexControl(Gtk.Application):
             "assignments": assignments,
         }
         self.write_private_text(team_dir / "manifest.json", json.dumps(manifest, indent=2, sort_keys=True))
+        write_role_bootstrap(team_dir, assignments=tuple(assignments))
         self.mesh_team_run_id = run_id
         self.mesh_team_dir = team_dir
         self.mesh_team_assignments = assignments
+        self.mesh_team_last_bus_sent = 0
+        self.mesh_team_last_bus_failures = []
+        self.mesh_team_last_bus_path = None
+        self.mesh_team_last_bus_report = None
         return team_dir
 
-    def prepare_mesh_team_package(self) -> bool:
+    def prepare_mesh_team_package(self, candidate_devices: tuple[DeviceRecord, ...] | None = None) -> bool:
         if hasattr(self, "memory_buffer"):
             self.persist_memory_from_editor()
-        assignments = self.build_mesh_team_assignments()
+        assignments = self.build_mesh_team_assignments(candidate_devices)
         if not assignments:
             self.set_mesh_team_status("No ready trusted devices. Run Check Fleet first.", "warn")
             self.set_status("No ready trusted devices", "warn")
@@ -3975,6 +5784,10 @@ class CodexControl(Gtk.Application):
         self.mesh_team_run_id = status.run_id
         self.mesh_team_dir = team_dir
         self.mesh_team_assignments = [dict(item) for item in status.assignments]
+        self.mesh_team_last_bus_sent = 0
+        self.mesh_team_last_bus_failures = []
+        self.mesh_team_last_bus_path = None
+        self.mesh_team_last_bus_report = None
         return True
 
     def on_load_latest_mesh_team(self, _button: Gtk.Button) -> None:
@@ -3984,6 +5797,7 @@ class CodexControl(Gtk.Application):
             self.set_status("No saved team run found", "warn")
             return
         self.render_mesh_team()
+        self.render_mesh_team_chat()
         self.set_status(f"Loaded Codex Team {self.mesh_team_run_id}")
 
     def on_open_mesh_team(self, _button: Gtk.Button) -> None:
@@ -4003,12 +5817,258 @@ class CodexControl(Gtk.Application):
         self.copy_mesh_text(summary_path.read_text(encoding="utf-8", errors="replace"), "Team summary copied")
         self.render_mesh_team()
 
-    def finish_mesh_handoff_bus_sync(self, sent: int, bus_path: Path, errors: list[str]) -> bool:
+    def on_review_mesh_team_summary(self, _button: Gtk.Button) -> None:
+        if self.mesh_team_dir is None:
+            self.set_mesh_team_status("No team run to review.", "warn")
+            self.set_status("No team run to review", "warn")
+            return
+        marker = mark_team_summary_reviewed(self.mesh_team_dir)
+        self.render_mesh_team()
+        self.render_mesh_detail()
+        self.set_mesh_team_status(f"Reviewed team summary for {self.mesh_team_run_id}. Marker: {marker}")
+        self.set_status("Team summary reviewed")
+
+    def _team_bus_report(self) -> TeamBusReport | None:
+        if self.mesh_team_dir is None:
+            return None
+        if self.mesh_team_last_bus_report is not None and str(self.mesh_team_last_bus_report.team_dir) == str(self.mesh_team_dir):
+            return self.mesh_team_last_bus_report
+        self.mesh_team_last_bus_report = load_bus_report(self.mesh_team_dir)
+        return self.mesh_team_last_bus_report
+
+    def on_copy_mesh_team_bus_report(self, _button: Gtk.Button) -> None:
+        report = self._team_bus_report()
+        if report is None:
+            self.set_mesh_team_status("No bus report available. Sync the handoff bus first.", "warn")
+            self.set_status("No bus report", "warn")
+            return
+        self.copy_mesh_text(json.dumps({
+            "run_id": report.run_id,
+            "team_dir": report.team_dir,
+            "bus_path": report.bus_path,
+            "sent": report.sent,
+            "failures": report.failures,
+            "generated": report.generated,
+            "generated_epoch": report.generated_epoch,
+            "targets": [
+                {
+                    "lane_slug": item.lane_slug,
+                    "device_name": item.device_name,
+                    "target": item.target,
+                    "status": item.status,
+                    "detail": item.detail,
+                    "artifact_path": item.artifact_path,
+                    "artifact_sha256": item.artifact_sha256,
+                    "artifact_remote_sha256": item.artifact_remote_sha256,
+                    "ts": item.ts,
+                }
+                for item in report.targets
+            ],
+        }, indent=2, sort_keys=True), "Bus report copied")
+        self.set_status(f"Copied bus report for {report.run_id}")
+
+    def on_copy_role_bootstrap(self, _button: Gtk.Button) -> None:
+        if self.mesh_team_dir is None:
+            self.set_mesh_team_status("No team run to copy role bootstrap.", "warn")
+            self.set_status("No team run to copy role bootstrap", "warn")
+            return
+        bootstrap_json = write_role_bootstrap(self.mesh_team_dir)
+        bootstrap_md = bootstrap_json.with_name("role-bootstrap.md")
+        if bootstrap_md.exists():
+            text = bootstrap_md.read_text(encoding="utf-8", errors="replace")
+        else:
+            text = bootstrap_json.read_text(encoding="utf-8", errors="replace")
+        self.copy_mesh_text(text, "Role bootstrap copied")
+        self.set_status(f"Copied role bootstrap for {self.mesh_team_run_id}")
+        self.render_mesh_team()
+
+    def _bus_status_css(self, status: str) -> str:
+        return {
+            "local": "chip-strong",
+            "synced": "chip-strong",
+            "failed": "chip-danger",
+            "stale": "chip-danger",
+        }.get(status, "chip")
+
+    def _file_sha256_hex(self, path: Path) -> str:
+        digest = hashlib.sha256()
+        try:
+            with path.open("rb") as handle:
+                for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                    digest.update(chunk)
+            return digest.hexdigest()
+        except OSError:
+            return ""
+
+    @staticmethod
+    def _is_valid_sha256(value: str) -> bool:
+        return (
+            len(value) == 64
+            and all(char.lower() in "0123456789abcdef" for char in value.strip())
+        )
+
+    def _parse_remote_sha256(self, output: str) -> str:
+        for token in output.strip().split():
+            if self._is_valid_sha256(token):
+                return token.lower()
+        return ""
+
+    def _remote_handoff_bus_sha256(self, device: DeviceRecord, bus_path: str) -> str:
+        command = list(remote_file_sha256sum_command(device, bus_path))
+        try:
+            result = run_cmd(command, timeout=15)
+        except Exception as exc:  # noqa: BLE001
+            self.set_status(f"Bus hash probe failed on {device.name}: {exc}")
+            return ""
+        if result.returncode != 0:
+            return ""
+        return self._parse_remote_sha256(result.stdout)
+
+    def _build_bus_target_status(
+        self,
+        assignment: dict[str, str],
+        status: str,
+        detail: str,
+        bus_path: Path,
+        remote_artifact_sha256: str = "",
+    ) -> TeamBusTargetStatus:
+        local_artifact_sha256 = self._file_sha256_hex(bus_path)
+        if status == "local":
+            remote_artifact_sha256 = local_artifact_sha256
+        return TeamBusTargetStatus(
+            lane_slug=assignment.get("lane_slug", ""),
+            device_name=assignment.get("device_name", "unknown"),
+            target=assignment.get("target", "unknown"),
+            status=status,
+            detail=detail,
+            artifact_path=(
+                f"{assignment.get('target', 'unknown')}:{remote_team_dir(self.mesh_team_run_id)}/out/handoff-bus.md"
+                if self.mesh_team_run_id
+                else str(bus_path)
+            ),
+            artifact_sha256=local_artifact_sha256,
+            artifact_remote_sha256=remote_artifact_sha256,
+            ts=int(time.time()),
+        )
+
+    def _bus_assignment_by_device(self, device_name: str) -> dict[str, str] | None:
+        return next((item for item in self.mesh_team_assignments if item.get("device_name") == device_name), None)
+
+    def _sync_mesh_bus_targets(
+        self,
+        assignments: list[dict[str, str]],
+        bus_path: Path,
+    ) -> tuple[tuple[TeamBusTargetStatus, ...], int, list[str]]:
+        results: list[TeamBusTargetStatus] = []
+        sent = 0
+        errors: list[str] = []
+        lock = threading.Lock()
+        if not self.mesh_team_run_id:
+            return (), 0, ["No run id"]
+        run_id = self.mesh_team_run_id
+
+        def sync_one(assignment: dict[str, str]) -> None:
+            nonlocal sent
+            device = self.mesh_assignment_device(assignment)
+            if device is None:
+                msg = f"{assignment.get('device_name', 'device')}: missing device record"
+                with lock:
+                    errors.append(msg)
+                    results.append(self._build_bus_target_status(assignment, "failed", msg, bus_path))
+                return
+            if self.is_local_mesh_device(device):
+                with lock:
+                    sent += 1
+                    result = self._build_bus_target_status(assignment, "local", "local machine", bus_path)
+                    results.append(result)
+                return
+            try:
+                team_mkdir = run_cmd(list(ssh_mkdir_command(device, remote_team_dir(run_id))), timeout=20)
+            except Exception as exc:  # noqa: BLE001
+                msg = f"{device.name}: team mkdir failed: {exc}"
+                with lock:
+                    errors.append(msg)
+                    results.append(self._build_bus_target_status(assignment, "failed", msg, bus_path))
+                return
+            if team_mkdir.returncode != 0:
+                detail = (team_mkdir.stderr or team_mkdir.stdout or "mkdir failed").strip().splitlines()
+                msg = f"{device.name}: team mkdir failed: {detail[-1] if detail else 'mkdir failed'}"
+                with lock:
+                    errors.append(msg)
+                    results.append(self._build_bus_target_status(assignment, "failed", msg, bus_path))
+                return
+            try:
+                result = run_cmd(list(rsync_team_package_command(self.mesh_team_dir, device, run_id)), timeout=35)
+            except Exception as exc:  # noqa: BLE001
+                msg = f"{device.name}: {exc}"
+                with lock:
+                    errors.append(msg)
+                    results.append(self._build_bus_target_status(assignment, "failed", msg, bus_path))
+                return
+            if result.returncode == 0:
+                artifact_path = f"{remote_team_dir(run_id)}/out/handoff-bus.md"
+                remote_sha = self._remote_handoff_bus_sha256(device, artifact_path)
+                with lock:
+                    sent += 1
+                    results.append(
+                        self._build_bus_target_status(
+                            assignment,
+                            "synced",
+                            f"{device.name}: synced" + ("" if remote_sha else " (remote hash unavailable)"),
+                            bus_path,
+                            remote_artifact_sha256=remote_sha,
+                        )
+                    )
+                    if not remote_sha:
+                        detail = f"{assignment.get('device_name', 'device')}: remote checksum could not be read"
+                        errors.append(detail)
+                        results[-1] = self._build_bus_target_status(
+                            assignment,
+                            "synced",
+                            f"{device.name}: synced (remote hash unavailable)",
+                            bus_path,
+                            remote_artifact_sha256="",
+                        )
+            else:
+                detail = (result.stderr or result.stdout or "rsync failed").strip().splitlines()
+                msg = f"{device.name}: {detail[-1] if detail else 'rsync failed'}"
+                with lock:
+                    errors.append(msg)
+                    results.append(self._build_bus_target_status(assignment, "failed", msg, bus_path))
+
+        threads = [threading.Thread(target=sync_one, args=(assignment,), daemon=True) for assignment in assignments]
+        for thread in threads:
+            thread.start()
+        for assignment, thread in zip(assignments, threads, strict=False):
+            thread.join(42)
+            if thread.is_alive():
+                msg = f"{assignment.get('device_name', 'device')}: sync still running after timeout"
+                with lock:
+                    errors.append(msg)
+                    results.append(self._build_bus_target_status(assignment, "failed", msg, bus_path))
+        return tuple(results), sent, errors
+
+    def finish_mesh_handoff_bus_sync(
+        self,
+        sent: int,
+        bus_path: Path,
+        errors: list[str],
+        target_statuses: tuple[TeamBusTargetStatus, ...],
+    ) -> bool:
         self.mesh_team_last_bus_sent = sent
         self.mesh_team_last_bus_failures = list(errors)
         self.mesh_team_last_bus_path = bus_path
+        report: TeamBusReport | None = None
         if self.mesh_team_dir is not None:
-            write_bus_report(self.mesh_team_dir, sent=sent, failures=errors, bus_path=bus_path)
+            write_bus_report(
+                self.mesh_team_dir,
+                sent=sent,
+                failures=errors,
+                bus_path=bus_path,
+                target_statuses=target_statuses,
+            )
+            self.mesh_team_last_bus_report = load_bus_report(self.mesh_team_dir)
+            report = self.mesh_team_last_bus_report
         self.render_mesh_team()
         if errors:
             self.set_mesh_team_status(f"Handoff bus synced to {sent}; review needed: " + " | ".join(errors[:4]), "bad")
@@ -4016,6 +6076,12 @@ class CodexControl(Gtk.Application):
         else:
             self.set_mesh_team_status(f"Handoff bus synced to {sent} team device(s): {bus_path}")
             self.set_status(f"Synced handoff bus to {sent} device(s)")
+        if report is not None:
+            def verifier() -> None:
+                checked = self._bus_targets_with_integrity(report)
+                GLib.idle_add(self.finish_mesh_bus_verification, checked, report)
+
+            threading.Thread(target=verifier, daemon=True).start()
         return False
 
     def on_sync_mesh_handoff_bus(self, _button: Gtk.Button) -> None:
@@ -4031,144 +6097,289 @@ class CodexControl(Gtk.Application):
         self.set_status("Syncing handoff bus")
 
         def worker() -> None:
-            errors: list[str] = []
-            sent = 0
-            lock = threading.Lock()
-
-            def sync_one(assignment: dict[str, str]) -> None:
-                nonlocal sent
-                device = self.mesh_assignment_device(assignment)
-                if device is None:
-                    with lock:
-                        errors.append(f"{assignment.get('device_name', 'device')}: missing device record")
-                    return
-                if self.is_local_mesh_device(device):
-                    with lock:
-                        sent += 1
-                    return
-                try:
-                    team_mkdir = run_cmd(list(ssh_mkdir_command(device, remote_team_dir(run_id))), timeout=20)
-                except Exception as exc:  # noqa: BLE001
-                    with lock:
-                        errors.append(f"{device.name}: team mkdir failed: {exc}")
-                    return
-                if team_mkdir.returncode != 0:
-                    detail = (team_mkdir.stderr or team_mkdir.stdout or "mkdir failed").strip().splitlines()
-                    with lock:
-                        errors.append(f"{device.name}: team mkdir failed: {detail[-1] if detail else 'mkdir failed'}")
-                    return
-                try:
-                    result = run_cmd(list(rsync_team_package_command(team_dir, device, run_id)), timeout=35)
-                except Exception as exc:  # noqa: BLE001
-                    with lock:
-                        errors.append(f"{device.name}: {exc}")
-                    return
-                if result.returncode == 0:
-                    with lock:
-                        sent += 1
-                else:
-                    detail = (result.stderr or result.stdout or "rsync failed").strip().splitlines()
-                    with lock:
-                        errors.append(f"{device.name}: {detail[-1] if detail else 'rsync failed'}")
-
-            threads = [threading.Thread(target=sync_one, args=(assignment,), daemon=True) for assignment in assignments]
-            for thread in threads:
-                thread.start()
-            for assignment, thread in zip(assignments, threads, strict=False):
-                thread.join(42)
-                if thread.is_alive():
-                    with lock:
-                        errors.append(f"{assignment.get('device_name', 'device')}: sync still running after timeout")
-            GLib.idle_add(self.finish_mesh_handoff_bus_sync, sent, bus_path, errors)
+            target_statuses, sent, errors = self._sync_mesh_bus_targets(assignments, bus_path)
+            GLib.idle_add(self.finish_mesh_handoff_bus_sync, sent, bus_path, errors, target_statuses)
 
         threading.Thread(target=worker, daemon=True).start()
 
     def bus_failed_device_names(self) -> tuple[str, ...]:
-        names = []
+        names: set[str] = set()
+        report = self._team_bus_report()
+        if report is not None:
+            for target in report.targets:
+                if target.status in {"failed", "stale"}:
+                    names.add(target.device_name)
         for error in self.mesh_team_last_bus_failures:
             if ":" in error:
-                names.append(error.split(":", 1)[0].strip())
-        return tuple(dict.fromkeys(names))
+                names.add(error.split(":", 1)[0].strip())
+        return tuple(sorted(names))
+
+    def bus_repair_assignments(self) -> tuple[dict[str, str], ...]:
+        if self.mesh_team_dir is None:
+            return ()
+        fail_names = set(self.bus_failed_device_names())
+        if not fail_names:
+            return ()
+        return tuple(
+            assignment
+            for assignment in self.mesh_team_assignments
+            if assignment.get("device_name", "") in fail_names
+        )
+
+    def on_preview_mesh_bus_repair(self, _button: Gtk.Button) -> None:
+        if self.mesh_team_dir is None or not self.mesh_team_assignments:
+            self.set_mesh_team_status("No team run loaded for repair preview.", "warn")
+            self.set_status("Prepare or load a team first", "warn")
+            return
+        repair_assignments = self.bus_repair_assignments()
+        if not repair_assignments:
+            self.set_mesh_team_status("No bus repair targets to preview.", "warn")
+            self.set_status("No bus repair targets", "warn")
+            return
+        report = self._team_bus_report()
+        status_map = {item.device_name: item for item in (report.targets if report is not None else ())}
+        lines = [
+            "# Bus Repair Preview",
+            "",
+            f"Team run: {self.mesh_team_run_id}",
+            f"Candidates: {len(repair_assignments)}",
+            "",
+            "Targets to retry:",
+        ]
+        for assignment in repair_assignments:
+            device = assignment.get("device_name", "unknown")
+            status = "failed"
+            detail = "unknown"
+            target = assignment.get("target", "")
+            match = status_map.get(device)
+            if match is not None:
+                status = match.status
+                detail = match.detail
+            lines.append(f"- {device} | {target} | {status} | {detail}")
+        if report is None and self.mesh_team_last_bus_failures:
+            lines.extend([
+                "",
+                "Recent failure details:",
+                *[f"- {item}" for item in self.mesh_team_last_bus_failures],
+            ])
+        text = "\n".join(lines)
+        self.copy_mesh_text(text, f"Bus repair preview copied ({len(repair_assignments)} target(s))")
+        self.set_mesh_team_status(f"Preview prepared for {len(repair_assignments)} repair target(s).")
 
     def on_retry_mesh_handoff_bus(self, _button: Gtk.Button) -> None:
         if self.mesh_team_dir is None or not self.mesh_team_assignments:
             self.set_mesh_team_status("No team run to retry.", "warn")
             self.set_status("Prepare or load a team first", "warn")
             return
-        failed_names = set(self.bus_failed_device_names())
-        if not failed_names:
+        repair_assignments = list(self.bus_repair_assignments())
+        if not repair_assignments:
             self.set_mesh_team_status("No failed bus targets to retry.", "warn")
             self.set_status("No failed bus targets to retry", "warn")
             return
-        retry_assignments = [
-            assignment for assignment in self.mesh_team_assignments
-            if assignment.get("device_name", "") in failed_names
-        ]
-        if not retry_assignments:
+        if not repair_assignments:
             self.set_mesh_team_status("No matching failed assignments to retry.", "warn")
             self.set_status("No matching failed assignments", "warn")
             return
-        self.set_mesh_team_status(f"Retrying handoff bus for {len(retry_assignments)} failed device(s)...")
+        self.set_mesh_team_status(f"Retrying handoff bus for {len(repair_assignments)} failed device(s)...")
         self.set_status("Retrying handoff bus")
 
         def worker() -> None:
-            errors: list[str] = []
-            sent = 0
-            lock = threading.Lock()
+            if self.mesh_team_last_bus_path is None:
+                bus_path = write_handoff_bus(self.mesh_team_dir)
+            else:
+                bus_path = self.mesh_team_last_bus_path
+            target_statuses, sent, errors = self._sync_mesh_bus_targets(repair_assignments, bus_path)
+            GLib.idle_add(self.finish_mesh_handoff_bus_sync, sent, bus_path, errors, target_statuses)
 
-            def sync_one(assignment: dict[str, str]) -> None:
-                nonlocal sent
-                device = self.mesh_assignment_device(assignment)
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _bus_targets_with_integrity(self, report: TeamBusReport | None) -> tuple[TeamBusTargetStatus, ...]:
+        if report is None:
+            return ()
+        bus_path = Path(report.bus_path)
+        current_sha = self._file_sha256_hex(bus_path)
+        if not current_sha:
+            return report.targets
+        updated: list[TeamBusTargetStatus] = []
+        team_run_id = str(report.run_id)
+        for target in report.targets:
+            status = target.status
+            detail = target.detail
+            remote_artifact_sha256 = target.artifact_remote_sha256
+            if status not in {"local", "synced", "stale"} and status != "failed":
+                detail = f"{detail} | integrity check skipped"
+                updated.append(
+                    TeamBusTargetStatus(
+                        lane_slug=target.lane_slug,
+                        device_name=target.device_name,
+                        target=target.target,
+                        status=status,
+                        detail=detail,
+                        artifact_path=target.artifact_path,
+                        artifact_sha256=target.artifact_sha256,
+                        artifact_remote_sha256=target.artifact_remote_sha256,
+                        ts=target.ts,
+                    )
+                )
+                continue
+            normalized_status = status
+            if status == "stale":
+                normalized_status = "synced"
+            if status == "failed":
+                updated.append(target)
+                continue
+            target_hash = target.artifact_sha256
+            if not target_hash:
+                updated.append(target)
+                continue
+            if target_hash != current_sha:
+                normalized_status = "stale"
+                detail = f"{detail} | checksum mismatch"
+                updated.append(
+                    TeamBusTargetStatus(
+                        lane_slug=target.lane_slug,
+                        device_name=target.device_name,
+                        target=target.target,
+                        status=normalized_status,
+                        detail=detail,
+                        artifact_path=target.artifact_path,
+                        artifact_sha256=target.artifact_sha256,
+                        artifact_remote_sha256=target.artifact_remote_sha256,
+                        ts=target.ts,
+                    )
+                )
+                continue
+            if normalized_status == "synced":
+                assignment = self._bus_assignment_by_device(target.device_name)
+                device = self.mesh_assignment_device(assignment) if assignment is not None else None
                 if device is None:
-                    with lock:
-                        errors.append(f"{assignment.get('device_name', 'device')}: missing device record")
-                    return
-                if self.is_local_mesh_device(device):
-                    with lock:
-                        sent += 1
-                    return
-                try:
-                    team_mkdir = run_cmd(list(ssh_mkdir_command(device, remote_team_dir(self.mesh_team_run_id))), timeout=20)
-                except Exception as exc:  # noqa: BLE001
-                    with lock:
-                        errors.append(f"{device.name}: team mkdir failed: {exc}")
-                    return
-                if team_mkdir.returncode != 0:
-                    detail = (team_mkdir.stderr or team_mkdir.stdout or "mkdir failed").strip().splitlines()
-                    with lock:
-                        errors.append(f"{device.name}: team mkdir failed: {detail[-1] if detail else 'mkdir failed'}")
-                    return
-                try:
-                    result = run_cmd(list(rsync_team_package_command(self.mesh_team_dir, device, self.mesh_team_run_id)), timeout=35)
-                except Exception as exc:  # noqa: BLE001
-                    with lock:
-                        errors.append(f"{device.name}: {exc}")
-                    return
-                if result.returncode == 0:
-                    with lock:
-                        sent += 1
-                else:
-                    detail = (result.stderr or result.stdout or "rsync failed").strip().splitlines()
-                    with lock:
-                        errors.append(f"{device.name}: {detail[-1] if detail else 'rsync failed'}")
+                    detail = f"{detail} | integrity target lookup failed"
+                    updated.append(
+                        TeamBusTargetStatus(
+                            lane_slug=target.lane_slug,
+                            device_name=target.device_name,
+                            target=target.target,
+                            status=status,
+                            detail=detail,
+                            artifact_path=target.artifact_path,
+                            artifact_sha256=target.artifact_sha256,
+                            artifact_remote_sha256=target.artifact_remote_sha256,
+                            ts=target.ts,
+                        )
+                    )
+                    continue
+                remote_path = f"{remote_team_dir(team_run_id)}/out/handoff-bus.md"
+                remote_hash = self._remote_handoff_bus_sha256(device, remote_path)
+                if not remote_hash:
+                    detail = f"{detail} | remote checksum unavailable"
+                    updated.append(
+                        TeamBusTargetStatus(
+                            lane_slug=target.lane_slug,
+                            device_name=target.device_name,
+                            target=target.target,
+                            status=status,
+                            detail=detail,
+                            artifact_path=target.artifact_path,
+                            artifact_sha256=target.artifact_sha256,
+                            artifact_remote_sha256=target.artifact_remote_sha256,
+                            ts=target.ts,
+                        )
+                    )
+                    continue
+                expected_remote = target.artifact_remote_sha256 or target.artifact_sha256
+                if remote_hash != expected_remote:
+                    normalized_status = "stale"
+                    detail = f"{detail} | remote checksum mismatch"
+                remote_artifact_sha256 = remote_hash
+            updated.append(TeamBusTargetStatus(
+                lane_slug=target.lane_slug,
+                device_name=target.device_name,
+                target=target.target,
+                status=normalized_status,
+                detail=detail,
+                artifact_path=target.artifact_path,
+                artifact_sha256=target.artifact_sha256,
+                artifact_remote_sha256=remote_artifact_sha256,
+                ts=target.ts,
+            ))
+        return tuple(updated)
 
-            threads = [threading.Thread(target=sync_one, args=(assignment,), daemon=True) for assignment in retry_assignments]
-            for thread in threads:
-                thread.start()
-            for assignment, thread in zip(retry_assignments, threads, strict=False):
-                thread.join(42)
-                if thread.is_alive():
-                    with lock:
-                        errors.append(f"{assignment.get('device_name', 'device')}: retry still running after timeout")
-            GLib.idle_add(self.finish_mesh_handoff_bus_sync, sent, self.mesh_team_last_bus_path or write_handoff_bus(self.mesh_team_dir), errors)
+    def finish_mesh_bus_verification(
+        self,
+        target_statuses: tuple[TeamBusTargetStatus, ...],
+        report: TeamBusReport | None,
+    ) -> bool:
+        if self.mesh_team_dir is None or report is None:
+            self.set_mesh_team_status("No bus report to verify.", "bad")
+            self.set_status("No bus report", "warn")
+            return False
+        baseline = tuple(report.failures or ())
+        stale_failures = [
+            f"{target.device_name}: {target.detail}"
+            for target in target_statuses
+            if target.status == "stale"
+        ]
+        seen = set()
+        merged_failures = []
+        for item in (*baseline, *stale_failures):
+            if item not in seen:
+                seen.add(item)
+                merged_failures.append(item)
+        self.mesh_team_last_bus_report = TeamBusReport(
+            run_id=report.run_id,
+            team_dir=report.team_dir,
+            bus_path=report.bus_path,
+            sent=report.sent,
+            failures=tuple(merged_failures),
+            generated=report.generated,
+            generated_epoch=report.generated_epoch,
+            targets=target_statuses,
+        )
+        write_bus_report(
+            Path(report.team_dir),
+            sent=report.sent,
+            failures=list(merged_failures),
+            bus_path=Path(report.bus_path),
+            target_statuses=target_statuses,
+        )
+        self.render_mesh_team()
+        if stale_failures:
+            self.set_mesh_team_status(
+                f"Bus verification found {len(stale_failures)} stale target(s): " + " | ".join(stale_failures[:4]),
+                "bad",
+            )
+            self.set_status("Bus verification needs repair", "warn")
+        else:
+            self.set_mesh_team_status("Bus integrity verified. All synced targets match current bus artifact hash.")
+        return False
+
+    def on_verify_mesh_bus_integrity(self, _button: Gtk.Button) -> None:
+        report = self._team_bus_report()
+        if report is None:
+            self.set_mesh_team_status("No bus report available. Sync the handoff bus first.", "warn")
+            self.set_status("No bus report", "warn")
+            return
+        bus_path = Path(report.bus_path)
+        if not bus_path.exists():
+            self.set_mesh_team_status(f"Bus artifact missing: {bus_path}", "bad")
+            self.set_status("Bus artifact missing", "warn")
+            return
+        self.set_mesh_team_status("Verifying bus integrity across local and remote targets...")
+        self.set_status("Verifying handoff bus integrity")
+
+        def worker() -> None:
+            checked = self._bus_targets_with_integrity(report)
+            GLib.idle_add(self.finish_mesh_bus_verification, checked, report)
 
         threading.Thread(target=worker, daemon=True).start()
 
     def render_mesh_team(self) -> None:
         if not hasattr(self, "mesh_team_list"):
             return
+        self.refresh_mesh_action_sensitivity()
         self.clear_listbox(self.mesh_team_list)
         if not self.mesh_team_assignments:
+            self.render_mesh_launch_console()
             row = Gtk.ListBoxRow()
             row.add_css_class("team-row")
             row.set_child(self.label("No prepared team yet. Check Fleet, then Prepare Team.", "muted", wrap=True))
@@ -4178,12 +6389,21 @@ class CodexControl(Gtk.Application):
                 saved = len(team_run_dirs(TEAM_DIR))
                 self.mesh_team_status_label.set_text(
                     f"{ready} ready trusted device(s). {saved} saved team run(s). Prepare Team creates lanes and prompts."
-                )
+            )
             return
         run_status = inspect_team_run(self.mesh_team_dir) if self.mesh_team_dir is not None else None
+        self.render_mesh_launch_console(run_status)
         if hasattr(self, "mesh_team_status_label"):
             if run_status is not None:
-                self.mesh_team_status_label.set_text(f"{run_status.summary_line()} | {self.mesh_team_dir}")
+                bus_report = self._team_bus_report()
+                bus_suffix = ""
+                if bus_report is not None and bus_report.targets:
+                    stale = getattr(bus_report, "stale_count", 0)
+                    bus_suffix = (
+                        f" | bus {bus_report.synced_count} synced / {bus_report.failed_count} failed"
+                        f" / {stale} stale of {len(bus_report.targets)}"
+                    )
+                self.mesh_team_status_label.set_text(f"{run_status.summary_line()} | {self.mesh_team_dir}{bus_suffix}")
             else:
                 self.mesh_team_status_label.set_text(
                     f"{len(self.mesh_team_assignments)} lane(s) | {self.mesh_team_run_id} | {self.mesh_team_dir}"
@@ -4204,25 +6424,42 @@ class CodexControl(Gtk.Application):
                 (item for item in self.mesh_team_assignments if item.get("lane_slug") == lane.lane_slug),
                 {},
             )
+            bus_report = self._team_bus_report()
+            bus_status = bus_report.target_for_device(lane.device_name) if bus_report is not None else None
             row = Gtk.ListBoxRow()
             row.add_css_class("team-row")
             content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=5)
             top = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
             title = self.label(f"{lane.lane_title} | {lane.device_name}", "row-title")
             title.set_hexpand(True)
+            title.set_ellipsize(Pango.EllipsizeMode.END)
+            title.set_tooltip_text(f"{lane.lane_title} | {lane.device_name}")
             top.append(title)
-            top.append(self.chip_label(lane.status, self.chip_css_for_status(lane.status)))
+            chip_flow = self.flow_row()
+            self.flow_append(chip_flow, self.chip_label(lane.status, self.chip_css_for_status(lane.status)))
+            if assignment.get("role_id"):
+                role_title = assignment.get("role_title", "") or assignment.get("role_id", "")
+                self.flow_append(chip_flow, self.chip_label(role_title.replace("-", " ").title(), "chip"))
+            if bus_status is not None:
+                self.flow_append(chip_flow, self.chip_label(f"bus: {bus_status.status}", self._bus_status_css(bus_status.status)))
             content.append(top)
+            content.append(chip_flow)
             content.append(self.label(lane.focus, "muted", wrap=True))
             detail = lane.detail
             if getattr(lane, "handoff_bytes", 0) or getattr(lane, "final_bytes", 0):
                 detail += f" | handoff {getattr(lane, 'handoff_bytes', 0)} bytes | final {getattr(lane, 'final_bytes', 0)} bytes"
-            content.append(self.label(detail, "muted", wrap=True))
-            target = self.label(
+            if bus_status is not None:
+                detail += f" | comm: {bus_status.detail}"
+            else:
+                detail += " | comm: not synced"
+            detail_label = self.label(detail, "muted", wrap=True)
+            detail_label.set_lines(2)
+            detail_label.set_ellipsize(Pango.EllipsizeMode.END)
+            detail_label.set_tooltip_text(detail)
+            content.append(detail_label)
+            target = self.muted_meta_label(
                 f"{assignment.get('target', 'target unknown')} | {assignment.get('project_root', 'project unknown')}",
-                "muted",
             )
-            target.set_ellipsize(Pango.EllipsizeMode.MIDDLE)
             content.append(target)
             row.set_child(content)
             self.mesh_team_list.append(row)
@@ -4337,8 +6574,66 @@ class CodexControl(Gtk.Application):
 
         threading.Thread(target=worker, daemon=True).start()
 
+    def probe_mesh_device(self, device: DeviceRecord) -> DeviceProbe:
+        try:
+            command = local_probe_command(device) if self.is_local_mesh_device(device) else ssh_probe_command(device)
+            result = run_cmd(list(command), timeout=25)
+            text = result.stdout
+            if result.stderr:
+                text += "\n[stderr]\n" + result.stderr
+            return parse_probe_output(device, text, result.returncode)
+        except subprocess.TimeoutExpired as exc:
+            text = str(exc.stdout or "")
+            if exc.stderr:
+                text += "\n[stderr]\n" + str(exc.stderr)
+            return parse_probe_output(device, text or "probe timed out", 124)
+        except Exception as exc:  # noqa: BLE001
+            return parse_probe_output(device, str(exc), 1)
+
+    def finish_mesh_check(self, device: DeviceRecord, status: str) -> None:
+        self.set_mesh_team_status(f"Checked {device.name}: {status}")
+
+    def on_check_selected_device(self, _button: Gtk.Button) -> None:
+        device = self.selected_mesh_device()
+        if device is None:
+            self.set_mesh_team_status("No device selected", "warn")
+            self.set_status("Select a device", "warn")
+            return
+        self.set_mesh_team_status(f"Checking {device.name}...")
+
+        def worker() -> None:
+            probe = self.probe_mesh_device(device)
+            GLib.idle_add(self.apply_mesh_probe, device.id, probe)
+            GLib.idle_add(self.finish_mesh_check, device, probe.status)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _filtered_check_targets(self) -> tuple[DeviceRecord, ...]:
+        readiness = mesh_readiness_report(self.devices, self.mesh_probe_records)
+        return tuple(self._filtered_mesh_devices(readiness))
+
+    def _trusted_devices_from(self, devices: tuple[DeviceRecord, ...]) -> tuple[DeviceRecord, ...]:
+        return tuple(device for device in devices if self.trusted_mesh_device(device))
+
+    def on_check_visible_devices(self, _button: Gtk.Button) -> None:
+        targets = self._trusted_devices_from(self._filtered_check_targets())
+        if not targets:
+            self.set_mesh_team_status("No visible trusted devices to check.", "warn")
+            self.set_status("No visible trusted devices", "warn")
+            return
+        self.set_mesh_team_status(f"Checking {len(targets)} visible trusted device(s)...")
+        self.set_status("Mesh visible check running")
+
+        def worker() -> None:
+            for device in targets:
+                probe = self.probe_mesh_device(device)
+                GLib.idle_add(self.apply_mesh_probe, device.id, probe)
+            GLib.idle_add(self.finish_mesh_probe, len(targets))
+
+        threading.Thread(target=worker, daemon=True).start()
+
     def on_check_fleet(self, _button: Gtk.Button) -> None:
-        targets = [device for device in self.devices if self.trusted_mesh_device(device)]
+        targets = tuple(device for device in self.devices if self.trusted_mesh_device(device))
         if not targets:
             self.set_mesh_team_status("No trusted devices to check.", "warn")
             self.set_status("No trusted devices", "warn")
@@ -4348,20 +6643,7 @@ class CodexControl(Gtk.Application):
 
         def worker() -> None:
             for device in targets:
-                try:
-                    command = local_probe_command(device) if self.is_local_mesh_device(device) else ssh_probe_command(device)
-                    result = run_cmd(list(command), timeout=25)
-                    text = result.stdout
-                    if result.stderr:
-                        text += "\n[stderr]\n" + result.stderr
-                    probe = parse_probe_output(device, text, result.returncode)
-                except subprocess.TimeoutExpired as exc:
-                    text = str(exc.stdout or "")
-                    if exc.stderr:
-                        text += "\n[stderr]\n" + str(exc.stderr)
-                    probe = parse_probe_output(device, text or "probe timed out", 124)
-                except Exception as exc:  # noqa: BLE001
-                    probe = parse_probe_output(device, str(exc), 1)
+                probe = self.probe_mesh_device(device)
                 GLib.idle_add(self.apply_mesh_probe, device.id, probe)
             GLib.idle_add(self.finish_mesh_probe, len(targets))
 
@@ -4370,6 +6652,21 @@ class CodexControl(Gtk.Application):
     def on_prepare_mesh_team(self, _button: Gtk.Button) -> None:
         if self.prepare_mesh_team_package():
             self.set_status(f"Prepared Codex Team {self.mesh_team_run_id}")
+            self.render_mesh_team_chat()
+
+    def on_prepare_visible_mesh_team(self, _button: Gtk.Button) -> None:
+        candidate_devices = self._mesh_team_seed_devices()
+        if not candidate_devices:
+            self.set_mesh_team_status("No visible devices to prepare from current filter set.", "warn")
+            self.set_status("No visible devices to prepare", "warn")
+            return
+        if not self.ready_mesh_devices(candidate_devices):
+            self.set_mesh_team_status("No visible ready devices. Run Check Fleet or change filters.", "warn")
+            self.set_status("No visible ready devices", "warn")
+            return
+        if self.prepare_mesh_team_package(candidate_devices):
+            self.set_status(f"Prepared Codex Team {self.mesh_team_run_id} from visible devices")
+            self.render_mesh_team_chat()
 
     def should_sync_project_to_device(self, device: DeviceRecord, project_path: Path) -> bool:
         if self.is_local_mesh_device(device):
@@ -4461,6 +6758,22 @@ class CodexControl(Gtk.Application):
             return
         assert self.mesh_team_dir is not None
         assignments = list(self.mesh_team_assignments)
+        if not assignments:
+            self.set_mesh_team_status("No team lanes staged. Run Prepare Team first.", "warn")
+            self.set_status("No team lanes to launch", "warn")
+            return
+        launch_ready, _, blocked = self._mesh_launch_guard(assignments)
+        if not launch_ready:
+            detail = "; ".join(blocked[:2])
+            self.set_mesh_team_status(
+                "Cannot launch: " + ("; ".join(blocked[:2]) if blocked else "run contains non-ready lanes."),
+                "bad",
+            )
+            if detail:
+                self.set_status(f"Launch blocked: {detail}", "bad")
+            else:
+                self.set_status("Launch blocked by mesh readiness", "bad")
+            return
         team_dir = self.mesh_team_dir
         run_id = self.mesh_team_run_id
         self.set_mesh_team_status(f"Syncing project and team package {run_id} to {len(assignments)} device(s)...")
@@ -4521,6 +6834,8 @@ class CodexControl(Gtk.Application):
                 else:
                     detail = (result.stderr or result.stdout or "rsync failed").strip().splitlines()
                     errors.append(f"{device.name}: {detail[-1] if detail else 'rsync failed'}")
+            if self.mesh_team_run_id is not None:
+                self.collect_team_chat_from_devices(team_dir, self.mesh_team_run_id)
             GLib.idle_add(self.finish_mesh_collect, collected, errors)
 
         threading.Thread(target=worker, daemon=True).start()
@@ -4767,10 +7082,33 @@ class CodexControl(Gtk.Application):
 
     def build_health_page(self) -> Gtk.Widget:
         box = self.page_box()
+
+        self.launcher_health_banner = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        self.launcher_health_banner.set_hexpand(True)
+        self.launcher_health_banner.set_margin_top(8)
+        self.launcher_health_banner.set_margin_bottom(4)
+        self.launcher_health_banner.set_visible(False)
+
+        self.launcher_health_banner_label = self.label(
+            "Launcher diagnostics not yet run",
+            "warning",
+            wrap=True,
+        )
+        self.launcher_health_banner_label.set_xalign(0)
+        self.launcher_health_banner.append(self.launcher_health_banner_label)
+
+        self.launcher_health_banner_button = Gtk.Button(label="Repair Launcher")
+        self.launcher_health_banner_button.connect("clicked", self.on_launcher_repair)
+        self.launcher_health_banner_button.add_css_class("destructive-action")
+        self.launcher_health_banner.append(self.launcher_health_banner_button)
+        box.append(self.launcher_health_banner)
+
         buttons = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
         for label, handler, primary in [
             ("Run Doctor", self.on_run_doctor, True),
             ("Setup Check", self.on_run_setup_check, False),
+            ("Launcher Diagnostics", self.on_launcher_diagnostics, False),
+            ("Repair Launcher", self.on_launcher_repair, False),
             ("Update Codex", self.on_update_codex, False),
             ("Login", self.on_login_codex, False),
             ("App Server Start", self.on_app_server_start, False),
@@ -4870,6 +7208,53 @@ class CodexControl(Gtk.Application):
             return "full access"
         return "config default"
 
+    def prompt_summary_text(self) -> str:
+        prompt = self.selected_prompt()
+        if not prompt:
+            return "Prompt is empty."
+        words = len(prompt.split())
+        lines = [line.strip() for line in prompt.splitlines() if line.strip()]
+        headline = lines[0] if lines else prompt
+        if len(headline) > 110:
+            headline = headline[:107].rstrip() + "..."
+        return f"{words} words | {headline}"
+
+    def refresh_workbench_focus(self) -> None:
+        snapshot = self.current_project_snapshot()
+        commands = snapshot.commands if snapshot is not None else ()
+        threads = snapshot.threads if snapshot is not None else ()
+        project_name = snapshot.name if snapshot is not None else Path(self.selected_project()).name
+        validation = commands[0].label if commands else "no validation"
+        thread_text = f"{len(threads)} thread" if len(threads) == 1 else f"{len(threads)} threads"
+
+        if hasattr(self, "mission_project_chip"):
+            self.set_chip(self.mission_project_chip, project_name or "project", "chip")
+        if hasattr(self, "mission_mode_chip"):
+            self.set_chip(self.mission_mode_chip, self.selected_mode_label(), "mode-pill")
+        if hasattr(self, "mission_validation_chip"):
+            css = "chip-strong" if commands else "chip"
+            self.set_chip(self.mission_validation_chip, validation, css)
+        if hasattr(self, "mission_thread_chip"):
+            css = "chip-strong" if threads else "chip"
+            self.set_chip(self.mission_thread_chip, thread_text, css)
+        if hasattr(self, "mission_path_label"):
+            project_path = self.selected_project()
+            self.mission_path_label.set_text(f"Project path: {project_path}")
+            self.mission_path_label.set_tooltip_text(project_path)
+        if hasattr(self, "mission_validation_label"):
+            if commands:
+                detail = "; ".join(command.command for command in commands[:2])
+                self.mission_validation_label.set_text(f"Validation ready: {detail}")
+                self.mission_validation_label.set_tooltip_text(detail)
+            else:
+                recommendation = snapshot.recommendation if snapshot is not None else "Scan the project before launching."
+                self.mission_validation_label.set_text(f"Validation: none detected. {recommendation}")
+                self.mission_validation_label.set_tooltip_text(self.mission_validation_label.get_text())
+        if hasattr(self, "composer_summary_label"):
+            summary = self.prompt_summary_text()
+            self.composer_summary_label.set_text(summary)
+            self.composer_summary_label.set_tooltip_text(summary)
+
     def selected_power_values(self) -> tuple[str, str, str]:
         profile = self.dropdown_value(self.profile_combo) if hasattr(self, "profile_combo") else self.config.get("profile", "maximum-power")
         reasoning = self.dropdown_value(self.reasoning_combo) if hasattr(self, "reasoning_combo") else self.config.get("reasoning", "config")
@@ -4943,6 +7328,43 @@ class CodexControl(Gtk.Application):
                     card.remove_css_class(css_class)
                 css_class = "signal-bad" if signal.status in {"blocked", "block", "failed", "bad", "stopped"} else ("signal-ok" if signal.status in {"ready", "ok", "prepared", "queued", "launched", "running", "done"} else "signal-review")
                 card.add_css_class(css_class)
+        if hasattr(self, "operator_workflow_labels") and hasattr(self, "operator_workflow_cards"):
+            signal_map = {
+                "project": brief.signals[2] if len(brief.signals) > 2 else None,
+                "readiness": brief.signals[0] if brief.signals else None,
+                "autopilot": brief.signals[3] if len(brief.signals) > 3 else None,
+                "ledger": brief.signals[4] if len(brief.signals) > 4 else None,
+            }
+            for stage_key, labels in self.operator_workflow_labels.items():
+                signal = signal_map.get(stage_key)
+                title_label, value_label, detail_label = labels
+                if signal is None:
+                    title_label.set_text(stage_key.capitalize())
+                    value_label.set_text("n/a")
+                    detail_label.set_text("")
+                    continue
+                title_label.set_text(signal.title)
+                value_label.set_text(signal.value)
+                detail_label.set_text(signal.detail)
+                card = self.operator_workflow_cards.get(stage_key)
+                if card is not None:
+                    for css_class in ["signal-ok", "signal-review", "signal-bad"]:
+                        card.remove_css_class(css_class)
+                    css_class = "signal-bad" if signal.status in {"blocked", "block", "failed", "bad", "stopped"} else ("signal-ok" if signal.status in {"ready", "ok", "prepared", "queued", "launched", "running", "done"} else "signal-review")
+                    card.add_css_class(css_class)
+        if hasattr(self, "operator_next_step_banner"):
+            action_label = brief.next_action
+            detail = brief.subtitle
+            if brief.signals:
+                detail = f"{brief.signals[0].detail} | {brief.subtitle}"
+            self.update_next_step_banner(
+                self.operator_next_step_banner,
+                brief.title,
+                detail,
+                action_label=action_label,
+                enabled=True,
+            )
+        self.refresh_workbench_focus()
 
     def on_operator_action(self, button: Gtk.Button) -> None:
         action = (self.operator_brief or self.current_operator_brief()).next_action
@@ -4968,9 +7390,17 @@ class CodexControl(Gtk.Application):
 
     def set_chip(self, label: Gtk.Label, text: str, css: str) -> None:
         label.set_text(text)
+        label.set_tooltip_text(text)
         for item in ["chip", "chip-strong", "chip-danger", "mode-pill"]:
             label.remove_css_class(item)
         label.add_css_class(css)
+
+    def set_button_chip(self, button: Gtk.Button, text: str, css: str) -> None:
+        button.set_label(text)
+        button.set_tooltip_text(text)
+        for item in ["chip", "chip-strong", "chip-danger", "mode-pill"]:
+            button.remove_css_class(item)
+        button.add_css_class(css)
 
     def current_context_packet(self) -> ContextPacket:
         plan = self.current_quality_plan()
@@ -5447,11 +7877,24 @@ class CodexControl(Gtk.Application):
             top = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
             title = self.label(item.label, "quality-check-title")
             title.set_hexpand(True)
+            title.set_ellipsize(Pango.EllipsizeMode.END)
+            title.set_tooltip_text(item.label)
             status = getattr(item, "status", "running" if self.quality_running else "ready")
             top.append(title)
-            top.append(self.chip_label(status, self.chip_css_for_status(status)))
+            chip_flow = self.flow_row()
+            self.flow_append(chip_flow, self.chip_label(status, self.chip_css_for_status(status)))
+            if isinstance(item, QualityCheckResult):
+                exit_text = f"exit {item.exit_code}" if item.exit_code is not None else "timeout"
+                self.flow_append(chip_flow, self.chip_label(exit_text, self.chip_css_for_status(status)))
+                self.flow_append(chip_flow, self.chip_label(f"{item.duration_ms} ms", "chip"))
+            elif not compact:
+                self.flow_append(chip_flow, self.chip_label(f"{item.timeout}s", "chip"))
             detail = self.label(item.command_text(), "quality-check-detail", wrap=True)
+            detail.set_lines(2)
+            detail.set_ellipsize(Pango.EllipsizeMode.END)
+            detail.set_tooltip_text(item.command_text())
             content.append(top)
+            content.append(chip_flow)
             content.append(detail)
             if isinstance(item, QualityCheckResult) and item.output_tail and not compact:
                 output = self.label(item.output_tail.strip().splitlines()[-1][:160], "quality-check-detail", wrap=True)
@@ -5465,24 +7908,80 @@ class CodexControl(Gtk.Application):
         plan = self.current_quality_plan()
         self.quality_plan = plan
         report = self.active_quality_report(plan)
+        if report is not None and not self.quality_running:
+            pass_count = sum(1 for check in report.checks if check.status == "passed")
+            fail_count = sum(1 for check in report.checks if check.status == "failed")
+        else:
+            pass_count = 0
+            fail_count = 0
         if self.quality_running:
             summary = f"Running {len(plan.checks)} quality checks..."
             status = "running"
             score = "running"
+            detail = f"Project: {plan.project} | checks: {len(plan.checks)} | report pending"
+            artifact = "Artifact: running gate; report will replace the plan preview when finished"
+            next_title = "Gate running"
+            next_detail = "Checks are in progress; wait for the report before copying a handoff."
+            next_action = "Run Gate"
+            next_enabled = False
         elif report is not None:
             summary = report.summary()
             status = report.status
             score = f"score {report.score}"
+            detail = f"Report saved at {QUALITY_FILE} | checks: {len(report.checks)} | project: {report.project}"
+            artifact = f"Artifact: saved report at {QUALITY_FILE}"
+            failed = [check.label for check in report.checks if check.status == "failed"]
+            if failed:
+                next_title = "Fix failing checks"
+                next_detail = "Failed: " + ", ".join(failed[:3])
+                if len(failed) > 3:
+                    next_detail += f", +{len(failed) - 3} more"
+            else:
+                next_title = "Report is clean"
+                next_detail = "Copy the report into the lane handoff or rerun after additional edits."
+            next_action = "Run Gate"
+            next_enabled = True
         else:
             summary = plan.summary()
             status = "ready"
             score = "not run"
+            detail = f"Plan: {len(plan.checks)} check(s) | project: {plan.project} | report not run"
+            artifact = "Artifact: plan preview; no report has been generated for this project"
+            next_title = "Run the gate"
+            next_detail = "The current plan is ready; run checks before handing this workstation state to another lane."
+            next_action = "Run Gate"
+            next_enabled = True
         if hasattr(self, "quality_status_label"):
             self.quality_status_label.set_text(summary)
+        if hasattr(self, "quality_signal_label"):
+            self.quality_signal_label.set_text(detail)
         if hasattr(self, "quality_page_summary_label"):
             self.quality_page_summary_label.set_text(summary)
             self.set_chip(self.quality_page_score_label, score, self.chip_css_for_status(status))
             self.set_chip(self.quality_page_status_label, status, self.chip_css_for_status(status))
+            self.set_chip(
+                self.quality_page_pass_label,
+                f"{pass_count} pass",
+                "chip-strong" if pass_count else "chip",
+            )
+            self.set_chip(
+                self.quality_page_fail_label,
+                f"{fail_count} fail",
+                "chip-danger" if fail_count else "chip",
+            )
+        if hasattr(self, "quality_page_detail_label"):
+            self.quality_page_detail_label.set_text(detail)
+        if hasattr(self, "quality_page_artifact_label"):
+            self.quality_page_artifact_label.set_text(artifact)
+            self.quality_page_artifact_label.set_tooltip_text(artifact)
+        if hasattr(self, "quality_next_step_banner"):
+            self.update_next_step_banner(
+                self.quality_next_step_banner,
+                next_title,
+                next_detail,
+                next_action,
+                enabled=next_enabled,
+            )
         if hasattr(self, "quality_compact_list"):
             self.render_quality_check_rows(self.quality_compact_list, compact=True)
         if hasattr(self, "quality_page_list"):
@@ -6208,6 +8707,13 @@ class CodexControl(Gtk.Application):
             "atlas_root": self.atlas_root_entry.get_text().strip() if hasattr(self, "atlas_root_entry") else "",
             "receipt_auto": self.receipt_auto_switch.get_active() if hasattr(self, "receipt_auto_switch") else True,
             "prompt": self.selected_prompt(),
+            "focus_mode": self.focus_mode,
+            "mesh_filter_mode": self.mesh_filter_mode,
+            "mesh_team_only": self.mesh_team_only,
+            "mesh_launch_console_blocked_only": self.mesh_launch_console_blocked_only,
+            "mesh_launch_console_focus_filter": self.mesh_launch_console_focus_filter,
+            "mesh_live_refresh": self.mesh_live_refresh,
+            "mesh_live_refresh_seconds": self.mesh_live_refresh_seconds,
             "layout": layout_to_config(self.current_layout_state()),
         })
 
@@ -6301,14 +8807,28 @@ class CodexControl(Gtk.Application):
     def show_page(self, name: str) -> None:
         if self.stack is not None:
             self.stack.set_visible_child_name(name)
-        nav_list = getattr(self, "nav_list", None)
         row = self.nav_rows.get(name) if hasattr(self, "nav_rows") else None
-        if nav_list is not None and row is not None and nav_list.get_selected_row() is not row:
-            nav_list.select_row(row)
+        nav_lists = getattr(self, "nav_lists", [])
+        if row is not None and name not in PRIMARY_NAV_PAGES and hasattr(self, "nav_more_expander"):
+            self.nav_more_expander.set_expanded(True)
+        for listbox in nav_lists:
+            selected = listbox.get_selected_row()
+            if row is not None and row.get_parent() is listbox:
+                if selected is not row:
+                    listbox.select_row(row)
+            elif selected is not None:
+                listbox.unselect_row(selected)
 
     def render_action_list(self, listbox: Gtk.ListBox, actions: tuple[ActionSpec, ...]) -> None:
         self.clear_listbox(listbox)
+        context = self.palette_context()
         for action in actions:
+            preview = build_palette_preview(
+                action,
+                context,
+                self.command_for_palette_action(action.id),
+                prompt_redacted=bool(self.selected_prompt()),
+            )
             row = Gtk.ListBoxRow()
             row.action = action
             row.add_css_class("action-row")
@@ -6316,11 +8836,25 @@ class CodexControl(Gtk.Application):
             top = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
             title = self.label(action.title, "action-title")
             title.set_hexpand(True)
+            title.set_ellipsize(Pango.EllipsizeMode.END)
+            title.set_tooltip_text(action.title)
             top.append(title)
-            top.append(self.chip_label(action.group, "chip"))
+            chip_flow = self.flow_row()
+            self.flow_append(chip_flow, self.chip_label(action.group, "chip"))
+            self.flow_append(chip_flow, self.chip_label(preview.status, "chip-strong" if preview.ready else "chip-danger"))
+            self.flow_append(chip_flow, self.chip_label(preview.surface, "chip"))
             detail = self.label(action.detail, "action-detail", wrap=True)
+            detail.set_lines(2)
+            detail.set_ellipsize(Pango.EllipsizeMode.END)
+            detail.set_tooltip_text(action.detail)
+            requirement = self.label(preview.requirement_text(), "action-preview-detail", wrap=True)
+            requirement.set_lines(2)
+            requirement.set_ellipsize(Pango.EllipsizeMode.END)
+            requirement.set_tooltip_text(preview.detail_text())
             content.append(top)
+            content.append(chip_flow)
             content.append(detail)
+            content.append(requirement)
             row.set_child(content)
             listbox.append(row)
             if self.selected_action is not None and action.id == self.selected_action.id:
@@ -6346,6 +8880,24 @@ class CodexControl(Gtk.Application):
                 self.render_action_list(self.palette_list, ranked[:80])
         finally:
             self.rendering_actions = False
+        if hasattr(self, "palette_readiness_label"):
+            context = self.palette_context()
+            visible = ranked[:80]
+            previews = [
+                build_palette_preview(
+                    action,
+                    context,
+                    self.command_for_palette_action(action.id),
+                    prompt_redacted=bool(self.selected_prompt()),
+                )
+                for action in visible
+            ]
+            ready = sum(1 for preview in previews if preview.ready)
+            needs = len(previews) - ready
+            query_text = self.action_query.strip() or "all actions"
+            self.palette_readiness_label.set_text(
+                f"{ready} ready | {needs} need setup | showing {len(visible)} for {query_text}"
+            )
         self.update_action_detail()
 
     def update_action_detail(self) -> None:
@@ -6365,6 +8917,15 @@ class CodexControl(Gtk.Application):
             self.palette_action_detail_label.set_text(f"{action.detail}\nKeywords: {keywords}")
             self.palette_action_id_label.set_text(action.id)
         self.render_palette_preview(action)
+
+    def refresh_palette_execute_buttons(self, preview: PalettePreview | None) -> None:
+        enabled = bool(preview and preview.ready)
+        tooltip = "Execute selected action" if enabled else (
+            preview.requirement_text() if preview is not None else "Select a ready action"
+        )
+        for button in getattr(self, "palette_execute_buttons", []):
+            button.set_sensitive(enabled)
+            button.set_tooltip_text(tooltip)
 
     def palette_context(self) -> PaletteContext:
         project = self.selected_project()
@@ -6400,6 +8961,10 @@ class CodexControl(Gtk.Application):
             return self.build_command("login", "")
         if action_id == "codex.update":
             return self.build_command("update", "")
+        if action_id == "launcher.diagnostics":
+            return []
+        if action_id == "launcher.repair":
+            return [sys.executable, "-m", "pip", "install", "--user", "."]
         return []
 
     def render_palette_preview(self, action: ActionSpec | None) -> None:
@@ -6411,10 +8976,20 @@ class CodexControl(Gtk.Application):
                 self.set_chip(self.palette_preview_surface_label, "surface", "chip")
                 self.set_chip(self.palette_preview_risk_label, "risk", "chip")
                 self.palette_preview_summary_label.set_text("Select an action to preview its effect.")
+                self.palette_preview_decision_label.set_text("Decision: select an action")
                 self.palette_preview_requirements_label.set_text("Ready")
                 self.palette_preview_command_label.set_text("-")
+            self.refresh_palette_execute_buttons(None)
             if hasattr(self, "palette_compact_preview_label"):
                 self.palette_compact_preview_label.set_text("Preview: select an action")
+            if hasattr(self, "palette_next_step_banner"):
+                self.update_next_step_banner(
+                    self.palette_next_step_banner,
+                    "Select a command",
+                    "Search narrows to ready actions first; Execute runs the highlighted action.",
+                    "Execute",
+                    enabled=False,
+                )
             self.render_palette_history(None)
             return
         command = self.command_for_palette_action(action.id)
@@ -6432,12 +9007,25 @@ class CodexControl(Gtk.Application):
             self.set_chip(self.palette_preview_surface_label, preview.surface, "chip")
             self.set_chip(self.palette_preview_risk_label, preview.risk, "chip")
             self.palette_preview_summary_label.set_text(preview.summary)
+            decision = "Decision: ready to execute" if preview.ready else f"Decision: blocked until {', '.join(preview.requirements)}"
+            self.palette_preview_decision_label.set_text(decision)
+            self.palette_preview_decision_label.set_tooltip_text(decision)
             self.palette_preview_requirements_label.set_text(preview.requirement_text())
             self.palette_preview_command_label.set_text(preview.command_text or preview.detail_text())
+        self.refresh_palette_execute_buttons(preview)
         if hasattr(self, "palette_compact_preview_label"):
             command_hint = f" | {preview.command_text}" if preview.command_text else ""
             self.palette_compact_preview_label.set_text(
                 f"Preview: {preview.surface} | {preview.status} | {preview.risk}{command_hint}"
+            )
+        if hasattr(self, "palette_next_step_banner"):
+            title = f"Ready: {action.title}" if preview.ready else f"Needs setup: {action.title}"
+            self.update_next_step_banner(
+                self.palette_next_step_banner,
+                title,
+                f"{preview.surface} | {preview.risk} | {preview.requirement_text()}",
+                "Execute",
+                enabled=preview.ready,
             )
         self.render_palette_history(action)
 
@@ -6664,8 +9252,17 @@ class CodexControl(Gtk.Application):
                 "mesh.launch_team": self.on_launch_mesh_team,
                 "mesh.collect_team": self.on_collect_mesh_team,
                 "mesh.sync_bus": self.on_sync_mesh_handoff_bus,
+                "mesh.sync_chat": self.on_sync_team_chat,
+                "mesh.repair_bus": self.on_retry_mesh_handoff_bus,
                 "mesh.retry_bus": self.on_retry_mesh_handoff_bus,
+                "mesh.preview_repair_bus": self.on_preview_mesh_bus_repair,
+                "mesh.refresh_chat": self.on_refresh_team_chat,
+                "mesh.copy_chat": self.on_copy_team_chat,
+                "mesh.verify_bus": self.on_verify_mesh_bus_integrity,
+                "mesh.copy_bus_report": self.on_copy_mesh_team_bus_report,
+                "mesh.copy_role_bootstrap": self.on_copy_role_bootstrap,
                 "mesh.summary": self.on_copy_mesh_team_summary,
+                "mesh.review_summary": self.on_review_mesh_team_summary,
                 "mesh.open": self.on_open_mesh_team,
                 "quality.run": self.on_run_quality_gate,
                 "quality.copy": self.on_copy_quality_report,
@@ -6683,6 +9280,8 @@ class CodexControl(Gtk.Application):
                 "git.log": self.on_git_log,
                 "profiles.install": self.on_install_profiles,
                 "doctor.run": self.on_run_doctor,
+                "launcher.diagnostics": self.on_launcher_diagnostics,
+                "launcher.repair": self.on_launcher_repair,
                 "codex.login": self.on_login_codex,
                 "codex.update": self.on_update_codex,
                 "app.refresh": lambda _b: self.refresh_all(),
@@ -6736,10 +9335,10 @@ class CodexControl(Gtk.Application):
         except OSError as exc:
             self.set_status(f"Launch failed: {exc}", "bad")
 
-    def run_async_text(self, args: list[str], cwd: str | None, callback) -> None:
+    def run_async_text(self, args: list[str], cwd: str | None, callback, timeout: int = 30) -> None:
         def worker() -> None:
             try:
-                result = run_cmd(args, cwd=cwd, timeout=30)
+                result = run_cmd(args, cwd=cwd, timeout=timeout)
                 text = result.stdout
                 if result.stderr:
                     text += "\n[stderr]\n" + result.stderr
@@ -8177,7 +10776,7 @@ class CodexControl(Gtk.Application):
         self.set_status("Health failed", "bad")
         return False
 
-    def on_run_setup_check(self, _button: Gtk.Button) -> None:
+    def on_run_setup_check(self, _button: Gtk.Button | None = None) -> None:
         report = build_setup_report(
             project=self.selected_project(),
             codex_bin=self.codex_bin,
@@ -8185,8 +10784,58 @@ class CodexControl(Gtk.Application):
             devices_file=DEVICES_FILE,
         )
         self.set_text(self.health_buffer, report.detail_text())
+        self.render_launcher_health_banner(report)
         status = "ok" if report.status == "ready" else "warn" if report.status == "review" else "bad"
         self.set_status(report.summary(), status)
+
+    def render_launcher_health_banner(self, report: SetupReport) -> None:
+        if not hasattr(self, "launcher_health_banner") or not hasattr(self, "launcher_health_banner_label"):
+            return
+        launcher = next((item for item in report.checks if item.id == "launcher"), None)
+        if launcher is None or launcher.status == "ok":
+            self.launcher_health_banner.set_visible(False)
+            return
+        self.launcher_health_banner.set_visible(True)
+        self.launcher_health_banner_label.set_text(f"{launcher.title}: {launcher.detail}")
+        self.launcher_health_banner_label.remove_css_class("warning")
+        self.launcher_health_banner_label.remove_css_class("muted")
+        if launcher.status in {"block", "warn"}:
+            self.launcher_health_banner_label.add_css_class("warning")
+        else:
+            self.launcher_health_banner_label.add_css_class("muted")
+        if launcher.fix and hasattr(self, "launcher_health_banner_button"):
+            self.launcher_health_banner_button.set_visible(True)
+            self.launcher_health_banner_button.set_tooltip_text(launcher.fix)
+        else:
+            self.launcher_health_banner_button.set_visible(False)
+
+    def on_launcher_diagnostics(self, _button: Gtk.Button) -> None:
+        self.set_status("Running launcher diagnostics")
+        self.on_run_setup_check(None)
+
+    def on_launcher_repair(self, _button: Gtk.Button) -> None:
+        project = Path(self.selected_project())
+        if not (project / "pyproject.toml").exists():
+            fallback = Path.home() / "Projects" / "codex-gui"
+            if (fallback / "pyproject.toml").exists():
+                project = fallback
+            else:
+                self.set_status("Selected project is not a valid codex-gui checkout", "warn")
+                return
+        project = str(project)
+        args = [sys.executable, "-m", "pip", "install", "--user", "."]
+        self.set_text(self.health_buffer, f"$ {shell_join(args)}\n\nStarting launcher repair...\n")
+        self.set_status("Repairing launcher")
+        self.run_async_text(args, project, self.on_launcher_repair_done, timeout=300)
+
+    def on_launcher_repair_done(self, text: str, code: int) -> bool:
+        self.set_text(self.health_buffer, text)
+        if code == 0:
+            self.set_status("Launcher repair complete")
+            self.on_run_setup_check(None)
+        else:
+            self.set_status("Launcher repair failed", "warn")
+        return False
 
     def refresh_projects(self) -> None:
         paths = {self.selected_project()}

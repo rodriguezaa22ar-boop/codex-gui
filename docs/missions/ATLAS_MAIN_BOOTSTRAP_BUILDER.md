@@ -1,5 +1,7 @@
 # Atlas Main Mission: Bootstrap Builder
 
+Status: superseded by `ATLAS_MAIN_PRODUCT_PULSE.md` once Builder is already reachable and running.
+
 Issued by `atlas-ubuntu` Commander / Integrator.
 
 You are `atlas-main`, the Product / GTK UX Engineer, but this is an operator

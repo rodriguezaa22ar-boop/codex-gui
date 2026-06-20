@@ -72,6 +72,11 @@ nix-shell --run "python3 -m py_compile codex_devices.py codex_gui.py codex_actio
 If baseline fails, stop and report the exact command and failure before making
 broad changes.
 
+## Current Commander Note
+
+The product lane is already active on `atlas-main`. Do not duplicate the
+launch-console pulse UI work from that node. Stay on backend/core systems only.
+
 ## Codex Command
 
 Run this from `~/Projects/codex-gui`:
@@ -84,7 +89,13 @@ You are atlas-builder, the Core Systems Engineer lane for Codex Control.
 Read docs/TEAM_ROLES.md first. Stay within the Core Systems boundary.
 
 Mission:
-Implement a backend-first mesh readiness report path that the GUI and future CLI can reuse. It should inspect saved mesh devices, classify readiness using existing codex_devices helpers, and produce actionable next steps per worker without exposing secrets or requiring UI changes.
+Implement backend-first orchestration hardening that does not overlap the
+active `atlas-main` UI lane. Prefer one of these:
+
+- mesh doctor/report CLI follow-through
+- readiness classification cleanup
+- safer worker setup / launch plumbing
+- clearer SSH/Tailscale/Codex missing-state diagnostics
 
 Preferred shape:
 - Add small backend helpers rather than large GUI rewrites.

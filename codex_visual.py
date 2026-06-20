@@ -56,8 +56,16 @@ TOKENS: tuple[VisualToken, ...] = (
 REQUIRED_SELECTORS = (
     ".topbar",
     ".nav",
+    ".nav-more",
     ".page",
     ".panel",
+    ".launch-cockpit",
+    ".workflow-strip",
+    ".workflow-stage",
+    ".workflow-stage-title",
+    ".workflow-stage-value",
+    ".workflow-stage-detail",
+    ".launch-hero-actions",
     ".operator-console",
     ".terminal-panel",
     ".composer",
@@ -70,6 +78,10 @@ REQUIRED_SELECTORS = (
     ".action-feedback-title",
     ".action-history",
     ".action-history-title",
+    ".chip-flow",
+    ".next-step-banner",
+    ".next-step-title",
+    ".next-step-detail",
     ".device-mesh",
     ".device-row",
     ".mesh-detail",
@@ -150,6 +162,12 @@ window {
   color: #ffffff;
 }
 
+.nav-more {
+  margin: 4px 0;
+  padding: 4px;
+  border-color: #1d2a33;
+}
+
 .page {
   background: @cc_root;
   padding: 16px;
@@ -164,14 +182,59 @@ window {
   color: @cc_text;
   border: 1px solid @cc_border;
   border-radius: 8px;
+  padding: 10px;
+}
+
+.launch-cockpit {
+  background: @cc_panel;
+  border: 1px solid @cc_accent_edge;
+  border-radius: 10px;
   padding: 12px;
 }
 
-.operator-console {
-  background: @cc_panel;
-  border: 1px solid @cc_accent_edge;
+.launch-hero-actions {
+  margin-top: 4px;
+}
+
+.command-grid button {
+  min-height: 38px;
+}
+
+.workflow-strip {
+  background: transparent;
+}
+
+.workflow-strip flowboxchild {
+  padding: 0;
+}
+
+.workflow-stage {
+  background: @cc_row;
+  border: 1px solid @cc_border;
   border-radius: 8px;
-  padding: 16px;
+  padding: 10px;
+  min-width: 180px;
+}
+
+.workflow-stage-title {
+  color: @cc_muted;
+  font-weight: 700;
+}
+
+.workflow-stage-value {
+  color: @cc_text;
+  font-weight: 800;
+}
+
+.workflow-stage-detail {
+  color: @cc_muted;
+}
+
+.operator-console {
+  background: @cc_panel_alt;
+  border: 1px solid @cc_border_strong;
+  border-radius: 8px;
+  padding: 12px;
 }
 
 .operator-card,
@@ -238,6 +301,41 @@ button:hover {
   background: #1d2a35;
 }
 
+.command-grid button {
+  min-width: 0;
+}
+
+.command-grid label {
+  font-weight: 700;
+}
+
+.workflow-panel {
+  background: transparent;
+  border-top: 1px solid #20313d;
+  padding-top: 9px;
+}
+
+.next-step-banner {
+  background: @cc_panel_alt;
+  border: 1px solid @cc_border_strong;
+  border-left: 3px solid @cc_accent;
+  border-radius: 8px;
+  padding: 10px;
+}
+
+.next-step-title {
+  color: @cc_text;
+  font-weight: 800;
+}
+
+.next-step-detail {
+  color: @cc_muted;
+}
+
+.mesh-summary-actions {
+  margin-top: 2px;
+}
+
 .primary {
   background: @cc_accent;
   color: #ffffff;
@@ -277,6 +375,21 @@ button:hover {
   color: #e7edf0;
   border: 1px solid @cc_border_strong;
   border-radius: 999px;
+}
+
+.chip-flow {
+  background: transparent;
+}
+
+.power-banner {
+  background: @cc_panel_deep;
+  border: 1px solid @cc_accent_edge;
+  border-radius: 10px;
+  padding: 16px;
+}
+
+.chip-flow flowboxchild {
+  padding: 0;
 }
 
 .chip-strong {
@@ -365,6 +478,7 @@ button:hover {
 .mesh-summary,
 .mesh-detail,
 .team-panel,
+.team-stream-panel,
 .memory-panel,
 .project-intel,
 .session-workspace,
@@ -383,6 +497,22 @@ button:hover {
   border-color: @cc_border_strong;
 }
 
+.terminal-panel {
+  padding: 10px;
+  border-color: @cc_accent;
+}
+
+.composer {
+  padding: 10px;
+}
+
+.side-rail .panel,
+.side-rail expander {
+  background: transparent;
+  border-color: #1b2934;
+  padding: 8px;
+}
+
 .terminal-frame,
 .code-view {
   background: #020509;
@@ -394,18 +524,31 @@ button:hover {
 .composer-view {
   background: @cc_panel_deep;
   color: @cc_text;
-  border: 1px solid @cc_border;
+  border: 1px solid #1f303b;
   border-radius: 8px;
 }
 
 .side-rail {
-  background: @cc_toolbar;
+  background: @cc_root;
+  border-left: 1px solid #1b2934;
+  padding-left: 10px;
 }
 
 entry, textview, dropdown, expander {
   background: @cc_panel_deep;
   color: @cc_text;
   border-color: @cc_border;
+}
+
+expander {
+  border: 1px solid #1b2934;
+  border-radius: 8px;
+  padding: 6px;
+}
+
+expander title {
+  color: @cc_muted;
+  font-weight: 700;
 }
 
 .device-mesh {
@@ -436,7 +579,8 @@ entry, textview, dropdown, expander {
 }
 
 .mesh-detail .code-view,
-.memory-panel .code-view {
+.memory-panel .code-view,
+.team-stream-panel .code-view {
   min-height: 180px;
 }
 """

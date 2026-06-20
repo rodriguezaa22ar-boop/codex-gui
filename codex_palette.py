@@ -103,6 +103,7 @@ COMMAND_ACTIONS = {
     "doctor.run",
     "codex.login",
     "codex.update",
+    "launcher.repair",
 }
 
 HIGH_RISK_ACTIONS = {
@@ -111,6 +112,7 @@ HIGH_RISK_ACTIONS = {
     "run.external",
     "orchestrate.run",
     "agents.run_lane",
+    "launcher.repair",
     "agents.track_lane",
     "autopilot.track",
     "autopilot.terminal",

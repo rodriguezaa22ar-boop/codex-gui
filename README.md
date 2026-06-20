@@ -13,6 +13,16 @@ thread, config, profile, Git, and health workflows around it.
 codex-gui
 ```
 
+Startup now runs a launcher preflight by default. If checks return warning/blocker,
+`codex-gui` will stop and print remediation steps.
+
+```bash
+codex-gui --self-check            # text report
+codex-gui --self-check --json      # machine-readable report
+codex-gui --self-check --project /path/to/project  # target project
+codex-gui --force-start            # force launch despite warning-level checks
+```
+
 Or directly:
 
 ```bash
@@ -151,6 +161,52 @@ export ATLAS_BUILDER_USER=ao
 export ATLAS_BUILDER_SESSION=atlas-builder
 ```
 
+## Headless Team Ops (Commander)
+
+Run the full atlas team lifecycle from terminal using the same role model as the GUI:
+
+```bash
+python3 codex_team_ops.py --json discover
+python3 codex_team_ops.py --json check
+python3 codex_team_ops.py --json roles
+python3 codex_team_ops.py --json prepare --check
+python3 codex_team_ops.py --json sync
+python3 codex_team_ops.py --json launch
+python3 codex_team_ops.py --json collect
+python3 codex_team_ops.py --json doctor
+python3 codex_team_ops.py --json summary
+```
+
+`doctor` returns the shared mesh readiness summary plus sanitized per-device
+readiness rows with blocker categories, action priorities, and next actions, so
+commander scripts can act without reading raw probe output.
+Use `python3 codex_team_ops.py --json check --no-persist` for verifier or
+read-only validation lanes that must probe devices without updating `devices.json`.
+
+The same command set is available as a short script:
+
+```bash
+bash scripts/codex-team-ops.sh discover
+bash scripts/codex-team-ops.sh prepare --check
+bash scripts/codex-team-ops.sh status
+bash scripts/codex-team-ops.sh launch --sync
+
+# installed script shortcut after pip install:
+codex-team-ops discover
+```
+
+Role defaults in the default naming model:
+
+- `atlas-ubuntu` (local): Commander / Integrator
+- `atlas-builder`: Core Systems Engineer
+- `atlas-main`: Product / GTK UX Engineer
+- `atlas-cockpit`: Verifier / Release Engineer
+
+Runbook references:
+
+- [Multi-device orchestration](docs/MULTI_DEVICE_ORCHESTRATION.md)
+- [Team roles](docs/TEAM_ROLES.md)
+
 ## Install
 
 From a clone:
@@ -162,11 +218,17 @@ python3 -m pip install --user .
 That installs the `codex-gui` launcher and keeps the app runnable from a
 GitHub checkout without editing paths.
 
+On offline or restricted workers, make sure Python build tooling is already
+available before installing from the clone: `setuptools>=68` and `wheel` are
+declared in `pyproject.toml` and are normally downloaded by pip on networked
+hosts.
+
 Detailed install and release notes:
 
 - [Install guide](docs/INSTALL.md)
 - [Public release checklist](docs/PUBLIC_RELEASE.md)
 - [Codex team operating model](docs/TEAM_ROLES.md)
+- [Multi-device orchestration runbook](docs/MULTI_DEVICE_ORCHESTRATION.md)
 - [Atlas Builder core systems mission](docs/missions/ATLAS_BUILDER_CORE_SYSTEMS.md)
 - [Atlas Main bootstrap Builder mission](docs/missions/ATLAS_MAIN_BOOTSTRAP_BUILDER.md)
 

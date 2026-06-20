@@ -1,0 +1,98 @@
+ATLAS 4-DEVICE OPERATION SHEET
+Date: 2026-06-19
+
+Scope:
+- `atlas-ubuntu` (commander/integrator)
+- `atlas-builder` (headless NixOS)
+- `atlas-main` (HP Fedora / product lane)
+- `atlas-cockpit` (Kinoite verification lane)
+
+Primary objective:
+Keep all four devices on the same `main` commit before any team run.
+
+1) ROLE MAP
+- atlas-ubuntu: Commander / Integrator
+- atlas-builder: Core Systems Engineer
+- atlas-main: Product / GTK UX Engineer
+- atlas-cockpit: Verifier / Release Engineer
+
+2) ONE-TIME CHECK (run in Ubuntu)
+cd ~/Projects/codex-gui
+
+python3 -m py_compile codex_devices.py codex_gui.py codex_actions.py codex_team.py
+python3 -m unittest discover -s tests
+git status --short --branch
+
+3) SYNC FLEET STATE AND VERIFY REACHABILITY
+
+# Ensure aliases exist in ~/.ssh/config and are reachable:
+for h in atlas-main atlas-builder atlas-cockpit atlas-ubuntu; do
+  echo "---- $h ----"
+  ssh -o BatchMode=yes -o StrictHostKeyChecking=no -o ConnectTimeout=8 \
+    "$h" "hostname && cd ~/Projects/codex-gui && git rev-parse --short HEAD"
+done
+
+# Expected output per node:
+# - all nodes print their hostname
+# - each node prints the same short SHA for committed main line
+
+4) COMMAND PALLETTE STYLE OPERATIONS (preferred in GUI)
+From the Mesh page:
+- Discover Tailnet
+- Check Fleet
+- Prepare Team
+- Sync Bus
+- Launch Team
+- Collect Team
+
+5) BRING A SINGLE DEVICE TO MAIN (use per node)
+
+# On each remote worker, do:
+cd ~/Projects/codex-gui
+git fetch origin
+git checkout main
+git pull --ff-only origin main
+
+6) HEADLESS BUILDER ACCESS FROM CLI
+- Use a direct ssh command if needed:
+ssh atlas-builder
+- Use GUI launch helper from Ubuntu:
+sh -lc "ssh atlas-builder 'cd ~/Projects/codex-gui && codex --version'"
+
+7) QUICK PUSH PROTOCOL (after any real change)
+Worker:
+git checkout -b lane/<role-name>
+# scoped change
+git add ...
+git commit -m "..."
+git push -u origin HEAD
+
+Commander:
+git fetch --all --prune
+git checkout main
+git pull --ff-only origin main
+git merge --no-ff <lane-branch>
+python3 -m unittest discover -s tests
+python3 -m py_compile codex_devices.py codex_gui.py codex_actions.py codex_team.py
+git push origin main
+
+8) EXPECTED READINESS
+- atlas-main: ready
+- atlas-builder: ready (headless SSH + codex + repo)
+- atlas-cockpit: ready (SSH + GitHub pull repaired)
+- atlas-ubuntu: local commander
+
+9) CURRENT BASELINE
+- atlas-ubuntu: b49c6db
+- atlas-builder: b49c6db
+- atlas-main: b49c6db + local product-lane edits not yet committed
+- atlas-cockpit: b49c6db
+
+10) RIGHT NOW
+- Commander holds `main` steady.
+- Builder works backend/core systems only.
+- Main finishes the launch-console pulse UX slice.
+- Cockpit verifies install/docs/release behavior from the synced baseline.
+
+If any node fails readiness:
+- fix that node first, do not launch new team cycles until corrected.

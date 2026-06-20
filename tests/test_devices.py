@@ -14,6 +14,7 @@ from codex_devices import (
     load_memory,
     merge_discovered_devices,
     memory_markdown,
+    mesh_readiness_report,
     mesh_state,
     build_mesh_readiness_report,
     mesh_readiness_markdown,
@@ -23,8 +24,11 @@ from codex_devices import (
     remote_path_expr,
     remote_agent_command,
     remote_team_dir,
+    remote_file_sha256sum_command,
     rsync_memory_command,
     rsync_project_command,
+    rsync_team_chat_command,
+    rsync_team_chat_pull_command,
     rsync_team_package_command,
     rsync_team_results_command,
     save_devices,
@@ -34,6 +38,7 @@ from codex_devices import (
     ssh_launch_command,
     ssh_test_command,
     tailscale_status_command,
+    tailscale_approval_url,
     team_prompt,
     update_device_from_probe,
     upsert_device,
@@ -332,6 +337,7 @@ class DeviceMeshTests(unittest.TestCase):
 
         self.assertEqual(probe.status, "blocked")
         self.assertEqual(probe.summary, "Tailscale SSH approval required")
+        self.assertEqual(tailscale_approval_url(output), "https://login.tailscale.com/a/example")
 
     def test_probe_parser_classifies_plain_ssh_permission_denied(self) -> None:
         device = DeviceRecord(id="builder", name="Builder", host="atlas-builder.tailnet")
@@ -340,6 +346,246 @@ class DeviceMeshTests(unittest.TestCase):
 
         self.assertEqual(probe.status, "blocked")
         self.assertEqual(probe.summary, "SSH auth denied")
+
+    def test_mesh_readiness_report_categorizes_ssh_resolution_failure(self) -> None:
+        device = DeviceRecord(id="builder", name="Builder", host="atlas-builder.tailnet")
+        probe = parse_probe_output(
+            device,
+            "ssh: Could not resolve hostname atlas-builder.tailnet: Name or service not known",
+            255,
+            timestamp=123,
+        )
+
+        report = mesh_readiness_report((device,), {device.id: probe})
+        row = report.by_device(device.id)
+
+        self.assertIsNotNone(row)
+        assert row is not None
+        self.assertEqual(probe.status, "blocked")
+        self.assertEqual(probe.summary, "SSH host cannot be resolved")
+        self.assertEqual(row.status, "blocked")
+        self.assertEqual(row.blocker_category, "ssh-host-unresolved")
+        self.assertEqual(row.action_priority, 15)
+        self.assertTrue(any("Tailnet Discover" in action for action in row.next_actions))
+
+    def test_mesh_readiness_report_categorizes_refused_ssh_service(self) -> None:
+        device = DeviceRecord(id="builder", name="Builder", host="atlas-builder.tailnet", port=2222)
+        probe = parse_probe_output(
+            device,
+            "ssh: connect to host atlas-builder.tailnet port 2222: Connection refused",
+            255,
+            timestamp=123,
+        )
+
+        report = mesh_readiness_report((device,), {device.id: probe})
+        row = report.by_device(device.id)
+
+        self.assertIsNotNone(row)
+        assert row is not None
+        self.assertEqual(probe.status, "blocked")
+        self.assertEqual(probe.summary, "SSH connection refused")
+        self.assertEqual(row.blocker_category, "ssh-connection-refused")
+        self.assertTrue(any("port 2222" in action for action in row.next_actions))
+
+    def test_mesh_readiness_report_categorizes_unreachable_ssh_host(self) -> None:
+        device = DeviceRecord(id="builder", name="Builder", host="atlas-builder.tailnet")
+        probe = parse_probe_output(
+            device,
+            "ssh: connect to host atlas-builder.tailnet port 22: No route to host",
+            255,
+            timestamp=123,
+        )
+
+        report = mesh_readiness_report((device,), {device.id: probe})
+        row = report.by_device(device.id)
+
+        self.assertIsNotNone(row)
+        assert row is not None
+        self.assertEqual(probe.status, "offline")
+        self.assertEqual(probe.summary, "SSH host unreachable")
+        self.assertEqual(row.status, "offline")
+        self.assertEqual(row.blocker_category, "ssh-host-unreachable")
+        self.assertTrue(any("Tailscale" in action for action in row.next_actions))
+
+    def test_mesh_readiness_report_categorizes_missing_codex(self) -> None:
+        device = DeviceRecord(
+            id="codex-missing",
+            name="Builder",
+            host="atlas-builder.tailnet",
+            codex_bin="~/.local/bin/codex",
+        )
+
+        probe = parse_probe_output(device, "codex executable not found", 127, timestamp=123)
+        report = mesh_readiness_report((device,), {device.id: probe})
+        row = report.by_device(device.id)
+
+        self.assertIsNotNone(row)
+        assert row is not None
+        self.assertEqual(probe.status, "blocked")
+        self.assertEqual(probe.summary, "Codex CLI missing")
+        self.assertEqual(row.status, "blocked")
+        self.assertEqual(row.blocker_category, "missing-codex")
+        self.assertEqual(row.action_priority, 20)
+        self.assertTrue(any("Install Codex CLI" in action for action in row.next_actions))
+
+    def test_mesh_readiness_report_categorizes_missing_project(self) -> None:
+        device = DeviceRecord(id="one", name="Builder", host="atlas-builder.tailnet", project_root="~/Projects/codex-gui")
+        output = "\n".join([
+            "CODEX_EXIT=0",
+            "CODEX_VERSION=codex-cli 0.140.0",
+            "PROJECT_ROOT=~/Projects/codex-gui",
+            "PROJECT_EXISTS=no",
+        ])
+
+        probe = parse_probe_output(device, output, 0, timestamp=123)
+        report = mesh_readiness_report((device,), {device.id: probe})
+        row = report.by_device(device.id)
+
+        self.assertIsNotNone(row)
+        assert row is not None
+        self.assertEqual(row.status, "review")
+        self.assertEqual(row.blocker_category, "missing-project")
+        self.assertEqual(report.review_count, 1)
+        self.assertIn("project missing", row.summary.lower())
+
+    def test_mesh_readiness_report_categorizes_tailscale_approval_blocker(self) -> None:
+        device = DeviceRecord(id="two", name="Builder", host="atlas-builder.tailnet")
+        output = "\n".join([
+            "# Tailscale SSH requires an additional check.",
+            "# To authenticate, visit: https://login.tailscale.com/a/example",
+        ])
+
+        probe = parse_probe_output(device, output, 124, timestamp=123)
+        report = mesh_readiness_report((device,), {device.id: probe})
+        row = report.by_device(device.id)
+
+        self.assertIsNotNone(row)
+        assert row is not None
+        self.assertEqual(row.status, "blocked")
+        self.assertEqual(row.blocker_category, "tailscale-approval-required")
+        self.assertTrue(any("https://login.tailscale.com/a/example" in action for action in row.next_actions))
+
+    def test_mesh_readiness_report_detects_stale_checkout(self) -> None:
+        device = DeviceRecord(id="three", name="Builder", host="atlas-builder.tailnet", project_root="~/Projects/codex-gui")
+        output = "\n".join([
+            "CODEX_EXIT=0",
+            "CODEX_VERSION=codex-cli 0.140.0",
+            "PROJECT_ROOT=~/Projects/codex-gui",
+            "PROJECT_EXISTS=yes",
+            "PROJECT_PWD=~/Projects/codex-gui",
+            "GIT_STATE=## HEAD detached at abc123 | branch=abc123 | changes=0",
+        ])
+
+        probe = parse_probe_output(device, output, 0, timestamp=123)
+        report = mesh_readiness_report((device,), {device.id: probe})
+        row = report.by_device(device.id)
+
+        self.assertIsNotNone(row)
+        assert row is not None
+        self.assertEqual(row.blocker_category, "stale-checkout")
+        self.assertEqual(row.status, "review")
+
+    def test_mesh_readiness_report_uses_saved_ready_status_without_probe(self) -> None:
+        local = DeviceRecord(id="four", name="Saved Local", host="localhost", status="ready")
+        remote = DeviceRecord(id="five", name="Saved Remote", host="atlas-main.tailnet", status="ready")
+
+        local_report = mesh_readiness_report((local,), {})
+        local_row = local_report.by_device(local.id)
+        self.assertIsNotNone(local_row)
+        assert local_row is not None
+        self.assertEqual(local_row.status, "ready")
+        self.assertIn(local_row.blocker_category, {"ready-saved", "local-ready"})
+        self.assertEqual(local_row.action_priority, 90)
+
+        remote_report = mesh_readiness_report((remote,), {})
+        remote_row = remote_report.by_device(remote.id)
+        self.assertIsNotNone(remote_row)
+        assert remote_row is not None
+        self.assertEqual(remote_row.status, "review")
+        self.assertEqual(remote_row.blocker_category, "needs-probe")
+        self.assertLess(remote_row.action_priority, 90)
+
+    def test_mesh_readiness_report_classifies_saved_blocker_notes_without_raw_note(self) -> None:
+        auth = DeviceRecord(
+            id="auth",
+            name="Auth",
+            host="atlas-auth.tailnet",
+            status="blocked",
+            note="ao@atlas-auth: Permission denied (publickey). PRIVATE_RAW_OUTPUT SENSITIVE_MARKER",
+        )
+        missing_codex = DeviceRecord(
+            id="codex",
+            name="Codex",
+            host="atlas-codex.tailnet",
+            status="blocked",
+            note="codex executable not found PRIVATE_RAW_OUTPUT",
+        )
+        stale = DeviceRecord(
+            id="stale",
+            name="Stale",
+            host="atlas-stale.tailnet",
+            status="review",
+            note="## main...origin/main [behind 1] PRIVATE_RAW_OUTPUT",
+        )
+
+        report = mesh_readiness_report((auth, missing_codex, stale), {})
+        by_device = {row.device_id: row for row in report.rows}
+
+        self.assertEqual(by_device[auth.id].status, "blocked")
+        self.assertEqual(by_device[auth.id].blocker_category, "ssh-auth-denied")
+        self.assertEqual(by_device[missing_codex.id].blocker_category, "missing-codex")
+        self.assertEqual(by_device[stale.id].status, "review")
+        self.assertEqual(by_device[stale.id].blocker_category, "stale-checkout")
+
+        detail = report.detail_text()
+        self.assertIn("ssh-auth-denied", detail)
+        self.assertIn("missing-codex", detail)
+        self.assertIn("stale-checkout", detail)
+        self.assertNotIn("PRIVATE_RAW_OUTPUT", detail)
+        self.assertNotIn("SENSITIVE_MARKER", detail)
+        self.assertNotIn("Permission denied", detail)
+
+    def test_mesh_readiness_report_exposes_action_priority(self) -> None:
+        auth_device = DeviceRecord(id="auth", name="Auth", host="atlas-auth.tailnet")
+        offline_device = DeviceRecord(id="offline", name="Offline", host="atlas-offline.tailnet", status="offline")
+        missing_project_device = DeviceRecord(
+            id="project",
+            name="Project",
+            host="atlas-project.tailnet",
+            project_root="~/Projects/codex-gui",
+        )
+        ready_device = DeviceRecord(id="ready", name="Ready", host="atlas-ready.tailnet", status="ready")
+        missing_project_output = "\n".join([
+            "CODEX_EXIT=0",
+            "CODEX_VERSION=codex-cli 0.140.0",
+            "PROJECT_ROOT=~/Projects/codex-gui",
+            "PROJECT_EXISTS=no",
+        ])
+        probes = {
+            auth_device.id: parse_probe_output(
+                auth_device,
+                "ao@atlas-auth: Permission denied (publickey).",
+                255,
+                timestamp=123,
+            ),
+            missing_project_device.id: parse_probe_output(
+                missing_project_device,
+                missing_project_output,
+                0,
+                timestamp=123,
+            ),
+        }
+
+        report = mesh_readiness_report(
+            (ready_device, missing_project_device, offline_device, auth_device),
+            probes,
+        )
+        by_device = {row.device_id: row for row in report.rows}
+
+        self.assertEqual(by_device[auth_device.id].blocker_category, "ssh-auth-denied")
+        self.assertLess(by_device[auth_device.id].action_priority, by_device[offline_device.id].action_priority)
+        self.assertLess(by_device[offline_device.id].action_priority, by_device[missing_project_device.id].action_priority)
+        self.assertLess(by_device[missing_project_device.id].action_priority, by_device[ready_device.id].action_priority)
 
     def test_remote_team_commands_use_prompt_files_not_raw_prompt(self) -> None:
         device = DeviceRecord(
@@ -362,20 +608,54 @@ class DeviceMeshTests(unittest.TestCase):
             run_id="Run 1",
             device=device,
             teammates=("Builder on builder",),
+            role_id="ui-polish",
+            role_title="Product / GTK UX Engineer",
+            role_profile="maximum-power",
+            role_focus="Refine visual hierarchy.",
+            role_boundary="Do not alter backend behavior without signoff.",
         )
-
         self.assertEqual(remote_team_dir("Run 1"), "~/.config/codex-gui/team/run-1")
         self.assertEqual(package[0], "rsync")
         self.assertEqual(collect[0], "rsync")
+        chat_sync = rsync_team_chat_command(Path("/tmp/team-run"), device, "Run 1")
+        self.assertEqual(chat_sync[0], "rsync")
+        self.assertIn("team-chat.md", " ".join(chat_sync))
+        self.assertIn("ssh -o ConnectTimeout=8 -o ServerAliveInterval=5 -o ServerAliveCountMax=2 -p 2222", chat_sync)
+        chat_pull = rsync_team_chat_pull_command(Path("/tmp/team-run"), device, "Run 1")
+        self.assertEqual(chat_pull[0], "rsync")
+        self.assertIn("team-chat.md", " ".join(chat_pull))
+        self.assertIn("ssh -o ConnectTimeout=8 -o ServerAliveInterval=5 -o ServerAliveCountMax=2 -p 2222", chat_pull)
         self.assertIn("ssh -o ConnectTimeout=8 -o ServerAliveInterval=5 -o ServerAliveCountMax=2 -p 2222", package)
         self.assertIn("builder.tailnet", launch[3])
+        self.assertIn("ensure_team_chat()", launch[-1])
+        self.assertIn("# Codex Team Chat", launch[-1])
+        self.assertIn("team chat write failed", launch[-1])
+        self.assertIn("chmod 600", launch[-1])
         self.assertIn("cat \"$HOME\"/.config/codex-gui/team/run-1/lanes/ui-polish.md", launch[-1])
+        self.assertIn("-p \"$role_profile\"", launch[-1])
+        self.assertIn("exec -s workspace-write", launch[-1])
+        self.assertIn("--add-dir \"$HOME\"/.config/codex-gui/team/run-1/out", launch[-1])
         self.assertIn("--output-last-message", launch[-1])
         self.assertIn("ui-polish.status.txt", launch[-1])
         self.assertNotIn("> \"$HOME\"/.config/codex-gui/team/run-1/out/ui-polish.handoff.md", launch[-1])
         self.assertNotIn("secret prompt body", " ".join(launch))
         self.assertIn("Team protocol", prompt)
         self.assertIn("secret prompt body should stay in files", prompt)
+        self.assertIn("Assigned role: Product / GTK UX Engineer", prompt)
+        self.assertIn("Role preset: maximum-power", prompt)
+        self.assertIn("Role focus: Refine visual hierarchy.", prompt)
+        self.assertIn("Role boundary: Do not alter backend behavior without signoff.", prompt)
+        self.assertIn("team-chat.md", prompt)
+
+    def test_remote_sha256sum_command_targets_expected_remote_path(self) -> None:
+        device = DeviceRecord(id="builder", name="Builder", host="builder.tailnet", user="ao", port=2222)
+        command = remote_file_sha256sum_command(device, "~/.config/codex-gui/team/run-1/out/handoff-bus.md")
+        command_text = " ".join(command)
+
+        self.assertEqual(command[:3], ("ssh", "-p", "2222"))
+        self.assertIn("sha256sum", command_text)
+        self.assertIn("handoff-bus.md", command_text)
+        self.assertIn("missing", command_text)
 
     def test_local_team_commands_skip_ssh_but_use_same_prompt_files(self) -> None:
         device = DeviceRecord(
@@ -391,7 +671,10 @@ class DeviceMeshTests(unittest.TestCase):
         self.assertEqual(probe[:2], ("bash", "-lc"))
         self.assertIn("CODEX_PROBE=1", probe[-1])
         self.assertEqual(launch[:2], ("bash", "-lc"))
+        self.assertIn("ensure_team_chat()", launch[-1])
         self.assertIn("cat \"$HOME\"/.config/codex-gui/team/run-1/lanes/coordinator.md", launch[-1])
+        self.assertIn("exec -s workspace-write", launch[-1])
+        self.assertIn("--add-dir \"$HOME\"/.config/codex-gui/team/run-1/out", launch[-1])
         self.assertIn("--output-last-message", launch[-1])
         self.assertNotIn("ssh", launch[0])
 
