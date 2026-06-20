@@ -366,6 +366,7 @@ class GuiSourceTests(unittest.TestCase):
         build = ast.unparse(build_mesh)
         self.assertIn("mesh_launch_console_focus_filter", ast.unparse(build_mesh))
         self.assertIn("mesh_launch_console_focus_label", build)
+        self.assertIn("Focus: all lanes", build)
         self.assertIn("on_mesh_launch_pulse_focus_ready", build)
         self.assertIn("on_mesh_launch_pulse_focus_blocked", build)
         self.assertIn("on_mesh_launch_pulse_focus_review", build)
@@ -383,6 +384,7 @@ class GuiSourceTests(unittest.TestCase):
         self.assertIn("_mesh_launch_console_focus_name", ast.unparse(focus_name))
         self.assertIn("_set_mesh_launch_console_focus_filter", ast.unparse(cycle))
         self.assertIn("'ready'", ast.unparse(cycle))
+        self.assertIn("Cycle through launch focus filters: all, ready, blocked, review, offline.", build)
         blocked_only_toggle = _method_named(tree, "on_launch_console_blocked_only_toggled")
         self.assertIn("mesh_launch_console_blocked_only_toggle", ast.unparse(blocked_only_toggle))
 

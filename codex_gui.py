@@ -4011,7 +4011,7 @@ class CodexControl(Gtk.Application):
         self.mesh_launch_blocker_timeline_label = self.label("Blocker timeline: none yet", "muted", wrap=True)
         launch_header.append(self.mesh_launch_console_status_label)
         launch_header.append(self.mesh_launch_console_meta_label)
-        self.mesh_launch_console_focus_label = self.label("Focus: all", "muted")
+        self.mesh_launch_console_focus_label = self.label("Focus: all lanes", "muted")
         launch_header.append(self.mesh_launch_console_focus_label)
         launch_header.append(self.mesh_launch_console_prompt_label)
         launch_header.append(self.mesh_launch_console_decision_label)
@@ -4049,7 +4049,7 @@ class CodexControl(Gtk.Application):
             "Cycle Focus",
             self.on_cycle_mesh_launch_focus,
             icon_name="view-refresh-symbolic",
-            tooltip="Cycle through launch focus filters: all, blocked, review, offline.",
+            tooltip="Cycle through launch focus filters: all, ready, blocked, review, offline.",
         )
         launch_filters.append(cycle_focus_button)
         self.mesh_launch_console_blocked_only_toggle = Gtk.ToggleButton(label="Blocked only")
