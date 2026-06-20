@@ -4996,6 +4996,7 @@ class CodexControl(Gtk.Application):
             return
         selected = self.mesh_launch_console_focus_filter
         for mode, chip in [
+            ("ready", self.mesh_launch_pulse_ready_chip),
             ("blocked", self.mesh_launch_pulse_blocked_chip),
             ("review", self.mesh_launch_pulse_review_chip),
             ("offline", self.mesh_launch_pulse_offline_chip),
