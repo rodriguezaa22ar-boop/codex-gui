@@ -168,6 +168,8 @@ def _risk_for(action_id: str) -> str:
         return "read-only git"
     if action_id.endswith(".save") or action_id in {"session.save", "profiles.install", "receipts.stamp"}:
         return "writes local metadata"
+    if action_id == "receipts.bundle":
+        return "writes local evidence bundle"
     if action_id.endswith(".copy") or action_id == "command.copy":
         return "clipboard only"
     if action_id.startswith("page.") or action_id.endswith(".focus"):
@@ -191,7 +193,7 @@ def _requirements(action_id: str, context: PaletteContext) -> tuple[str, ...]:
         missing.append("selected agent lane")
     if action_id in {"autopilot.track", "autopilot.terminal", "autopilot.stop"} and not context.autopilot_selected:
         missing.append("selected Autopilot package")
-    if action_id in {"receipts.verify", "receipts.replay"} and not context.receipt_selected:
+    if action_id in {"receipts.verify", "receipts.replay", "receipts.bundle"} and not context.receipt_selected:
         missing.append("selected receipt")
     return tuple(missing)
 

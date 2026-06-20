@@ -8,10 +8,12 @@ import getpass
 import hashlib
 import json
 import os
+import shutil
 import re
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Iterable
 
 
 EVENT_SCHEMA = "generic.external_event.v1"
@@ -54,6 +56,11 @@ class ReceiptStampResult:
 
 def sha256_text(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8", errors="replace")).hexdigest()
+
+
+def _coalesce_text(value: object, fallback: str = "") -> str:
+    value_text = str(value or "").strip()
+    return value_text or fallback
 
 
 def utc_timestamp() -> str:
@@ -304,6 +311,82 @@ def linked_receipt_chain(
     return chain
 
 
+@dataclass(frozen=True)
+class ReviewerBundle:
+    bundle_dir: str
+    manifest_path: str
+    receipt_count: int
+    run_count: int
+
+
+def _run_to_dict(record: object) -> dict[str, object]:
+    if isinstance(record, dict):
+        return {
+            "id": str(record.get("id") or ""),
+            "created": int(record.get("created") or 0),
+            "updated": int(record.get("updated") or 0),
+            "project_name": str(record.get("project_name") or "project"),
+            "project_hash": str(record.get("project_hash") or ""),
+            "action": str(record.get("action") or "action"),
+            "profile": str(record.get("profile") or "profile"),
+            "surface": str(record.get("surface") or "surface"),
+            "status": str(record.get("status") or "unknown"),
+            "prompt_hash": str(record.get("prompt_hash") or ""),
+            "command_hash": str(record.get("command_hash") or ""),
+            "receipt_id": str(record.get("receipt_id") or ""),
+            "receipt_path": str(record.get("receipt_path") or ""),
+            "event_hash": str(record.get("event_hash") or ""),
+            "receipt_hash": str(record.get("receipt_hash") or ""),
+            "pid": int(record.get("pid") or 0),
+            "exit_code": record.get("exit_code"),
+            "note": str(record.get("note") or ""),
+        }
+    return {
+        "id": _coalesce_text(getattr(record, "id", "")),
+        "created": int(getattr(record, "created", 0) or 0),
+        "updated": int(getattr(record, "updated", 0) or 0),
+        "project_name": _coalesce_text(getattr(record, "project_name", ""), "project"),
+        "project_hash": _coalesce_text(getattr(record, "project_hash", "")),
+        "action": _coalesce_text(getattr(record, "action", ""), "action"),
+        "profile": _coalesce_text(getattr(record, "profile", ""), "profile"),
+        "surface": _coalesce_text(getattr(record, "surface", ""), "surface"),
+        "status": _coalesce_text(getattr(record, "status", ""), "unknown"),
+        "prompt_hash": _coalesce_text(getattr(record, "prompt_hash", "")),
+        "command_hash": _coalesce_text(getattr(record, "command_hash", "")),
+        "receipt_id": _coalesce_text(getattr(record, "receipt_id", "")),
+        "receipt_path": _coalesce_text(getattr(record, "receipt_path", "")),
+        "event_hash": _coalesce_text(getattr(record, "event_hash", "")),
+        "receipt_hash": _coalesce_text(getattr(record, "receipt_hash", "")),
+        "pid": int(getattr(record, "pid", 0) or 0),
+        "exit_code": getattr(record, "exit_code", None),
+        "note": _coalesce_text(getattr(record, "note", "")),
+    }
+
+
+def _receipt_manifest_rows(records: Iterable[CodexReceiptRecord]) -> list[dict[str, object]]:
+    return [
+        {
+            "id": record.id,
+            "event_file": Path(record.event_path).name if record.event_path else "",
+            "receipt_file": Path(record.receipt_path).name if record.receipt_path else "",
+            "status": record.status,
+            "action": record.action,
+            "project_hash": record.project_hash,
+            "event_hash": record.event_hash,
+            "receipt_hash": record.receipt_hash,
+        }
+        for record in records
+    ]
+
+
+def _copy_if_exists(source: Path, destination: Path) -> bool:
+    if not source.exists():
+        return False
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(source, destination)
+    return True
+
+
 def import_receipt(
     atlas_root: str | Path | None,
     event_path: Path,
@@ -335,6 +418,130 @@ def replay_receipts(atlas_root: str | Path | None, receipt_paths: list[Path]) ->
     if len(receipt_paths) < 2:
         return ReceiptCommandResult((), 1, "Need at least two receipts to replay")
     return _run([str(binary), "receipt", "replay", *[str(path) for path in receipt_paths]], timeout=30)
+
+
+def create_reviewer_bundle(
+    output_root: Path,
+    *,
+    bundle_name: str,
+    project: str,
+    receipt_records: Iterable[CodexReceiptRecord],
+    run_records: Iterable[object] = (),
+    selected_receipt: CodexReceiptRecord | None = None,
+    launch_package_text: str = "",
+    context_summary: str = "",
+    team_artifacts: Iterable[tuple[Path, str]] = (),
+    max_receipts: int = 20,
+) -> ReviewerBundle:
+    """Build a metadata-only reviewer bundle from local records.
+
+    The bundle contains copied event/receipt files, command-run JSON, and a manifest.
+    """
+    bundle_dir = output_root / bundle_name
+    evidence_dir = bundle_dir / "evidence"
+    receipts_dir = evidence_dir / "receipts"
+    receipt_events_dir = receipts_dir / "events"
+    receipt_files_dir = receipts_dir / "files"
+    run_file = evidence_dir / "command-runs.json"
+    manifest_path = bundle_dir / "manifest.json"
+    summary_path = bundle_dir / "summary.md"
+
+    included_receipts = list(receipt_records)
+    if selected_receipt is not None:
+        included_receipts = linked_receipt_chain(included_receipts, selected_receipt)
+        if not included_receipts:
+            included_receipts = [selected_receipt]
+
+    included_receipts = included_receipts[:max_receipts]
+    copied_events = 0
+    copied_files = 0
+
+    for record in included_receipts:
+        event_source = Path(record.event_path)
+        event_dest = receipt_events_dir / event_source.name
+        if _copy_if_exists(event_source, event_dest):
+            copied_events += 1
+        receipt_source = Path(record.receipt_path)
+        receipt_dest = receipt_files_dir / receipt_source.name
+        if _copy_if_exists(receipt_source, receipt_dest):
+            copied_files += 1
+
+    run_rows = [_run_to_dict(row) for row in run_records]
+    run_file.parent.mkdir(parents=True, exist_ok=True)
+    run_file.write_text(json.dumps(run_rows, indent=2), encoding="utf-8")
+
+    copied_team_artifacts: list[tuple[str, str]] = []
+    for source, destination in team_artifacts:
+        if source.exists():
+            copied = _copy_if_exists(source, bundle_dir / destination)
+            if copied:
+                copied_team_artifacts.append((str(source), str(destination)))
+
+    artifact_count = len(copied_team_artifacts)
+
+    summary_lines = [
+        "# Reviewer Bundle",
+        "",
+        f"Project: {project}",
+        f"Bundle: {bundle_name}",
+        f"Created: {dt.datetime.now(dt.UTC).replace(microsecond=0).isoformat().replace('+00:00', 'Z')}",
+        f"Included receipts: {len(included_receipts)}",
+        f"Included runs: {len(run_rows)}",
+        "",
+        "## Evidence",
+        f"Events copied: {copied_events}",
+        f"Receipt files copied: {copied_files}",
+        f"Selected receipt: {selected_receipt.id if selected_receipt is not None else 'none'}",
+        "",
+        "## Bundle Layout",
+        "- manifest.json",
+        "- summary.md",
+        "- evidence/command-runs.json",
+        "- evidence/receipts/events/",
+        "- evidence/receipts/files/",
+    ]
+    if copied_team_artifacts:
+        summary_lines.append("")
+        summary_lines.extend(["## Team Artifacts", f"Team files copied: {len(copied_team_artifacts)}"])
+        for _, destination in copied_team_artifacts:
+            summary_lines.append(f"- {destination}")
+
+    if context_summary:
+        summary_lines.extend(["", "## Context Summary", context_summary.strip()])
+    if launch_package_text:
+        summary_lines.extend(["", "## Launch Package", launch_package_text.strip()])
+
+    summary = "\n".join(summary_lines).strip() + "\n"
+    manifest = {
+        "created": dt.datetime.now(dt.UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
+        "project": project,
+        "bundle_name": bundle_name,
+        "selected_receipt_id": selected_receipt.id if selected_receipt is not None else "",
+        "entries": {
+            "manifest": "manifest.json",
+            "summary": "summary.md",
+            "command_runs": "evidence/command-runs.json",
+            "receipt_events": "evidence/receipts/events",
+            "receipt_files": "evidence/receipts/files",
+        },
+        "receipt_count": len(included_receipts),
+        "run_count": len(run_rows),
+        "team_artifact_count": artifact_count,
+        "team_artifacts": copied_team_artifacts,
+        "receipt_index": _receipt_manifest_rows(included_receipts),
+        "metadata_boundary": "No raw prompt, command body, terminal output, or model output is embedded.",
+    }
+
+    bundle_dir.mkdir(parents=True, exist_ok=True)
+    summary_path.write_text(summary, encoding="utf-8")
+    manifest_path.write_text(json.dumps(manifest, sort_keys=True, indent=2), encoding="utf-8")
+
+    return ReviewerBundle(
+        bundle_dir=str(bundle_dir),
+        manifest_path=str(manifest_path),
+        receipt_count=len(included_receipts),
+        run_count=len(run_rows),
+    )
 
 
 def stamp_codex_receipt(

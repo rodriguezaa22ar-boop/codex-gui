@@ -62,6 +62,11 @@ class LaunchPackage:
     command_preview: str
     receipt_mode: str
     steps: tuple[LaunchStep, ...]
+    last_run_id: str = ""
+    last_run_status: str = ""
+    last_run_profile: str = ""
+    last_run_surface: str = ""
+    last_run_created: int = 0
 
     def summary(self) -> str:
         return f"{self.score}/100 | {self.status} | {self.surface} | {len(self.steps)} steps"
@@ -79,6 +84,10 @@ class LaunchPackage:
             f"Profile: {self.profile}",
             f"Surface: {self.surface}",
             f"Receipt mode: {self.receipt_mode}",
+            f"Last matching run: {self.last_run_id[:8] if self.last_run_id else 'none'}",
+            f"Last run status: {self.last_run_status or 'unknown'}" if self.last_run_id else "Last run status: unknown",
+            f"Last run profile: {self.last_run_profile or 'unknown'}" if self.last_run_id else "Last run profile: unknown",
+            f"Last run surface: {self.last_run_surface or 'unknown'}" if self.last_run_id else "Last run surface: unknown",
             f"Prompt SHA-256: {self.prompt_hash}",
             f"Command SHA-256: {self.command_hash}",
             "",
@@ -127,6 +136,37 @@ def _clip(text: str, limit: int = 900) -> str:
     if len(text) <= limit:
         return text
     return text[: max(0, limit - 1)].rstrip() + "..."
+
+
+def _run_history_status(status: str) -> str:
+    normalized = status.lower().strip()
+    if not normalized:
+        return "review"
+    if normalized in {"queued", "prepared", "launched", "running", "done", "passed", "opened", "focused", "dispatched", "finished", "collected"}:
+        return "ready"
+    return "review"
+
+
+def _run_history_line(
+    *,
+    run_id: str,
+    status: str,
+    profile: str,
+    surface: str,
+    created: int,
+) -> str:
+    if not run_id:
+        return "No prior matching run in the ledger."
+    created_text = ""
+    if created:
+        created_text = time.strftime("%Y-%m-%d %H:%M", time.localtime(created))
+    return " | ".join(filter(None, [
+        f"run {run_id[:8]}",
+        f"status {status or 'unknown'}",
+        f"surface {surface or 'unknown'}",
+        f"profile {profile or 'unknown'}",
+        f"{created_text}" if created_text else "",
+    ]))
 
 
 def _command_preview(command: tuple[str, ...], prompt: str = "") -> str:
@@ -226,6 +266,11 @@ def build_launch_package(
     external_terminal: bool = False,
     recent_runs: int = 0,
     receipts: int = 0,
+    last_run_id: str = "",
+    last_run_status: str = "",
+    last_run_profile: str = "",
+    last_run_surface: str = "",
+    last_run_created: int = 0,
 ) -> LaunchPackage:
     terminal_ready = embedded_terminal or external_terminal or action in {"doctor", "update", "login", "exec"}
     status = _status_from_inputs(
@@ -280,6 +325,17 @@ def build_launch_package(
             "ready" if not receipt_auto or atlas_ready else "review",
         ),
         LaunchStep(
+            "Launch History",
+            _run_history_line(
+                run_id=last_run_id,
+                status=last_run_status,
+                profile=last_run_profile,
+                surface=last_run_surface,
+                created=last_run_created,
+            ),
+            _run_history_status(last_run_status) if last_run_id else "review",
+        ),
+        LaunchStep(
             "Command Preview",
             _command_preview(command, prompt),
             "ready" if command else "blocked",
@@ -298,5 +354,10 @@ def build_launch_package(
         prompt_hash=sha256_text(prompt),
         command_preview=_command_preview(command, prompt),
         receipt_mode=receipt_mode,
+        last_run_id=last_run_id,
+        last_run_status=last_run_status,
+        last_run_profile=_clean(last_run_profile),
+        last_run_surface=_clean(last_run_surface),
+        last_run_created=last_run_created,
         steps=tuple(steps),
     )

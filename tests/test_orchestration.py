@@ -119,6 +119,30 @@ class LaunchPackageTests(unittest.TestCase):
 
         self.assertNotEqual(package.status, "blocked")
 
+    def test_launch_package_tracks_latest_matching_run(self) -> None:
+        package = build_launch_package(
+            project="/tmp/codex-gui",
+            action="interactive",
+            profile="maximum-power",
+            surface="embedded",
+            command=("codex", "--profile", "maximum-power", "build"),
+            prompt="build",
+            embedded_terminal=True,
+            last_run_id="run-4a2b1c6f-0123",
+            last_run_status="done",
+            last_run_profile="maximum-power",
+            last_run_surface="embedded",
+            last_run_created=1_700_000_000,
+        )
+
+        detail = package.detail_text()
+
+        self.assertIn("Last matching run: run-4a2", detail)
+        self.assertIn("Last run status: done", detail)
+        self.assertIn("run run-4a2b", package.steps[6].detail)
+        self.assertEqual(package.steps[6].title, "Launch History")
+        self.assertIn("ready", package.steps[6].status)
+
 
 if __name__ == "__main__":
     unittest.main()

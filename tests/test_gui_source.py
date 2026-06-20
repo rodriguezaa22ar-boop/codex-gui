@@ -80,6 +80,34 @@ class GuiSourceTests(unittest.TestCase):
         self.assertIn("is_team_summary_reviewed", ast.unparse(current_operator))
         self.assertIn("mesh.review_summary", ast.unparse(execute_action))
 
+    def test_mesh_bus_actions_include_evidence_bundle(self) -> None:
+        source = Path("codex_gui.py").read_text(encoding="utf-8")
+        tree = ast.parse(source)
+
+        build_mesh = _method_named(tree, "build_mesh_page")
+        execute_action = _method_named(tree, "execute_action")
+
+        self.assertIn("Evidence", ast.unparse(build_mesh))
+        self.assertIn("on_export_mesh_team_bundle", ast.unparse(build_mesh))
+        self.assertIn("Distribute", ast.unparse(build_mesh))
+        self.assertIn("on_distribute_mesh_team_bundle", ast.unparse(build_mesh))
+        self.assertIn("mesh.export_bundle", ast.unparse(execute_action))
+        self.assertIn("on_export_mesh_team_bundle", ast.unparse(execute_action))
+        self.assertIn("mesh.distribute_bundle", ast.unparse(execute_action))
+        self.assertIn("on_distribute_mesh_team_bundle", ast.unparse(execute_action))
+        self.assertIn("mesh.copy_bundle_report", ast.unparse(execute_action))
+        self.assertIn("on_copy_mesh_team_bundle_report", ast.unparse(execute_action))
+        self.assertIn("mesh.verify_bundle", ast.unparse(execute_action))
+        self.assertIn("on_verify_mesh_bundle_integrity", ast.unparse(execute_action))
+        self.assertIn("mesh.preview_repair_bundle", ast.unparse(execute_action))
+        self.assertIn("on_preview_mesh_bundle_repair", ast.unparse(execute_action))
+        self.assertIn("mesh.retry_bundle", ast.unparse(execute_action))
+        self.assertIn("on_retry_mesh_bundle_distribution", ast.unparse(execute_action))
+        self.assertIn("Bundle Report", ast.unparse(build_mesh))
+        self.assertIn("Bundle Verify", ast.unparse(build_mesh))
+        self.assertIn("Bundle Preview", ast.unparse(build_mesh))
+        self.assertIn("Bundle Retry", ast.unparse(build_mesh))
+
     def test_mesh_launch_console_surfaces_prelaunch_review(self) -> None:
         source = Path("codex_gui.py").read_text(encoding="utf-8")
         tree = ast.parse(source)
@@ -451,6 +479,42 @@ class GuiSourceTests(unittest.TestCase):
         self.assertIn("_set_mesh_launch_console_focus_filter", ast.unparse(focus_offline))
         self.assertIn("self._record_mesh_launch_console_focus_history", ast.unparse(set_focus))
 
+    def test_mesh_team_chat_filter_controls_are_present(self) -> None:
+        source = Path("codex_gui.py").read_text(encoding="utf-8")
+        tree = ast.parse(source)
+
+        build_mesh = _method_named(tree, "build_mesh_page")
+        render_chat = _method_named(tree, "render_mesh_team_chat")
+        on_mode = _method_named(tree, "on_mesh_chat_filter_mode_changed")
+        on_value = _method_named(tree, "on_mesh_chat_filter_value_changed")
+        sync_controls = _method_named(tree, "_sync_mesh_chat_filter_controls")
+        visible = _method_named(tree, "_visible_mesh_chat_events")
+
+        build_text = ast.unparse(build_mesh)
+        self.assertIn("mesh_chat_filter_mode_dropdown", build_text)
+        self.assertIn("mesh_chat_filter_value_dropdown", build_text)
+        self.assertIn("on_mesh_chat_filter_mode_changed", build_text)
+        self.assertIn("on_mesh_chat_filter_value_changed", build_text)
+        self.assertIn("mesh_chat_filter_mode_dropdown", ast.unparse(sync_controls))
+        self.assertIn("mesh_chat_filter_value_dropdown", ast.unparse(sync_controls))
+        self.assertIn("_mesh_chat_filter_value_options", ast.unparse(visible))
+        self.assertIn("mesh_team_chat_filter_mode", ast.unparse(on_mode))
+        self.assertIn("mesh_team_chat_filter_value", ast.unparse(on_value))
+        self.assertIn("_mesh_chat_filter_label", ast.unparse(render_chat))
+
+    def test_mesh_lane_activity_is_exposed_to_rows(self) -> None:
+        source = Path("codex_gui.py").read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        render_mesh = _method_named(tree, "render_mesh_team")
+        lane_activity = _method_named(tree, "_mesh_team_lane_activity")
+        lane_label = _method_named(tree, "_mesh_team_lane_activity_label")
+
+        render_text = ast.unparse(render_mesh)
+        self.assertIn("_mesh_team_lane_activity(", render_text)
+        self.assertIn("_mesh_team_lane_activity_label(", render_text)
+        self.assertIn("summarize_team_chat", render_text)
+        self.assertIn("lane: ", ast.unparse(lane_label))
+
     def test_workstation_pages_have_stateful_next_step_banners(self) -> None:
         source = Path("codex_gui.py").read_text(encoding="utf-8")
         tree = ast.parse(source)
@@ -475,6 +539,43 @@ class GuiSourceTests(unittest.TestCase):
         self.assertIn("update_next_step_banner", ast.unparse(refresh_mesh))
         self.assertIn("update_next_step_banner", ast.unparse(render_quality))
         self.assertIn("next_enabled = False", ast.unparse(render_quality))
+
+    def test_mesh_bundle_integrity_sync_and_verification_paths_are_wired(self) -> None:
+        source = Path("codex_gui.py").read_text(encoding="utf-8")
+        tree = ast.parse(source)
+
+        sync_bundle = _method_named(tree, "_sync_mesh_team_bundle_targets")
+        verify_bundle = _method_named(tree, "_bundle_targets_with_integrity")
+        marker_validator = _method_named(tree, "_is_bundle_delivery_marker_valid")
+        remote_hash = _method_named(tree, "_remote_bundle_manifest_sha256")
+        generic_hash = _method_named(tree, "_remote_file_sha256")
+        build_mesh = _method_named(tree, "build_mesh_page")
+
+        sync_text = ast.unparse(sync_bundle)
+        verify_text = ast.unparse(verify_bundle)
+        build_text = ast.unparse(build_mesh)
+
+        self.assertIn("_is_bundle_delivery_marker_valid(", sync_text)
+        self.assertIn("_remote_bundle_manifest_sha256(", sync_text)
+        self.assertIn("marker verification failed", sync_text)
+        self.assertIn("remote manifest checksum mismatch", sync_text)
+
+        self.assertIn("_is_bundle_delivery_marker_valid(", verify_text)
+        self.assertIn("_remote_bundle_manifest_sha256(", verify_text)
+        self.assertIn("remote manifest hash unavailable", verify_text)
+
+        self.assertIn("Bundle Verify", build_text)
+        self.assertIn("on_verify_mesh_bundle_integrity", build_text)
+        self.assertIn("remote manifest checksum mismatch", verify_text)
+
+        marker_text = ast.unparse(marker_validator)
+        remote_text = ast.unparse(remote_hash)
+        generic_text = ast.unparse(generic_hash)
+        self.assertIn("codex-team-evidence-bundle-delivery/v1", marker_text)
+        self.assertIn("run_id", remote_text)
+        self.assertIn("remote_file_sha256", remote_text)
+        self.assertIn("_parse_remote_sha256", generic_text)
+        self.assertIn("return ''", generic_text)
 
 if __name__ == "__main__":
     unittest.main()

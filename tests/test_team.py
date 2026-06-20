@@ -8,10 +8,14 @@ from unittest.mock import patch
 from codex_team import (
     TeamBusReport,
     TeamBusTargetStatus,
+    TeamBundleReport,
+    TeamBundleTargetStatus,
     TeamLaneStatus,
     TeamRunStatus,
+    summarize_team_chat,
     is_team_summary_reviewed,
     load_bus_report,
+    load_bundle_report,
     inspect_team_run,
     latest_team_run_dir,
     mark_team_summary_reviewed,
@@ -23,6 +27,7 @@ from codex_team import (
     team_run_dirs,
     write_team_chat_entry,
     write_bus_report,
+    write_bundle_report,
     write_handoff_bus,
     write_role_bootstrap,
     write_team_summary,
@@ -170,6 +175,28 @@ class CodexTeamTests(unittest.TestCase):
             raw = read_team_chat(team_dir, max_lines=3)
             self.assertEqual(len(raw.strip().splitlines()), 3)
 
+    def test_summarize_team_chat_reports_active_senders_and_latest(self) -> None:
+        text = (
+            "# Codex Team Chat\n"
+            "[2026-01-01 12:00:00] Atlas Builder (backend-builder): started\n"
+            "[2026-01-01 12:02:00] UI Engineer (ui-polish): review this blocker\n"
+            "[2026-01-01 12:01:00] Atlas Builder (backend-builder): synced\n"
+            "[2026-01-01 12:03:00] Atlas Builder (backend-builder): blocked by missing artifact"
+        )
+        summary = summarize_team_chat(text)
+        self.assertEqual(summary.total_updates, 4)
+        self.assertEqual(summary.active_senders, ("Atlas Builder", "UI Engineer"))
+        self.assertEqual(summary.sender_counts, (("Atlas Builder", 2), ("UI Engineer", 1)))
+        self.assertEqual(summary.lane_activity[0], ("backend-builder", 3, "Atlas Builder", summary.events[3].ts, "blocked by missing artifact"))
+        self.assertIsNotNone(summary.latest)
+        if summary.latest is None:
+            self.fail("expected a latest team chat event")
+        self.assertEqual(summary.latest.sender, "Atlas Builder")
+        self.assertEqual(summary.latest.lane, "backend-builder")
+        self.assertEqual(summary.blocked_mentions, 2)
+        self.assertEqual(summary.review_mentions, 1)
+        self.assertIn("blocked", summary.latest.message)
+
     def test_merge_team_chat_texts_deduplicates_entries(self) -> None:
         merged = merge_team_chat_texts(
             "# Codex Team Chat\n[2026-01-01 12:00:00] atlas-builder (backend-builder): started\n",
@@ -181,6 +208,18 @@ class CodexTeamTests(unittest.TestCase):
         self.assertEqual(lines[0], "# Codex Team Chat")
         self.assertEqual(lines[1], "[2026-01-01 12:00:00] atlas-builder (backend-builder): started")
         self.assertEqual(lines[2], "[2026-01-01 12:05:00] atlas-builder (backend-builder): blocked")
+
+    def test_merge_team_chat_texts_orders_by_timestamp(self) -> None:
+        merged = merge_team_chat_texts(
+            "[2026-01-01 12:05:00] atlas-builder: blocked\n# Codex Team Chat\n"
+            "[2026-01-01 12:10:00] atlas-main: resolved",
+            "[2026-01-01 12:00:00] atlas-builder: started",
+        )
+        lines = [line for line in merged.splitlines() if line.strip()]
+        self.assertEqual(lines[0], "# Codex Team Chat")
+        self.assertEqual(lines[1], "[2026-01-01 12:00:00] atlas-builder: started")
+        self.assertEqual(lines[2], "[2026-01-01 12:05:00] atlas-builder: blocked")
+        self.assertEqual(lines[3], "[2026-01-01 12:10:00] atlas-main: resolved")
 
     def test_write_role_bootstrap_includes_lane_roles_and_startup(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -248,6 +287,64 @@ class CodexTeamTests(unittest.TestCase):
             self.assertEqual(report.name, "handoff-bus-report.json")
             self.assertEqual(payload["sent"], 2)
             self.assertEqual(payload["failures"], ["atlas-cockpit: timeout"])
+
+    def test_write_and_load_bundle_report_with_targets(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            team_dir = Path(tmp) / "team-one"
+            self.write_manifest(team_dir, "team-one")
+            bundle_dir = team_dir / "out" / "evidence-demo"
+            bundle_dir.mkdir(parents=True, exist_ok=True)
+
+            report_path = write_bundle_report(
+                team_dir,
+                sent=2,
+                failures=("atlas-main: stale",),
+                bundle_name="evidence-demo",
+                bundle_path=bundle_dir,
+                bundle_sha256="bundle-sha",
+                target_statuses=(
+                    TeamBundleTargetStatus(
+                        lane_slug="backend-builder-atlas-builder",
+                        device_name="atlas-builder",
+                        target="ao@atlas-builder",
+                        status="synced",
+                        detail="ok",
+                        artifact_path=str(bundle_dir),
+                        artifact_sha256="bundle-sha",
+                        artifact_remote_sha256="bundle-sha",
+                        marker_path=str(bundle_dir / "marker"),
+                        ts=1710000000,
+                    ),
+                    TeamBundleTargetStatus(
+                        lane_slug="ui-polish-atlas-main",
+                        device_name="atlas-main",
+                        target="ao@atlas-main",
+                        status="stale",
+                        detail="checksum mismatch",
+                        artifact_path=str(bundle_dir),
+                        artifact_sha256="bundle-sha",
+                        artifact_remote_sha256="old-sha",
+                        marker_path=str(bundle_dir / "marker-main"),
+                        ts=1710000001,
+                    ),
+                ),
+            )
+            payload = json.loads(report_path.read_text(encoding="utf-8"))
+            parsed = load_bundle_report(team_dir)
+
+            self.assertEqual(report_path.name, "evidence-bundle-report.json")
+            self.assertEqual(payload["sent"], 2)
+            self.assertEqual(payload["bundle_name"], "evidence-demo")
+            self.assertIsNotNone(parsed)
+            if parsed is None:
+                self.fail("Expected parsed bundle report")
+            self.assertEqual(parsed.synced_count, 1)
+            self.assertEqual(parsed.stale_count, 1)
+            self.assertEqual(parsed.targets[0].device_name, "atlas-builder")
+            self.assertEqual(parsed.targets[1].status, "stale")
+            self.assertEqual(parsed.failures, ("atlas-main: stale",))
+            self.assertEqual(parsed.bundle_path, str(bundle_dir))
+            self.assertEqual(parsed.bundle_name, "evidence-demo")
 
     def test_bus_report_synced_and_stale_counts(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

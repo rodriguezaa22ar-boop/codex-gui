@@ -67,6 +67,15 @@ class PalettePreviewTests(unittest.TestCase):
         self.assertEqual(preview.risk, "launches command")
         self.assertEqual(preview.surface, "Embedded terminal")
 
+    def test_receipt_bundle_needs_selected_receipt(self) -> None:
+        action = action_by_id("receipts.bundle")
+        self.assertIsNotNone(action)
+
+        preview = build_palette_preview(action, PaletteContext(receipt_selected=False))
+
+        self.assertFalse(preview.ready)
+        self.assertIn("selected receipt", preview.requirements)
+
     def test_history_records_last_result_per_action(self) -> None:
         action = action_by_id("run.max")
         self.assertIsNotNone(action)

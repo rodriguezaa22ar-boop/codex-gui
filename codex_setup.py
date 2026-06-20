@@ -188,10 +188,34 @@ def _launcher_check(project: Path) -> SetupCheck:
     command = (
         sys.executable,
         "-c",
-        "import codex_launcher; import codex_gui; print('ok')",
+        "from pathlib import Path; import codex_launcher; import codex_gui; "
+        "print(Path(codex_launcher.__file__).resolve()); print(Path(codex_gui.__file__).resolve())",
     )
     result = _run(command, cwd=project, timeout=20)
     if result.returncode == 0:
+        lines = (result.stdout or "").splitlines()
+        resolved = [line.strip() for line in lines if line.strip()]
+        if len(resolved) >= 2:
+            launcher_path = Path(resolved[0])
+            gui_path = Path(resolved[1])
+            if not str(launcher_path).startswith(str(project)):
+                return SetupCheck(
+                    "launcher",
+                    "Launcher",
+                    "warn",
+                    f"{script} resolves `codex_launcher` from {launcher_path}, not this project.",
+                    "Run `python3 -m pip install --user --upgrade --force-reinstall .` or "
+                    f"run `CODEX_GUI_ROOT={project} codex-gui --self-check --project {project}` and verify.",
+                )
+            if not str(gui_path).startswith(str(project)):
+                return SetupCheck(
+                    "launcher",
+                    "Launcher",
+                    "warn",
+                    f"{script} resolves `codex_gui` from {gui_path}, not this project.",
+                    "Run `python3 -m pip install --user --upgrade --force-reinstall .` or "
+                    f"run `CODEX_GUI_ROOT={project} codex-gui --self-check --project {project}` and verify.",
+                )
         return SetupCheck(
             "launcher",
             "Launcher",

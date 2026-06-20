@@ -77,6 +77,7 @@ from codex_devices import (
     MemoryItem,
     MeshReadinessRow,
     MeshReadinessReport,
+    remote_path_expr,
     devices_from_tailscale_status_json,
     import_memory_text,
     local_agent_command,
@@ -92,6 +93,7 @@ from codex_devices import (
     remote_file_sha256sum_command,
     remote_team_dir,
     remove_device,
+    rsync_ssh_transport,
     rsync_memory_command,
     rsync_project_command,
     rsync_team_package_command,
@@ -143,7 +145,9 @@ from codex_receipts import (
     CodexReceiptRecord,
     ReceiptCommandResult,
     ReceiptStampResult,
+    sha256_text,
     atlas_binary,
+    create_reviewer_bundle,
     linked_receipt_chain,
     load_receipt_records,
     receipt_detail,
@@ -174,18 +178,25 @@ from codex_sessions import (
 from codex_team import (
     TeamBusTargetStatus,
     TeamBusReport,
+    TeamBundleReport,
+    TeamBundleTargetStatus,
+    TeamChatEvent,
+    TeamChatSummary,
     is_team_summary_reviewed,
     inspect_team_run,
     read_team_chat,
     load_bus_report,
+    load_bundle_report,
     latest_team_run_dir,
     mark_team_summary_reviewed,
     merge_team_chat_texts,
+    summarize_team_chat,
     role_profile_hint,
     team_operator_summary,
     team_role_for_device,
     team_run_dirs,
     write_role_bootstrap,
+    write_bundle_report,
     write_bus_report,
     write_handoff_bus,
     write_team_summary,
@@ -221,6 +232,7 @@ SESSIONS_FILE = CONFIG_DIR / "sessions.json"
 AGENT_RUNS_FILE = CONFIG_DIR / "agent-runs.json"
 EXECUTIONS_DIR = CONFIG_DIR / "executions"
 RECEIPTS_DIR = CONFIG_DIR / "receipts"
+REVIEW_BUNDLE_DIR = CONFIG_DIR / "review-bundles"
 RUNS_FILE = CONFIG_DIR / "command-runs.json"
 AUTOPILOT_DIR = CONFIG_DIR / "autopilot"
 AUTOPILOT_RECORDS_FILE = CONFIG_DIR / "autopilot-runs.json"
@@ -1551,6 +1563,10 @@ class CodexControl(Gtk.Application):
             self.mesh_live_refresh_seconds = max(10, min(300, int(self.config.get("mesh_live_refresh_seconds", 30))))
         except (TypeError, ValueError):
             self.mesh_live_refresh_seconds = 30
+        self.mesh_team_chat_filter_mode = str(self.config.get("mesh_team_chat_filter_mode", "all"))
+        if self.mesh_team_chat_filter_mode not in {"all", "lane", "sender"}:
+            self.mesh_team_chat_filter_mode = "all"
+        self.mesh_team_chat_filter_value = str(self.config.get("mesh_team_chat_filter_value", "all"))
         self.mesh_live_refresh_busy = False
         self.mesh_live_refresh_timer_id = 0
         self.window: Gtk.ApplicationWindow | None = None
@@ -1621,6 +1637,10 @@ class CodexControl(Gtk.Application):
         self.mesh_team_last_bus_failures: list[str] = []
         self.mesh_team_last_bus_path: Path | None = None
         self.mesh_team_last_bus_report: TeamBusReport | None = None
+        self.mesh_team_last_bundle_sent = 0
+        self.mesh_team_last_bundle_failures: list[str] = []
+        self.mesh_team_last_bundle_path: Path | None = None
+        self.mesh_team_last_bundle_report: TeamBundleReport | None = None
         latest_team_dir = latest_team_run_dir(TEAM_DIR)
         if latest_team_dir is not None:
             latest_status = inspect_team_run(latest_team_dir)
@@ -1628,6 +1648,7 @@ class CodexControl(Gtk.Application):
             self.mesh_team_dir = latest_team_dir
             self.mesh_team_assignments = [dict(item) for item in latest_status.assignments]
             self.mesh_team_last_bus_report = load_bus_report(latest_team_dir)
+            self.mesh_team_last_bundle_report = load_bundle_report(latest_team_dir)
         self.mission_blueprint: MissionBlueprint | None = None
         self.autopilot_plan: AutopilotPlan | None = None
         self.autopilot_prompt = ""
@@ -2366,6 +2387,7 @@ class CodexControl(Gtk.Application):
             ("Copy Package", self.on_copy_launch_package, False),
             ("Save", self.on_save_launch_package, False),
             ("Stamp Receipt", self.on_stamp_receipt, False),
+            ("Open Last Run", self.on_open_launch_package_run, False),
         ]:
             button = Gtk.Button(label=label)
             button.add_css_class("primary" if primary else "secondary")
@@ -2751,19 +2773,18 @@ class CodexControl(Gtk.Application):
 
     def build_receipts_page(self) -> Gtk.Widget:
         box = self.page_box()
-        toolbar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-        for label, handler, primary in [
-            ("Stamp Current", self.on_stamp_receipt, True),
-            ("Verify", self.on_verify_receipt, False),
-            ("Replay Chain", self.on_replay_receipts, False),
-            ("Open Folder", self.on_open_receipts, False),
-            ("Copy Detail", self.on_copy_receipt, False),
-            ("Refresh", self.on_refresh_receipts, False),
-        ]:
-            button = Gtk.Button(label=label)
-            button.add_css_class("primary" if primary else "secondary")
-            button.connect("clicked", handler)
-            toolbar.append(button)
+        toolbar = self.command_grid(
+            [
+                ("Stamp Current", self.on_stamp_receipt, True, "document-save-symbolic", "Write metadata-only receipt metadata for the current command."),
+                ("Verify", self.on_verify_receipt, False, "emblem-ok-symbolic", "Verify selected Atlas receipt."),
+                ("Replay", self.on_replay_receipts, False, "media-playlist-repeat-symbolic", "Replay the selected receipt hash chain."),
+                ("Export Bundle", self.on_export_reviewer_bundle, False, "folder-copy-symbolic", "Export receipt evidence bundle for review."),
+                ("Open Folder", self.on_open_receipts, False, "folder-open-symbolic", "Open local receipt directory."),
+                ("Copy Detail", self.on_copy_receipt, False, "edit-copy-symbolic", "Copy selected receipt detail text."),
+                ("Refresh", self.on_refresh_receipts, False, "view-refresh-symbolic", "Reload receipt records and command runs."),
+            ],
+            columns=4,
+        )
         box.append(toolbar)
 
         paned = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL)
@@ -3399,6 +3420,7 @@ class CodexControl(Gtk.Application):
         for index, (label, handler, primary) in enumerate([
             ("Prepare", self.on_prepare_launch_package, True),
             ("Run", self.on_run_launch_package, False),
+            ("Open Last", self.on_open_launch_package_run, False),
             ("Copy", self.on_copy_launch_package, False),
             ("Open", lambda button: self.show_orchestration_page(), False),
         ]):
@@ -4191,6 +4213,12 @@ class CodexControl(Gtk.Application):
             ("Repair", self.on_retry_mesh_handoff_bus, False, "view-refresh-symbolic", "Retry failed or stale bus targets."),
             ("Preview", self.on_preview_mesh_bus_repair, False, "document-preview-symbolic", "Copy a bus repair preview."),
             ("Report", self.on_copy_mesh_team_bus_report, False, "edit-copy-symbolic", "Copy bus report JSON."),
+            ("Evidence", self.on_export_mesh_team_bundle, False, "folder-copy-symbolic", "Export team artifacts and receipts as a review bundle."),
+            ("Distribute", self.on_distribute_mesh_team_bundle, False, "send-to-symbolic", "Create and sync a team evidence bundle to all trusted devices."),
+            ("Bundle Report", self.on_copy_mesh_team_bundle_report, False, "edit-copy-symbolic", "Copy team evidence bundle report JSON."),
+            ("Bundle Verify", self.on_verify_mesh_bundle_integrity, False, "security-high-symbolic", "Verify bundle hashes against markers on remote devices."),
+            ("Bundle Preview", self.on_preview_mesh_bundle_repair, False, "document-preview-symbolic", "Copy a bundle repair preview."),
+            ("Bundle Retry", self.on_retry_mesh_bundle_distribution, False, "view-refresh-symbolic", "Retry failed or stale bundle targets."),
             ("Bootstrap", self.on_copy_role_bootstrap, False, "edit-copy-symbolic", "Copy role bootstrap handoff."),
             ("Summary", self.on_copy_mesh_team_summary, False, "text-x-generic-symbolic", "Copy team summary."),
             ("Stream", self.on_sync_team_chat, False, "mail-send-symbolic", "Broadcast the team stream."),
@@ -4213,8 +4241,29 @@ class CodexControl(Gtk.Application):
 
         stream = self.panel("Team Stream")
         stream.add_css_class("team-stream-panel")
+        stream_header = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        stream_header.set_hexpand(True)
         self.mesh_team_chat_status_label = self.label("No team stream yet", "muted", wrap=True)
-        stream.append(self.mesh_team_chat_status_label)
+        stream_header.append(self.mesh_team_chat_status_label)
+        self.mesh_team_chat_metrics_label = self.label("No activity yet", "muted", wrap=True)
+        stream_header.append(self.mesh_team_chat_metrics_label)
+        stream_filter = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        stream_filter.set_halign(Gtk.Align.END)
+        stream_filter.append(self.label("Stream filter", "muted"))
+        self.mesh_chat_filter_mode_dropdown = self.make_dropdown([
+            ("all", "All"),
+            ("lane", "Lane"),
+            ("sender", "Sender"),
+        ], self.mesh_team_chat_filter_mode)
+        self.mesh_chat_filter_mode_dropdown.connect("notify::selected", self.on_mesh_chat_filter_mode_changed)
+        self.mesh_chat_filter_value_dropdown = self.make_dropdown([("all", "All")], "all")
+        self.mesh_chat_filter_value_dropdown.connect("notify::selected", self.on_mesh_chat_filter_value_changed)
+        stream_filter.append(self.mesh_chat_filter_mode_dropdown)
+        stream_filter.append(self.mesh_chat_filter_value_dropdown)
+        stream.append(stream_filter)
+        stream.append(stream_header)
+        self.mesh_team_chat_latest_label = self.label("No recent team update", "muted", wrap=True)
+        stream.append(self.mesh_team_chat_latest_label)
         live_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
         live_row.append(self.label("Live refresh", "muted"))
         self.mesh_live_refresh_switch = Gtk.Switch()
@@ -4244,6 +4293,12 @@ class CodexControl(Gtk.Application):
             icon_name="mail-send-symbolic",
             tooltip="Post this update to the team stream.",
         )
+        jump_chat = self.command_button(
+            "Jump",
+            self.on_jump_team_chat_end,
+            icon_name="go-bottom-symbolic",
+            tooltip="Jump to the newest stream update.",
+        )
         refresh_chat = self.command_button(
             "Refresh",
             self.on_refresh_team_chat,
@@ -4258,6 +4313,7 @@ class CodexControl(Gtk.Application):
         )
         chat_controls.append(self.mesh_chat_entry)
         chat_controls.append(post_chat)
+        chat_controls.append(jump_chat)
         chat_controls.append(refresh_chat)
         chat_controls.append(copy_chat)
         stream.append(chat_controls)
@@ -5479,6 +5535,97 @@ class CodexControl(Gtk.Application):
         base = self.mesh_team_dir if run_dir is None else run_dir
         return base / "out" / "team-chat.md"
 
+    @staticmethod
+    def _empty_team_chat_summary() -> TeamChatSummary:
+        return TeamChatSummary(
+            total_updates=0,
+            active_senders=(),
+            sender_counts=(),
+            lane_activity=(),
+            events=(),
+            latest=None,
+            blocked_mentions=0,
+            review_mentions=0,
+        )
+
+    def _mesh_chat_filter_mode_options(self) -> list[tuple[str, str]]:
+        return [
+            ("all", "All"),
+            ("lane", "Lane"),
+            ("sender", "Sender"),
+        ]
+
+    @staticmethod
+    def _mesh_chat_filter_label(summary: TeamChatSummary, *, mode: str, value: str) -> str:
+        if mode == "lane" and value != "all":
+            return f"Lane: {value}"
+        if mode == "sender" and value != "all":
+            return f"Sender: {value}"
+        return "All lanes/senders"
+
+    def _mesh_chat_filter_value_options(self, summary: TeamChatSummary) -> list[tuple[str, str]]:
+        if self.mesh_team_chat_filter_mode == "sender":
+            sender_items = [("all", "All"), *[(sender, f"{sender} ({count})") for sender, count in summary.sender_counts]]
+            return sender_items
+        if self.mesh_team_chat_filter_mode == "lane":
+            lane_items = [
+                (lane, f"{lane} ({count})")
+                for lane, count, _sender, _ts, _message in summary.lane_activity
+            ]
+            return [("all", "All"), *lane_items]
+        return [("all", "All")]
+
+    def _sync_mesh_chat_filter_controls(self, summary: TeamChatSummary) -> None:
+        if not hasattr(self, "mesh_chat_filter_mode_dropdown") or not hasattr(self, "mesh_chat_filter_value_dropdown"):
+            return
+        mode = self.mesh_team_chat_filter_mode if self.mesh_team_chat_filter_mode in {"all", "lane", "sender"} else "all"
+        self.mesh_team_chat_filter_mode = mode
+        self.set_dropdown(self.mesh_chat_filter_mode_dropdown, mode)
+        options = self._mesh_chat_filter_value_options(summary)
+        value_ids = [item_id for item_id, _label in options]
+        value_labels = [label for _item_id, label in options]
+        model = Gtk.StringList.new(value_labels)
+        self.mesh_chat_filter_value_dropdown.set_model(model)
+        self.mesh_chat_filter_value_dropdown.codex_ids = value_ids
+        if self.mesh_team_chat_filter_value not in value_ids:
+            self.mesh_team_chat_filter_value = "all"
+        if self.mesh_team_chat_filter_value == "":
+            self.mesh_team_chat_filter_value = "all"
+        self.set_dropdown(self.mesh_chat_filter_value_dropdown, self.mesh_team_chat_filter_value)
+
+    def _visible_mesh_chat_events(self, summary: TeamChatSummary) -> tuple[TeamChatEvent, ...]:
+        options = self._mesh_chat_filter_value_options(summary)
+        option_values = {item_id for item_id, _label in options}
+        if self.mesh_team_chat_filter_value not in option_values:
+            self.mesh_team_chat_filter_value = "all"
+        if self.mesh_team_chat_filter_mode == "all":
+            return summary.events
+        if self.mesh_team_chat_filter_value in {"", "all"}:
+            return summary.events
+        if self.mesh_team_chat_filter_mode == "lane":
+            return tuple(event for event in summary.events if event.lane == self.mesh_team_chat_filter_value)
+        if self.mesh_team_chat_filter_mode == "sender":
+            return tuple(event for event in summary.events if event.sender == self.mesh_team_chat_filter_value)
+        return summary.events
+
+    def on_mesh_chat_filter_mode_changed(self, _dropdown: Gtk.DropDown, *_args: object) -> None:
+        if not hasattr(self, "mesh_chat_filter_mode_dropdown"):
+            return
+        value = self.dropdown_value(self.mesh_chat_filter_mode_dropdown) or "all"
+        self.mesh_team_chat_filter_mode = value if value in {"all", "lane", "sender"} else "all"
+        if self.mesh_team_chat_filter_mode == "all":
+            self.mesh_team_chat_filter_value = "all"
+        self.save_current_state()
+        self.render_mesh_team_chat()
+
+    def on_mesh_chat_filter_value_changed(self, _dropdown: Gtk.DropDown, *_args: object) -> None:
+        if not hasattr(self, "mesh_chat_filter_value_dropdown"):
+            return
+        value = self.dropdown_value(self.mesh_chat_filter_value_dropdown) or "all"
+        self.mesh_team_chat_filter_value = value
+        self.save_current_state()
+        self.render_mesh_team_chat()
+
     def sync_team_chat_to_devices(self) -> None:
         if self.mesh_team_dir is None or not self.mesh_team_assignments or not self.mesh_team_run_id:
             return
@@ -5534,26 +5681,84 @@ class CodexControl(Gtk.Application):
             return
         base_path.write_text(merged, encoding="utf-8")
 
-    def render_mesh_team_chat(self) -> None:
+    def render_mesh_team_chat(self, *, auto_scroll: bool = False) -> None:
         if not hasattr(self, "mesh_team_chat_buffer"):
             return
         if self.mesh_team_dir is None:
             self.set_text(self.mesh_team_chat_buffer, "No team run loaded.\nPrepare a team to begin a shared stream.")
             if hasattr(self, "mesh_team_chat_status_label"):
                 self.mesh_team_chat_status_label.set_text("No team run loaded")
+            if hasattr(self, "mesh_team_chat_metrics_label"):
+                self.mesh_team_chat_metrics_label.set_text("No team activity")
+            if hasattr(self, "mesh_team_chat_latest_label"):
+                self.mesh_team_chat_latest_label.set_text("No recent team update")
             if hasattr(self, "mesh_live_refresh_label"):
                 self.mesh_live_refresh_label.set_text(f"{'on' if self.mesh_live_refresh else 'off'} | no team loaded")
+            if hasattr(self, "mesh_chat_filter_mode_dropdown"):
+                self._sync_mesh_chat_filter_controls(self._empty_team_chat_summary())
             return
-        text = read_team_chat(self.mesh_team_dir).strip()
+        raw_text = read_team_chat(self.mesh_team_dir, max_lines=0).strip()
+        full_summary = summarize_team_chat(raw_text)
+        self._sync_mesh_chat_filter_controls(full_summary)
+        events = self._visible_mesh_chat_events(full_summary)
+        text = "\n".join([event.raw for event in events]).strip()
         if not text:
             text = "# Team Stream\n\nNo chat entries yet. Use Post to send updates."
+            display_summary = self._empty_team_chat_summary()
+        else:
+            display_summary = summarize_team_chat(text)
         self.set_text(self.mesh_team_chat_buffer, text + ("\n" if text else ""))
         if hasattr(self, "mesh_team_chat_status_label"):
             self.mesh_team_chat_status_label.set_text(
-                f"{self.mesh_team_run_id} | stream active | {len(self.mesh_team_assignments)} lane(s)"
+                (
+                    f"{self.mesh_team_run_id} | stream active | {len(events)} visible of {full_summary.total_updates} | "
+                    f"{self._mesh_chat_filter_label(full_summary, mode=self.mesh_team_chat_filter_mode, value=self.mesh_team_chat_filter_value)}"
+                )
             )
+        if hasattr(self, "mesh_team_chat_metrics_label"):
+            self.mesh_team_chat_metrics_label.set_text(self._mesh_chat_metrics_text(display_summary))
+        if hasattr(self, "mesh_team_chat_latest_label"):
+            self.mesh_team_chat_latest_label.set_text(self._mesh_latest_update_text(display_summary))
         if hasattr(self, "mesh_live_refresh_label"):
             self.mesh_live_refresh_label.set_text(f"{'on' if self.mesh_live_refresh else 'off'} | every {self.mesh_live_refresh_seconds}s")
+        if auto_scroll and text and hasattr(self, "mesh_chat_view"):
+            self.scroll_mesh_chat_to_end()
+
+    @staticmethod
+    def _mesh_chat_metrics_text(summary: TeamChatSummary) -> str:
+        blockers = summary.blocked_mentions
+        reviews = summary.review_mentions
+        active_senders = ", ".join(summary.active_senders) if summary.active_senders else "none"
+        lanes = ", ".join(f"{lane}({count})" for lane, count, _sender, _ts, _message in summary.lane_activity[:5])
+        if not lanes:
+            lanes = "none"
+        return (
+            f"blocked={blockers} | review={reviews} | senders={active_senders} | lanes={lanes}"
+        )
+
+    @staticmethod
+    def _mesh_latest_update_text(summary: TeamChatSummary) -> str:
+        latest = summary.latest
+        if latest is None:
+            return "Latest: no parsed updates yet"
+        ago = "ago unknown"
+        if latest.ts:
+            ago = f"at {human_time(latest.ts)}"
+        return f"Latest: {latest.sender} ({latest.lane}) {ago} — {latest.message[:120]}"
+
+    def scroll_mesh_chat_to_end(self) -> None:
+        if not hasattr(self, "mesh_chat_view"):
+            return
+        buffer = self.mesh_chat_view.get_buffer()
+        if buffer is None:
+            return
+        end_iter = buffer.get_end_iter()
+        buffer.place_cursor(end_iter)
+        self.mesh_chat_view.scroll_to_iter(end_iter, 0.0, False, 0.0, 1.0)
+
+    def on_jump_team_chat_end(self, _button: Gtk.Button) -> None:
+        self.render_mesh_team_chat()
+        self.set_status("Jumped to latest team stream update")
 
     def finish_team_chat_refresh(self, status_text: str = "") -> bool:
         self.mesh_live_refresh_busy = False
@@ -5645,7 +5850,7 @@ class CodexControl(Gtk.Application):
         try:
             write_team_chat_entry(self.mesh_team_dir, sender=sender, lane=lane_slug, message=message)
             self.mesh_chat_entry.set_text("")
-            self.render_mesh_team_chat()
+            self.render_mesh_team_chat(auto_scroll=True)
             self.sync_team_chat_to_devices()
             self.set_status(f"Posted team update for {sender}")
         except Exception as exc:  # noqa: BLE001
@@ -5905,6 +6110,10 @@ class CodexControl(Gtk.Application):
         self.mesh_team_last_bus_failures = []
         self.mesh_team_last_bus_path = None
         self.mesh_team_last_bus_report = None
+        self.mesh_team_last_bundle_sent = 0
+        self.mesh_team_last_bundle_failures = []
+        self.mesh_team_last_bundle_path = None
+        self.mesh_team_last_bundle_report = None
         return team_dir
 
     def prepare_mesh_team_package(self, candidate_devices: tuple[DeviceRecord, ...] | None = None) -> bool:
@@ -5933,6 +6142,10 @@ class CodexControl(Gtk.Application):
         self.mesh_team_last_bus_failures = []
         self.mesh_team_last_bus_path = None
         self.mesh_team_last_bus_report = None
+        self.mesh_team_last_bundle_sent = 0
+        self.mesh_team_last_bundle_failures = []
+        self.mesh_team_last_bundle_path = None
+        self.mesh_team_last_bundle_report = None
         return True
 
     def on_load_latest_mesh_team(self, _button: Gtk.Button) -> None:
@@ -5981,6 +6194,14 @@ class CodexControl(Gtk.Application):
         self.mesh_team_last_bus_report = load_bus_report(self.mesh_team_dir)
         return self.mesh_team_last_bus_report
 
+    def _team_bundle_report(self) -> TeamBundleReport | None:
+        if self.mesh_team_dir is None:
+            return None
+        if self.mesh_team_last_bundle_report is not None and str(self.mesh_team_last_bundle_report.team_dir) == str(self.mesh_team_dir):
+            return self.mesh_team_last_bundle_report
+        self.mesh_team_last_bundle_report = load_bundle_report(self.mesh_team_dir)
+        return self.mesh_team_last_bundle_report
+
     def on_copy_mesh_team_bus_report(self, _button: Gtk.Button) -> None:
         report = self._team_bus_report()
         if report is None:
@@ -6011,6 +6232,40 @@ class CodexControl(Gtk.Application):
             ],
         }, indent=2, sort_keys=True), "Bus report copied")
         self.set_status(f"Copied bus report for {report.run_id}")
+
+    def on_copy_mesh_team_bundle_report(self, _button: Gtk.Button) -> None:
+        report = self._team_bundle_report()
+        if report is None:
+            self.set_mesh_team_status("No bundle report available. Distribute evidence bundle first.", "warn")
+            self.set_status("No bundle report", "warn")
+            return
+        self.copy_mesh_text(json.dumps({
+            "run_id": report.run_id,
+            "team_dir": report.team_dir,
+            "bundle_name": report.bundle_name,
+            "bundle_path": report.bundle_path,
+            "bundle_sha256": report.bundle_sha256,
+            "sent": report.sent,
+            "failures": report.failures,
+            "generated": report.generated,
+            "generated_epoch": report.generated_epoch,
+            "targets": [
+                {
+                    "lane_slug": item.lane_slug,
+                    "device_name": item.device_name,
+                    "target": item.target,
+                    "status": item.status,
+                    "detail": item.detail,
+                    "artifact_path": item.artifact_path,
+                    "artifact_sha256": item.artifact_sha256,
+                    "artifact_remote_sha256": item.artifact_remote_sha256,
+                    "marker_path": item.marker_path,
+                    "ts": item.ts,
+                }
+                for item in report.targets
+            ],
+        }, indent=2, sort_keys=True), "Bundle report copied")
+        self.set_status(f"Copied bundle report for {report.run_id}")
 
     def on_copy_role_bootstrap(self, _button: Gtk.Button) -> None:
         if self.mesh_team_dir is None:
@@ -6059,15 +6314,11 @@ class CodexControl(Gtk.Application):
         return ""
 
     def _remote_handoff_bus_sha256(self, device: DeviceRecord, bus_path: str) -> str:
-        command = list(remote_file_sha256sum_command(device, bus_path))
         try:
-            result = run_cmd(command, timeout=15)
+            return self._remote_file_sha256(device, bus_path)
         except Exception as exc:  # noqa: BLE001
             self.set_status(f"Bus hash probe failed on {device.name}: {exc}")
             return ""
-        if result.returncode != 0:
-            return ""
-        return self._parse_remote_sha256(result.stdout)
 
     def _build_bus_target_status(
         self,
@@ -6518,6 +6769,17 @@ class CodexControl(Gtk.Application):
 
         threading.Thread(target=worker, daemon=True).start()
 
+    def _mesh_team_lane_activity(self, chat_summary: TeamChatSummary, lane_slug: str) -> tuple[str, int, str, int, str] | None:
+        return next((item for item in chat_summary.lane_activity if item[0] == lane_slug), None)
+
+    @staticmethod
+    def _mesh_team_lane_activity_label(activity: tuple[str, int, str, int, str] | None) -> str:
+        if activity is None:
+            return "no updates"
+        lane_slug, count, sender, ts, message = activity
+        when = human_time(ts) if ts else "unknown time"
+        return f"lane: {lane_slug} | {count} update(s) | {sender} @ {when} | {message[:70]}"
+
     def render_mesh_team(self) -> None:
         if not hasattr(self, "mesh_team_list"):
             return
@@ -6538,6 +6800,7 @@ class CodexControl(Gtk.Application):
             return
         run_status = inspect_team_run(self.mesh_team_dir) if self.mesh_team_dir is not None else None
         self.render_mesh_launch_console(run_status)
+        team_chat_summary = summarize_team_chat(read_team_chat(self.mesh_team_dir, max_lines=0).strip()) if self.mesh_team_dir is not None else None
         if hasattr(self, "mesh_team_status_label"):
             if run_status is not None:
                 bus_report = self._team_bus_report()
@@ -6597,6 +6860,11 @@ class CodexControl(Gtk.Application):
                 detail += f" | comm: {bus_status.detail}"
             else:
                 detail += " | comm: not synced"
+            if team_chat_summary is not None:
+                lane_activity = self._mesh_team_lane_activity(team_chat_summary, str(lane.lane_slug))
+                if lane_activity is not None:
+                    self.flow_append(chip_flow, self.chip_label(f"{lane_activity[1]} stream", "chip"))
+                    detail += f" | stream: {self._mesh_team_lane_activity_label(lane_activity)}"
             detail_label = self.label(detail, "muted", wrap=True)
             detail_label.set_lines(2)
             detail_label.set_ellipsize(Pango.EllipsizeMode.END)
@@ -7803,6 +8071,47 @@ class CodexControl(Gtk.Application):
         display.get_clipboard().set((self.roadmap or self.current_roadmap()).detail_text())
         self.set_status("Roadmap copied")
 
+    def project_hash(self, project: str | None = None) -> str:
+        return sha256_text(str(Path(project or self.selected_project()).expanduser()))
+
+    def find_matching_run_for_launch(
+        self,
+        *,
+        command: tuple[str, ...],
+        prompt: str,
+        action: str,
+        surface: str,
+        profile: str,
+    ) -> CodexRunRecord | None:
+        if not self.command_runs:
+            return None
+        command_hash = sha256_text(shell_join(list(command)))
+        prompt_hash = sha256_text(prompt)
+        target_project_hash = self.project_hash()
+        exact_matches: list[CodexRunRecord] = []
+        fallback_matches: list[CodexRunRecord] = []
+        for record in self.command_runs:
+            if record.project_hash and record.project_hash != target_project_hash:
+                continue
+            if record.command_hash != command_hash:
+                continue
+            if record.action == action and record.profile == profile and record.surface == surface:
+                if record.prompt_hash == prompt_hash:
+                    return record
+                exact_matches.append(record)
+            elif not exact_matches:
+                fallback_matches.append(record)
+        if exact_matches:
+            return exact_matches[0]
+        for record in fallback_matches:
+            if record.profile == profile:
+                return record
+            if record.action == action:
+                return record
+        if fallback_matches:
+            return fallback_matches[0]
+        return None
+
     def on_save_roadmap(self, _button: Gtk.Button) -> None:
         roadmap = self.roadmap or self.current_roadmap()
         ROADMAP_FILE.parent.mkdir(parents=True, exist_ok=True)
@@ -7821,6 +8130,13 @@ class CodexControl(Gtk.Application):
         profile = self.dropdown_value(self.profile_combo) if hasattr(self, "profile_combo") else str(self.config.get("profile") or "none")
         surface_value = surface or ("headless" if action == "exec" else ("embedded" if Vte is not None and self.terminal is not None else "external"))
         command = tuple(self.build_command(action))
+        matching_run = self.find_matching_run_for_launch(
+            command=command,
+            prompt=self.selected_prompt(),
+            action=action,
+            surface=surface_value,
+            profile=profile,
+        )
         plan = self.current_quality_plan()
         quality = self.active_quality_report(plan)
         preflight = self.preflight_report or self.build_current_preflight_report()
@@ -7855,6 +8171,11 @@ class CodexControl(Gtk.Application):
             external_terminal=first_terminal() is not None,
             recent_runs=len(self.command_runs),
             receipts=len(self.receipt_records),
+            last_run_id=matching_run.id if matching_run is not None else "",
+            last_run_status=matching_run.status if matching_run is not None else "",
+            last_run_profile=matching_run.profile if matching_run is not None else profile,
+            last_run_surface=matching_run.surface if matching_run is not None else surface_value,
+            last_run_created=matching_run.created if matching_run is not None else 0,
         )
         self.launch_package = package
         return package
@@ -7915,7 +8236,973 @@ class CodexControl(Gtk.Application):
             self.on_run_headless(button)
         else:
             self.run_embedded_command(self.build_command(action))
+        self.refresh_command_runs()
+        self.render_launch_package()
+        self.render_command_runs()
         self.set_status(f"Running package: {package.action}")
+
+    def on_open_launch_package_run(self, _button: Gtk.Button) -> None:
+        package = self.current_launch_package()
+        if not package.last_run_id:
+            self.set_status("No matching run for current launch package", "warn")
+            return
+        match = self.find_matching_run_for_launch(
+            command=tuple(self.build_command(package.action)),
+            prompt=self.selected_prompt(),
+            action=package.action,
+            surface=package.surface,
+            profile=package.profile,
+        )
+        if match is None:
+            self.set_status("Matching run was not found", "warn")
+            return
+        self.selected_command_run = match
+        self.show_page("runs")
+        self.render_command_runs()
+        self.set_status(f"Opened matching run: {match.id[:8]}")
+
+    def build_reviewer_bundle_name(self, selected_receipt: CodexReceiptRecord | None) -> str:
+        project = slugify(self.selected_project() or "project")
+        when = dt.datetime.now(dt.UTC).strftime("%Y%m%d-%H%M%S")
+        suffix = selected_receipt.id[:8] if selected_receipt is not None else "latest"
+        return f"{project}-receipt-review-{suffix}-{when}"
+
+    def build_mesh_team_bundle_name(self) -> str:
+        project = slugify(self.selected_project() or "project")
+        when = dt.datetime.now(dt.UTC).strftime("%Y%m%d-%H%M%S")
+        run_id = slugify(self.mesh_team_run_id or "team")
+        return f"{project}-mesh-team-{run_id}-{when}"
+
+    def _mesh_bundle_tree_artifacts(self, team_run: Path, source: str) -> list[tuple[Path, str]]:
+        source_root = team_run / source
+        if not source_root.exists():
+            return []
+        artifacts: list[tuple[Path, str]] = []
+        for path in sorted(source_root.rglob("*")):
+            if path.is_file():
+                rel = path.relative_to(team_run)
+                artifacts.append((path, f"team/{rel.as_posix()}"))
+        return artifacts
+
+    def reviewer_bundle_team_artifacts(self, team_run: Path | None = None) -> tuple[tuple[Path, str], ...]:
+        team_run = team_run or latest_team_run_dir(TEAM_DIR)
+        if team_run is None:
+            return ()
+        pairs: list[tuple[Path, str]] = []
+        seen: set[str] = set()
+
+        def add_candidate(source: Path, destination: str) -> None:
+            if destination in seen or not source.exists():
+                return
+            seen.add(destination)
+            pairs.append((source, destination))
+
+        candidates = (
+            (team_run / "manifest.json", "team/manifest.json"),
+            (team_run / "team-ledger.md", "team/team-ledger.md"),
+            (team_run / "summary.md", "team/run-summary.md"),
+            (team_run / "out" / "team-summary.md", "team/team-summary.md"),
+            (team_run / "out" / "summary-reviewed.json", "team/summary-reviewed.json"),
+            (team_run / "out" / "handoff-bus.md", "team/handoff-bus.md"),
+            (team_run / "out" / "handoff-bus-report.json", "team/handoff-bus-report.json"),
+            (team_run / "out" / "team-chat.md", "team/team-chat.md"),
+            (team_run / "out" / "role-bootstrap.md", "team/role-bootstrap.md"),
+            (team_run / "out" / "role-bootstrap.json", "team/role-bootstrap.json"),
+        )
+        for source, destination in candidates:
+            add_candidate(source, destination)
+
+        for source, destination in self._mesh_bundle_tree_artifacts(team_run, "out"):
+            add_candidate(source, destination)
+
+        for source, destination in self._mesh_bundle_tree_artifacts(team_run, "collected"):
+            add_candidate(source, destination)
+
+        for source, destination in self._mesh_bundle_tree_artifacts(team_run, "lanes"):
+            add_candidate(source, destination)
+        return tuple(pairs)
+
+    def reviewer_bundle_context_text(self, selected_receipt: CodexReceiptRecord | None) -> str:
+        sections: list[str] = []
+        try:
+            packet = self.context_packet or self.current_context_packet()
+            sections.append(packet.markdown())
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            roadmap = self.roadmap or self.current_roadmap()
+            sections.append(roadmap.detail_text())
+        except Exception:  # noqa: BLE001
+            pass
+        if selected_receipt is not None:
+            chain = linked_receipt_chain(self.receipt_records, selected_receipt)
+            if chain:
+                sections.append("".join([receipt_detail(record) + "\n\n" for record in chain]).strip())
+        return "\n\n".join([section.strip() for section in sections if section.strip()])
+
+    def _mesh_bundle_remote_root(self, run_id: str) -> str:
+        return f"{remote_team_dir(run_id)}/out/evidence-bundles"
+
+    def _mesh_bundle_remote_path(self, run_id: str, bundle_name: str) -> str:
+        return f"{self._mesh_bundle_remote_root(run_id)}/{bundle_name}"
+
+    def _mesh_bundle_remote_marker_path(self, run_id: str, bundle_name: str) -> str:
+        return f"{self._mesh_bundle_remote_path(run_id, bundle_name)}/evidence-bundle-delivery.json"
+
+    def _mesh_bundle_artifact_sha(self, bundle_dir: Path) -> str:
+        digest = hashlib.sha256()
+        for file_path in sorted(bundle_dir.rglob("*")):
+            if not file_path.is_file():
+                continue
+            try:
+                relative_path = file_path.relative_to(bundle_dir).as_posix()
+            except ValueError:
+                relative_path = file_path.name
+            try:
+                digest.update(relative_path.encode())
+                digest.update(str(file_path.stat().st_size).encode())
+                digest.update(self._file_sha256_hex(file_path).encode())
+                digest.update(b"\n")
+            except OSError:
+                continue
+        return digest.hexdigest()
+
+    def _mesh_bundle_artifact_count(self, bundle_dir: Path) -> int:
+        manifest_path = bundle_dir / "manifest.json"
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return 0
+        try:
+            return int(manifest.get("team_artifact_count", 0))
+        except (TypeError, ValueError):
+            return 0
+
+    def _mesh_bundle_delivery_marker(
+        self,
+        *,
+        bundle_name: str,
+        bundle_dir: Path,
+        run_id: str,
+        assignment: dict[str, str],
+        artifact_sha: str,
+        artifact_count: int,
+        marker_dest: str,
+    ) -> dict[str, object]:
+        selected_receipt = self.selected_receipt.id if self.selected_receipt is not None else ""
+        status_payload: dict[str, object] = {
+            "schema": "codex-team-evidence-bundle-delivery/v1",
+            "created": dt.datetime.now(dt.UTC).replace(microsecond=0).isoformat(),
+            "run_id": run_id,
+            "bundle_name": bundle_name,
+            "bundle_dir": str(bundle_dir),
+            "project": self.selected_project(),
+            "artifact_count": artifact_count,
+            "artifact_sha256": artifact_sha,
+            "selected_receipt_id": selected_receipt,
+            "bundle_manifest": f"manifest.json",
+            "marker_destination": marker_dest,
+            "device_name": assignment.get("device_name", "unknown"),
+            "target": assignment.get("target", "unknown"),
+            "target_host": assignment.get("target", "unknown"),
+            "target_project_root": assignment.get("project_root", "unknown"),
+        }
+        manifest_path = bundle_dir / "manifest.json"
+        try:
+            manifest_data = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest_sha = self._file_sha256_hex(manifest_path)
+            status_payload["team_artifact_count"] = int(manifest_data.get("team_artifact_count", 0))
+            status_payload["receipt_count"] = int(manifest_data.get("receipt_count", 0))
+            status_payload["run_count"] = int(manifest_data.get("run_count", 0))
+            status_payload["artifact_count"] = (
+                status_payload["artifact_count"]
+                + status_payload["team_artifact_count"]
+                + status_payload["receipt_count"]
+                + status_payload["run_count"]
+            )
+        except (OSError, json.JSONDecodeError, TypeError, ValueError):
+            manifest_sha = ""
+        status_payload["bundle_manifest_sha256"] = manifest_sha
+        return status_payload
+
+    def _mesh_bundle_delivery_marker_text(self, payload: dict[str, object]) -> str:
+        return json.dumps(payload, indent=2, sort_keys=True)
+
+    def _is_bundle_delivery_marker_valid(
+        self,
+        marker: dict[str, object] | None,
+        *,
+        run_id: str,
+        bundle_name: str,
+        artifact_sha: str,
+    ) -> bool:
+        if not isinstance(marker, dict):
+            return False
+        if marker.get("schema") != "codex-team-evidence-bundle-delivery/v1":
+            return False
+        if str(marker.get("run_id") or "") != run_id:
+            return False
+        if str(marker.get("bundle_name") or "") != bundle_name:
+            return False
+        marker_hash = str(marker.get("artifact_sha256") or "").strip()
+        if not marker_hash:
+            return False
+        if artifact_sha and marker_hash != artifact_sha:
+            return False
+        return True
+
+    def _remote_file_sha256(self, device: DeviceRecord, remote_path: str) -> str:
+        try:
+            result = run_cmd(list(remote_file_sha256sum_command(device, remote_path)), timeout=20)
+        except Exception as exc:  # noqa: BLE001
+            self.set_status(f"Remote sha failed on {device.name} for {remote_path}: {exc}")
+            return ""
+        if result.returncode != 0:
+            return ""
+        return self._parse_remote_sha256(result.stdout)
+
+    def _remote_bundle_manifest_sha256(self, device: DeviceRecord, run_id: str, bundle_name: str) -> str:
+        manifest_path = f"{self._mesh_bundle_remote_path(run_id, bundle_name)}/manifest.json"
+        return self._remote_file_sha256(device, manifest_path)
+
+    def _mesh_bundle_remote_marker(self, device: DeviceRecord, run_id: str, bundle_name: str) -> dict[str, object] | None:
+        marker_path = self._mesh_bundle_remote_marker_path(run_id, bundle_name)
+        try:
+            marker_expr = remote_path_expr(marker_path)
+            result = run_cmd([*device.ssh_prefix(), "cat", marker_expr], timeout=20)
+        except Exception as exc:  # noqa: BLE001
+            self.set_status(f"Bundle marker read failed on {device.name}: {exc}")
+            return None
+        if result.returncode != 0:
+            return None
+        text = (result.stdout or "").strip()
+        if not text:
+            return None
+        try:
+            payload = json.loads(text)
+        except json.JSONDecodeError:
+            return None
+        return payload if isinstance(payload, dict) else None
+
+    def _mesh_bundle_write_remote_marker(self, device: DeviceRecord, run_id: str, bundle_name: str, payload: dict[str, object]) -> bool:
+        marker_path = self._mesh_bundle_remote_marker_path(run_id, bundle_name)
+        marker_text = self._mesh_bundle_delivery_marker_text(payload)
+        delimiter = "__CODEX_MESH_BUNDLE_DELIVERY__"
+        while delimiter in marker_text:
+            delimiter = f"{delimiter}_{dt.datetime.now(dt.UTC).strftime('%Y%m%d%H%M%S')}"
+        remote_root = remote_path_expr(self._mesh_bundle_remote_path(run_id, bundle_name))
+        remote_marker = remote_path_expr(marker_path)
+        marker_command = (
+            f"mkdir -p {remote_root} && cat <<'{delimiter}' > {remote_marker}\n"
+            f"{marker_text}\n"
+            f"{delimiter}\n"
+        )
+        try:
+            result = run_cmd(
+                [
+                    *device.ssh_prefix(),
+                    "bash",
+                    "-lc",
+                    marker_command,
+                ],
+                timeout=20,
+            )
+        except Exception as exc:  # noqa: BLE001
+            self.set_status(f"Bundle marker failed on {device.name}: {exc}")
+            return False
+        return result.returncode == 0
+
+    def _build_bundle_target_status(
+        self,
+        assignment: dict[str, str],
+        bundle_dir: Path,
+        bundle_name: str,
+        status: str,
+        detail: str,
+        artifact_sha256: str,
+        remote_artifact_sha256: str = "",
+    ) -> TeamBundleTargetStatus:
+        run_id = self.mesh_team_run_id or ""
+        local_bundle_manifest = bundle_dir / "manifest.json"
+        if status == "local":
+            remote_artifact_sha256 = artifact_sha256
+        return TeamBundleTargetStatus(
+            lane_slug=assignment.get("lane_slug", ""),
+            device_name=assignment.get("device_name", "unknown"),
+            target=assignment.get("target", "unknown"),
+            status=status,
+            detail=detail,
+            artifact_path=(
+                f"{assignment.get('target', 'unknown')}:{self._mesh_bundle_remote_path(run_id, bundle_name)}/manifest.json"
+                if run_id
+                else str(local_bundle_manifest)
+            ),
+            artifact_sha256=artifact_sha256,
+            artifact_remote_sha256=remote_artifact_sha256,
+            marker_path=self._mesh_bundle_remote_marker_path(run_id, bundle_name) if run_id else "",
+            ts=int(time.time()),
+        )
+
+    def _sync_mesh_team_bundle_targets(
+        self,
+        bundle: ReviewerBundle,
+        assignments: list[dict[str, str]],
+    ) -> tuple[tuple[TeamBundleTargetStatus, ...], int, list[str]]:
+        if self.mesh_team_run_id is None:
+            return (), 0, ["No active team run id"]
+        run_id = self.mesh_team_run_id
+        if not assignments:
+            return (), 0, ["No mesh assignments to sync"]
+
+        bundle_dir = Path(bundle.bundle_dir)
+        if not bundle_dir.exists():
+            return (), 0, [f"Bundle not found: {bundle.bundle_dir}"]
+        bundle_name = bundle_dir.name
+        local_bundle_path = bundle_dir / "manifest.json"
+        artifact_sha = self._mesh_bundle_artifact_sha(bundle_dir)
+        artifact_count = self._mesh_bundle_artifact_count(bundle_dir)
+        if not artifact_sha:
+            artifact_sha = self._file_sha256_hex(local_bundle_path)
+        sent = 0
+        errors: list[str] = []
+        lock = threading.Lock()
+        remote_root = self._mesh_bundle_remote_path(run_id, bundle_name)
+
+        def sync_one(assignment: dict[str, str]) -> None:
+            nonlocal sent
+            device = self.mesh_assignment_device(assignment)
+            if device is None:
+                msg = f"{assignment.get('device_name', 'device')}: missing device record"
+                with lock:
+                    errors.append(msg)
+                    results.append(self._build_bundle_target_status(
+                        assignment,
+                        bundle_dir,
+                        bundle_name,
+                        "failed",
+                        msg,
+                        artifact_sha,
+                    ))
+                return
+            if self.is_local_mesh_device(device):
+                with lock:
+                    sent += 1
+                    results.append(
+                        self._build_bundle_target_status(
+                            assignment,
+                            bundle_dir,
+                            bundle_name,
+                            "local",
+                            "local machine",
+                            artifact_sha,
+                            remote_artifact_sha256=artifact_sha,
+                        )
+                    )
+                return
+            try:
+                mkdir_result = run_cmd(
+                    list(ssh_mkdir_command(device, remote_root)),
+                    timeout=20,
+                )
+            except Exception as exc:  # noqa: BLE001
+                msg = f"{device.name}: sync root mkdir failed: {exc}"
+                with lock:
+                    errors.append(msg)
+                    results.append(
+                        self._build_bundle_target_status(
+                            assignment,
+                            bundle_dir,
+                            bundle_name,
+                            "failed",
+                            msg,
+                            artifact_sha,
+                        )
+                    )
+                return
+            if mkdir_result.returncode != 0:
+                detail = (mkdir_result.stderr or mkdir_result.stdout or "mkdir failed").strip().splitlines()
+                msg = f"{device.name}: sync root mkdir failed: {detail[-1] if detail else 'mkdir failed'}"
+                with lock:
+                    errors.append(msg)
+                    results.append(
+                        self._build_bundle_target_status(
+                            assignment,
+                            bundle_dir,
+                            bundle_name,
+                            "failed",
+                            msg,
+                            artifact_sha,
+                        )
+                    )
+                return
+            try:
+                sync_result = run_cmd([
+                    "rsync",
+                    "-az",
+                    "--timeout=20",
+                    "-e",
+                    rsync_ssh_transport(device),
+                    f"{str(bundle_dir).rstrip('/')}/",
+                    f"{device.target()}:{remote_root}/",
+                ], timeout=70)
+            except Exception as exc:  # noqa: BLE001
+                msg = f"{device.name}: evidence bundle sync failed: {exc}"
+                with lock:
+                    errors.append(msg)
+                    results.append(
+                        self._build_bundle_target_status(
+                            assignment,
+                            bundle_dir,
+                            bundle_name,
+                            "failed",
+                            msg,
+                            artifact_sha,
+                        )
+                    )
+                return
+            if sync_result.returncode != 0:
+                detail = (sync_result.stderr or sync_result.stdout or "rsync failed").strip().splitlines()
+                msg = f"{device.name}: evidence bundle sync failed: {detail[-1] if detail else 'rsync failed'}"
+                with lock:
+                    errors.append(msg)
+                    results.append(
+                        self._build_bundle_target_status(
+                            assignment,
+                            bundle_dir,
+                            bundle_name,
+                            "failed",
+                            msg,
+                            artifact_sha,
+                        )
+                    )
+                return
+            marker_payload = self._mesh_bundle_delivery_marker(
+                bundle_name=bundle_name,
+                bundle_dir=bundle_dir,
+                run_id=run_id,
+                assignment=assignment,
+                artifact_sha=artifact_sha,
+                artifact_count=artifact_count,
+                marker_dest=self._mesh_bundle_remote_marker_path(run_id, bundle_name),
+            )
+            marker_ok = self._mesh_bundle_write_remote_marker(device, run_id, bundle_name, marker_payload)
+            if not marker_ok:
+                msg = f"{device.name}: marker write failed"
+                with lock:
+                    errors.append(msg)
+                    results.append(self._build_bundle_target_status(
+                        assignment,
+                        bundle_dir,
+                        bundle_name,
+                        "failed",
+                        msg,
+                        artifact_sha,
+                    ))
+                return
+            marker = self._mesh_bundle_remote_marker(device, run_id, bundle_name)
+            if not self._is_bundle_delivery_marker_valid(
+                marker,
+                run_id=run_id,
+                bundle_name=bundle_name,
+                artifact_sha=artifact_sha,
+            ):
+                msg = f"{device.name}: marker verification failed"
+                with lock:
+                    errors.append(msg)
+                    results.append(self._build_bundle_target_status(
+                        assignment,
+                        bundle_dir,
+                        bundle_name,
+                        "failed",
+                        msg,
+                        artifact_sha,
+                    ))
+                return
+            remote_manifest_sha = self._remote_bundle_manifest_sha256(device, run_id, bundle_name)
+            detail = f"{device.name}: synced"
+            remote_artifact_sha256 = remote_manifest_sha
+            if remote_manifest_sha and remote_manifest_sha != artifact_sha:
+                msg = f"{device.name}: remote manifest checksum mismatch"
+                with lock:
+                    errors.append(msg)
+                    results.append(self._build_bundle_target_status(
+                        assignment,
+                        bundle_dir,
+                        bundle_name,
+                        "failed",
+                        msg,
+                        artifact_sha,
+                        remote_artifact_sha256=remote_manifest_sha,
+                    ))
+                return
+            if not remote_manifest_sha:
+                detail = f"{device.name}: synced (remote checksum unavailable)"
+            with lock:
+                sent += 1
+                results.append(
+                    self._build_bundle_target_status(
+                        assignment,
+                        bundle_dir,
+                        bundle_name,
+                        "synced",
+                        detail,
+                        artifact_sha,
+                        remote_artifact_sha256=remote_artifact_sha256,
+                    )
+                )
+        results: list[TeamBundleTargetStatus] = []
+        threads = [threading.Thread(target=sync_one, args=(assignment,), daemon=True) for assignment in assignments]
+        for thread in threads:
+            thread.start()
+        for index, thread in enumerate(threads):
+            thread.join(60)
+            if thread.is_alive():
+                device = self.mesh_assignment_device(assignments[index])
+                detail = f"{device.name if device is not None else assignments[index].get('device_name', 'device')}: sync timeout"
+                with lock:
+                    errors.append(detail)
+                    results.append(
+                        self._build_bundle_target_status(
+                            assignments[index],
+                            bundle_dir,
+                            bundle_name,
+                            "failed",
+                            detail,
+                            artifact_sha,
+                        )
+                    )
+        return tuple(results), sent, errors
+
+    def _mesh_build_team_bundle(self) -> tuple[ReviewerBundle | None, int, list[str]]:
+        if self.mesh_team_dir is None:
+            self.set_mesh_team_status("No active team run to bundle.", "warn")
+            self.set_status("No active team run", "warn")
+            return None, 0, []
+        selected = self.selected_receipt if self.selected_receipt is not None else (self.receipt_records[0] if self.receipt_records else None)
+        team_artifacts = self.reviewer_bundle_team_artifacts(self.mesh_team_dir)
+        if not team_artifacts:
+            self.set_mesh_team_status("No team artifacts found to bundle.", "warn")
+            self.set_status("No team artifacts found", "warn")
+        package = self.current_launch_package()
+        context_summary = self.reviewer_bundle_context_text(selected)
+        try:
+            bundle = create_reviewer_bundle(
+                REVIEW_BUNDLE_DIR,
+                bundle_name=self.build_mesh_team_bundle_name(),
+                project=self.selected_project(),
+                receipt_records=self.receipt_records,
+                run_records=self.command_runs,
+                selected_receipt=selected,
+                launch_package_text=package.detail_text(),
+                context_summary=context_summary,
+                team_artifacts=team_artifacts,
+                max_receipts=40,
+            )
+        except Exception as exc:  # noqa: BLE001
+            self.set_mesh_team_status(f"Failed creating evidence bundle: {exc}", "bad")
+            self.set_status(f"Failed creating evidence bundle: {exc}", "bad")
+            return None, 0, []
+        return bundle, len(team_artifacts), []
+
+    def on_export_reviewer_bundle(self, _button: Gtk.Button) -> None:
+        if not self.receipt_records:
+            self.set_status("No receipts available for bundle export", "warn")
+            return
+        selected = self.selected_receipt if self.selected_receipt is not None else self.receipt_records[0]
+        package = self.current_launch_package()
+        context_summary = self.reviewer_bundle_context_text(selected)
+        bundle = create_reviewer_bundle(
+            REVIEW_BUNDLE_DIR,
+            bundle_name=self.build_reviewer_bundle_name(selected),
+            project=self.selected_project(),
+            receipt_records=self.receipt_records,
+            run_records=self.command_runs,
+            selected_receipt=selected,
+            launch_package_text=package.detail_text(),
+            context_summary=context_summary,
+            team_artifacts=self.reviewer_bundle_team_artifacts(),
+            max_receipts=40,
+        )
+        display = Gdk.Display.get_default()
+        if display is not None:
+            display.get_clipboard().set(str(bundle.bundle_dir))
+        self.set_status(f"Review bundle created: {Path(bundle.bundle_dir).name}")
+
+    def on_export_mesh_team_bundle(self, _button: Gtk.Button) -> None:
+        bundle, _, _ = self._mesh_build_team_bundle()
+        if bundle is None:
+            return
+        display = Gdk.Display.get_default()
+        if display is not None:
+            display.get_clipboard().set(str(bundle.bundle_dir))
+        self.set_mesh_team_status(
+            f"Evidence bundle created for {self.mesh_team_run_id}: {Path(bundle.bundle_dir).name}",
+            "ok",
+        )
+        self.set_status(f"Team evidence bundle created: {Path(bundle.bundle_dir).name}")
+
+    def _finish_mesh_bundle_distribution(
+        self,
+        bundle: ReviewerBundle,
+        target_statuses: tuple[TeamBundleTargetStatus, ...],
+        sent: int,
+        target_count: int,
+        errors: list[str],
+    ) -> None:
+        bundle_path = Path(bundle.bundle_dir)
+        bundle_sha = self._mesh_bundle_artifact_sha(bundle_path)
+        display = Gdk.Display.get_default()
+        if display is not None:
+            display.get_clipboard().set(str(bundle.bundle_dir))
+        self.mesh_team_last_bundle_sent = sent
+        self.mesh_team_last_bundle_failures = list(errors)
+        self.mesh_team_last_bundle_path = bundle_path
+        report: TeamBundleReport | None = None
+        if self.mesh_team_dir is not None:
+            write_bundle_report(
+                self.mesh_team_dir,
+                sent=sent,
+                failures=errors,
+                bundle_name=Path(bundle.bundle_dir).name,
+                bundle_path=bundle_path,
+                bundle_sha256=bundle_sha or self._file_sha256_hex(bundle_path / "manifest.json"),
+                target_statuses=target_statuses,
+            )
+            self.mesh_team_last_bundle_report = load_bundle_report(self.mesh_team_dir)
+            report = self.mesh_team_last_bundle_report
+        self.render_mesh_team()
+        if errors:
+            self.set_mesh_team_status(
+                f"Evidence bundle distributed to {sent}/{target_count} devices: errors"
+                f" | {errors[0][:120]}",
+                "bad",
+            )
+            self.set_status(f"Evidence bundle distribution partial success: {len(errors)} issue(s)", "warn")
+        else:
+            self.set_mesh_team_status(f"Evidence bundle distributed to {sent} of {target_count} device(s).")
+            self.set_status("Team evidence bundle distributed")
+        if report is not None:
+            def verifier() -> None:
+                checked = self._bundle_targets_with_integrity(report)
+                GLib.idle_add(self.finish_mesh_bundle_verification, checked, report)
+            threading.Thread(target=verifier, daemon=True).start()
+
+    def bundle_failed_device_names(self) -> tuple[str, ...]:
+        names: set[str] = set()
+        report = self._team_bundle_report()
+        if report is not None:
+            for target in report.targets:
+                if target.status in {"failed", "stale"}:
+                    names.add(target.device_name)
+        for error in self.mesh_team_last_bundle_failures:
+            if ":" in error:
+                names.add(error.split(":", 1)[0].strip())
+        return tuple(sorted(names))
+
+    def bundle_repair_assignments(self) -> tuple[dict[str, str], ...]:
+        if self.mesh_team_dir is None:
+            return ()
+        fail_names = set(self.bundle_failed_device_names())
+        if not fail_names:
+            return ()
+        return tuple(
+            assignment
+            for assignment in self.mesh_team_assignments
+            if assignment.get("device_name", "") in fail_names
+        )
+
+    def on_preview_mesh_bundle_repair(self, _button: Gtk.Button) -> None:
+        if self.mesh_team_dir is None or not self.mesh_team_assignments:
+            self.set_mesh_team_status("No team run loaded for bundle repair preview.", "warn")
+            self.set_status("Prepare or load a team first", "warn")
+            return
+        repair_assignments = self.bundle_repair_assignments()
+        if not repair_assignments:
+            self.set_mesh_team_status("No bundle repair targets to preview.", "warn")
+            self.set_status("No bundle repair targets", "warn")
+            return
+        report = self._team_bundle_report()
+        status_map = {item.device_name: item for item in (report.targets if report is not None else ())}
+        lines = [
+            "# Bundle Repair Preview",
+            "",
+            f"Team run: {self.mesh_team_run_id}",
+            f"Candidates: {len(repair_assignments)}",
+            "",
+            "Targets to retry:",
+        ]
+        for assignment in repair_assignments:
+            device = assignment.get("device_name", "unknown")
+            status = "failed"
+            detail = "unknown"
+            target = assignment.get("target", "")
+            match = status_map.get(device)
+            if match is not None:
+                status = match.status
+                detail = match.detail
+            lines.append(f"- {device} | {target} | {status} | {detail}")
+        if report is None and self.mesh_team_last_bundle_failures:
+            lines.extend([
+                "",
+                "Recent failure details:",
+                *[f"- {item}" for item in self.mesh_team_last_bundle_failures],
+            ])
+        text = "\n".join(lines)
+        self.copy_mesh_text(text, f"Bundle repair preview copied ({len(repair_assignments)} target(s))")
+        self.set_mesh_team_status(f"Preview prepared for {len(repair_assignments)} bundle repair target(s).")
+
+    def on_retry_mesh_bundle_distribution(self, _button: Gtk.Button) -> None:
+        if self.mesh_team_dir is None or not self.mesh_team_assignments:
+            self.set_mesh_team_status("No team run to retry.", "warn")
+            self.set_status("Prepare or load a team first", "warn")
+            return
+        repair_assignments = list(self.bundle_repair_assignments())
+        if not repair_assignments:
+            self.set_mesh_team_status("No failed bundle targets to retry.", "warn")
+            self.set_status("No failed bundle targets to retry", "warn")
+            return
+        self.set_mesh_team_status(f"Retrying evidence bundle for {len(repair_assignments)} failed device(s)...")
+        self.set_status("Retrying evidence bundle distribution")
+
+        if self.mesh_team_last_bundle_path is None:
+            self.set_status("No previous team bundle available to retry", "warn")
+            return
+        bundle = self.mesh_team_last_bundle_path
+        if not bundle.exists():
+            self.set_status("Previous bundle missing", "warn")
+            return
+        if bundle.is_dir():
+            manifest_path = bundle / "manifest.json"
+            existing_bundle = ReviewerBundle(
+                bundle_dir=str(bundle),
+                manifest_path=str(manifest_path),
+                receipt_count=0,
+                run_count=0,
+            )
+        else:
+            self.set_status("Previous bundle path is not a directory", "warn")
+            return
+
+        def worker() -> None:
+            target_statuses, sent, errors = self._sync_mesh_team_bundle_targets(existing_bundle, repair_assignments)
+            GLib.idle_add(
+                self._finish_mesh_bundle_distribution,
+                existing_bundle,
+                target_statuses,
+                sent,
+                len(repair_assignments),
+                errors,
+            )
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _bundle_targets_with_integrity(
+        self,
+        report: TeamBundleReport | None,
+    ) -> tuple[TeamBundleTargetStatus, ...]:
+        if report is None:
+            return ()
+        bundle_dir = Path(report.bundle_path)
+        local_bundle_sha = self._mesh_bundle_artifact_sha(bundle_dir)
+        if not local_bundle_sha:
+            return report.targets
+        updated: list[TeamBundleTargetStatus] = []
+        team_run_id = str(report.run_id)
+        for target in report.targets:
+            status = target.status
+            detail = target.detail
+            remote_artifact_sha256 = target.artifact_remote_sha256
+            if status not in {"local", "synced", "stale"} and status != "failed":
+                detail = f"{detail} | integrity check skipped"
+                updated.append(TeamBundleTargetStatus(
+                    lane_slug=target.lane_slug,
+                    device_name=target.device_name,
+                    target=target.target,
+                    status=status,
+                    detail=detail,
+                    artifact_path=target.artifact_path,
+                    artifact_sha256=target.artifact_sha256,
+                    artifact_remote_sha256=target.artifact_remote_sha256,
+                    marker_path=target.marker_path,
+                    ts=target.ts,
+                ))
+                continue
+            normalized_status = status
+            if status == "stale":
+                normalized_status = "synced"
+            if status == "failed":
+                updated.append(target)
+                continue
+            if target.artifact_sha256 != local_bundle_sha:
+                normalized_status = "stale"
+                detail = f"{detail} | checksum mismatch"
+                updated.append(TeamBundleTargetStatus(
+                    lane_slug=target.lane_slug,
+                    device_name=target.device_name,
+                    target=target.target,
+                    status=normalized_status,
+                    detail=detail,
+                    artifact_path=target.artifact_path,
+                    artifact_sha256=target.artifact_sha256,
+                    artifact_remote_sha256=target.artifact_remote_sha256,
+                    marker_path=target.marker_path,
+                    ts=target.ts,
+                ))
+                continue
+            if normalized_status == "synced":
+                assignment = self._bus_assignment_by_device(target.device_name)
+                device = self.mesh_assignment_device(assignment) if assignment is not None else None
+                if device is None:
+                    detail = f"{detail} | integrity target lookup failed"
+                    updated.append(TeamBundleTargetStatus(
+                        lane_slug=target.lane_slug,
+                        device_name=target.device_name,
+                        target=target.target,
+                        status="failed",
+                        detail=detail,
+                        artifact_path=target.artifact_path,
+                        artifact_sha256=target.artifact_sha256,
+                        artifact_remote_sha256=target.artifact_remote_sha256,
+                        marker_path=target.marker_path,
+                        ts=target.ts,
+                    ))
+                    continue
+                marker = self._mesh_bundle_remote_marker(device, team_run_id, report.bundle_name)
+                if not self._is_bundle_delivery_marker_valid(
+                    marker,
+                    run_id=team_run_id,
+                    bundle_name=report.bundle_name,
+                    artifact_sha=target.artifact_sha256,
+                ):
+                    normalized_status = "stale"
+                    detail = f"{detail} | marker unavailable or invalid"
+                else:
+                    marker_hash = str(marker.get("artifact_sha256", ""))
+                    remote_bundle_id = str(marker.get("bundle_name", ""))
+                    if remote_bundle_id and remote_bundle_id != report.bundle_name:
+                        normalized_status = "stale"
+                        detail = f"{detail} | marker bundle name mismatch"
+                    if marker_hash and marker_hash != target.artifact_sha256:
+                        normalized_status = "stale"
+                        detail = f"{detail} | marker checksum mismatch"
+                        remote_artifact_sha256 = marker_hash
+                    else:
+                        remote_artifact_sha256 = marker_hash or target.artifact_remote_sha256
+                remote_manifest_sha = self._remote_bundle_manifest_sha256(device, team_run_id, report.bundle_name)
+                if remote_manifest_sha:
+                    if remote_manifest_sha != target.artifact_sha256:
+                        normalized_status = "stale"
+                        detail = f"{detail} | remote manifest checksum mismatch"
+                    else:
+                        remote_artifact_sha256 = remote_manifest_sha
+                else:
+                    normalized_status = "stale"
+                    detail = f"{detail} | remote manifest hash unavailable"
+            updated.append(TeamBundleTargetStatus(
+                lane_slug=target.lane_slug,
+                device_name=target.device_name,
+                target=target.target,
+                status=normalized_status,
+                detail=detail,
+                artifact_path=target.artifact_path,
+                artifact_sha256=target.artifact_sha256,
+                artifact_remote_sha256=remote_artifact_sha256,
+                marker_path=target.marker_path,
+                ts=target.ts,
+            ))
+        return tuple(updated)
+
+    def finish_mesh_bundle_verification(
+        self,
+        target_statuses: tuple[TeamBundleTargetStatus, ...],
+        report: TeamBundleReport | None,
+    ) -> bool:
+        if self.mesh_team_dir is None or report is None:
+            self.set_mesh_team_status("No bundle report to verify.", "bad")
+            self.set_status("No bundle report", "warn")
+            return False
+        baseline = tuple(report.failures or ())
+        stale_failures = [
+            f"{target.device_name}: {target.detail}"
+            for target in target_statuses
+            if target.status in {"stale", "failed"}
+        ]
+        seen = set()
+        merged_failures = []
+        for item in (*baseline, *stale_failures):
+            if item not in seen:
+                seen.add(item)
+                merged_failures.append(item)
+        self.mesh_team_last_bundle_report = TeamBundleReport(
+            run_id=report.run_id,
+            team_dir=report.team_dir,
+            bundle_name=report.bundle_name,
+            bundle_path=report.bundle_path,
+            bundle_sha256=report.bundle_sha256,
+            sent=report.sent,
+            failures=tuple(merged_failures),
+            generated=report.generated,
+            generated_epoch=report.generated_epoch,
+            targets=target_statuses,
+        )
+        write_bundle_report(
+            Path(report.team_dir),
+            sent=report.sent,
+            failures=list(merged_failures),
+            bundle_name=report.bundle_name,
+            bundle_path=Path(report.bundle_path),
+            bundle_sha256=report.bundle_sha256,
+            target_statuses=target_statuses,
+        )
+        self.render_mesh_team()
+        if stale_failures:
+            self.set_mesh_team_status(
+                f"Bundle verification found {len(stale_failures)} stale/failed target(s): " +
+                " | ".join(stale_failures[:4]),
+                "bad",
+            )
+            self.set_status("Bundle verification needs repair", "warn")
+        else:
+            self.set_mesh_team_status("Bundle integrity verified. All synced targets match current bundle hash.")
+        return False
+
+    def on_verify_mesh_bundle_integrity(self, _button: Gtk.Button) -> None:
+        report = self._team_bundle_report()
+        if report is None:
+            self.set_mesh_team_status("No bundle report available. Distribute evidence bundle first.", "warn")
+            self.set_status("No bundle report", "warn")
+            return
+        bundle_path = Path(report.bundle_path)
+        if not bundle_path.exists():
+            self.set_mesh_team_status(f"Bundle artifact missing: {bundle_path}", "bad")
+            self.set_status("Bundle artifact missing", "warn")
+            return
+        self.set_mesh_team_status("Verifying bundle integrity across local and remote targets...")
+        self.set_status("Verifying team evidence bundle integrity")
+
+        def worker() -> None:
+            checked = self._bundle_targets_with_integrity(report)
+            GLib.idle_add(self.finish_mesh_bundle_verification, checked, report)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def on_distribute_mesh_team_bundle(self, _button: Gtk.Button) -> None:
+        bundle, _, _ = self._mesh_build_team_bundle()
+        if bundle is None:
+            return
+        assignments = list(self.mesh_team_assignments)
+        if not assignments:
+            self.set_mesh_team_status("No team assignments to distribute.", "warn")
+            self.set_status("No team assignments", "warn")
+            return
+        self.set_mesh_team_status(f"Distributing team evidence bundle to {len(assignments)} device(s)...")
+        self.set_status("Distributing team evidence bundle")
+
+        def worker() -> None:
+            target_statuses, sent, errors = self._sync_mesh_team_bundle_targets(bundle, assignments)
+            GLib.idle_add(self._finish_mesh_bundle_distribution, bundle, target_statuses, sent, len(assignments), errors)
+
+        threading.Thread(target=worker, daemon=True).start()
 
     def on_copy_launch_package(self, _button: Gtk.Button) -> None:
         display = Gdk.Display.get_default()
@@ -8858,6 +10145,8 @@ class CodexControl(Gtk.Application):
             "mesh_launch_console_blocked_only": self.mesh_launch_console_blocked_only,
             "mesh_launch_console_focus_filter": self.mesh_launch_console_focus_filter,
             "mesh_launch_console_focus_history": list(self.mesh_launch_console_focus_history),
+            "mesh_team_chat_filter_mode": self.mesh_team_chat_filter_mode,
+            "mesh_team_chat_filter_value": self.mesh_team_chat_filter_value,
             "mesh_live_refresh": self.mesh_live_refresh,
             "mesh_live_refresh_seconds": self.mesh_live_refresh_seconds,
             "layout": layout_to_config(self.current_layout_state()),
@@ -9111,6 +10400,8 @@ class CodexControl(Gtk.Application):
             return []
         if action_id == "launcher.repair":
             return [sys.executable, "-m", "pip", "install", "--user", "."]
+        if action_id == "receipts.bundle":
+            return []
         return []
 
     def render_palette_preview(self, action: ActionSpec | None) -> None:
@@ -9404,18 +10695,25 @@ class CodexControl(Gtk.Application):
                 "mesh.preview_repair_bus": self.on_preview_mesh_bus_repair,
                 "mesh.refresh_chat": self.on_refresh_team_chat,
                 "mesh.copy_chat": self.on_copy_team_chat,
+                "mesh.export_bundle": self.on_export_mesh_team_bundle,
                 "mesh.verify_bus": self.on_verify_mesh_bus_integrity,
                 "mesh.copy_bus_report": self.on_copy_mesh_team_bus_report,
                 "mesh.copy_role_bootstrap": self.on_copy_role_bootstrap,
                 "mesh.summary": self.on_copy_mesh_team_summary,
                 "mesh.review_summary": self.on_review_mesh_team_summary,
                 "mesh.open": self.on_open_mesh_team,
+                "mesh.distribute_bundle": self.on_distribute_mesh_team_bundle,
+                "mesh.copy_bundle_report": self.on_copy_mesh_team_bundle_report,
+                "mesh.verify_bundle": self.on_verify_mesh_bundle_integrity,
+                "mesh.preview_repair_bundle": self.on_preview_mesh_bundle_repair,
+                "mesh.retry_bundle": self.on_retry_mesh_bundle_distribution,
                 "quality.run": self.on_run_quality_gate,
                 "quality.copy": self.on_copy_quality_report,
                 "preflight.open": self.on_show_preflight,
                 "receipts.stamp": self.on_stamp_receipt,
                 "receipts.verify": self.on_verify_receipt,
                 "receipts.replay": self.on_replay_receipts,
+                "receipts.bundle": self.on_export_reviewer_bundle,
                 "session.new": self.on_new_workspace_session,
                 "session.save": self.on_save_workspace_session,
                 "session.run": self.on_run_workspace_session,
@@ -10364,6 +11662,8 @@ class CodexControl(Gtk.Application):
             self.selected_command_run = updated
             self.persist_command_runs()
             self.render_command_runs()
+            if hasattr(self, "orchestration_title_label") or hasattr(self, "orchestration_page_title_label"):
+                self.render_launch_package()
             return
 
     def stamp_command_receipt(

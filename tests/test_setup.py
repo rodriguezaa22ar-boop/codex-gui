@@ -1,5 +1,8 @@
+import os
 import tempfile
 import unittest
+import shutil
+import subprocess
 import sys
 from pathlib import Path
 from unittest.mock import patch
@@ -91,14 +94,28 @@ class SetupReportTests(unittest.TestCase):
             def fake_run(args, cwd=None, timeout=10):
                 command = tuple(args)
                 if command[:2] == (sys.executable, "-c"):
-                    if "import codex_launcher" in command[2]:
-                        return type("Result", (), {"returncode": 0, "stdout": "ok\n", "stderr": ""})()
+                    if "from pathlib import Path; import codex_launcher; import codex_gui;" in command[2]:
+                        launcher = root / "codex_launcher.py"
+                        gui = root / "codex_gui.py"
+                        return type(
+                            "Result",
+                            (),
+                            {
+                                "returncode": 0,
+                                "stdout": f"{launcher}\n{gui}\n",
+                                "stderr": "",
+                            },
+                        )()
                 if command[:4] == ("git", "-C", str(root), "rev-parse"):
                     return type("Result", (), {"returncode": 0, "stdout": "true\n", "stderr": ""})()
                 if command[:4] == ("git", "-C", str(root), "remote"):
                     return type("Result", (), {"returncode": 0, "stdout": "git@github.com:owner/repo.git\n", "stderr": ""})()
-                if command == (str(sys.executable), "-c", "import codex_launcher; import codex_gui; print('ok')"):
-                    return type("Result", (), {"returncode": 0, "stdout": "ok\n", "stderr": ""})()
+                if command == (
+                    str(sys.executable),
+                    "-c",
+                    "from pathlib import Path; import codex_launcher; import codex_gui; print(Path(codex_launcher.__file__).resolve()); print(Path(codex_gui.__file__).resolve())",
+                ):
+                    return type("Result", (), {"returncode": 0, "stdout": f"{root / 'codex_launcher.py'}\n{root / 'codex_gui.py'}\n", "stderr": ""})()
                 return type("Result", (), {"returncode": 0, "stdout": "ok\n", "stderr": ""})()
 
             with (
@@ -133,7 +150,11 @@ class SetupReportTests(unittest.TestCase):
                     return type("Result", (), {"returncode": 0, "stdout": "true\n", "stderr": ""})()
                 if command[:4] == ("git", "-C", str(root), "remote"):
                     return type("Result", (), {"returncode": 0, "stdout": "git@github.com:owner/repo.git\n", "stderr": ""})()
-                if command == (str(sys.executable), "-c", "import codex_launcher; import codex_gui; print('ok')"):
+                if command == (
+                    str(sys.executable),
+                    "-c",
+                    "from pathlib import Path; import codex_launcher; import codex_gui; print(Path(codex_launcher.__file__).resolve()); print(Path(codex_gui.__file__).resolve())",
+                ):
                     return type("Result", (), {"returncode": 2, "stdout": "", "stderr": "ModuleNotFoundError: No module named codex_launcher\n"})()
                 return type("Result", (), {"returncode": 0, "stdout": "ok\n", "stderr": ""})()
 
@@ -145,8 +166,56 @@ class SetupReportTests(unittest.TestCase):
                 report = build_setup_report(project=str(root), codex_bin="codex")
 
             launcher_check = next(check for check in report.checks if check.id == "launcher")
+        self.assertEqual(launcher_check.status, "warn")
+        self.assertIn("python3 -m pip install", launcher_check.fix)
+
+    def test_launcher_check_warns_when_modules_resolve_outside_project(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "README.md").write_text("# Demo\n", encoding="utf-8")
+            (root / "LICENSE").write_text("MIT\n", encoding="utf-8")
+            (root / "pyproject.toml").write_text(
+                "[project.scripts]\ncodex-gui = 'codex_launcher:main'\n",
+                encoding="utf-8",
+            )
+            home = Path(tmp) / "home"
+            script = home / ".local" / "bin" / "codex-gui"
+            script.parent.mkdir(parents=True, exist_ok=True)
+            script.write_text("#!/usr/bin/env python3\nfrom codex_launcher import main\n", encoding="utf-8")
+            script.chmod(0o755)
+
+            def fake_run(args, cwd=None, timeout=10):
+                command = tuple(args)
+                if command[:4] == ("git", "-C", str(root), "rev-parse"):
+                    return type("Result", (), {"returncode": 0, "stdout": "true\n", "stderr": ""})()
+                if command[:4] == ("git", "-C", str(root), "remote"):
+                    return type("Result", (), {"returncode": 0, "stdout": "git@github.com:owner/repo.git\n", "stderr": ""})()
+                if command == (
+                    str(sys.executable),
+                    "-c",
+                    "from pathlib import Path; import codex_launcher; import codex_gui; print(Path(codex_launcher.__file__).resolve()); print(Path(codex_gui.__file__).resolve())",
+                ):
+                    return type(
+                        "Result",
+                        (),
+                        {
+                            "returncode": 0,
+                            "stdout": "/usr/local/lib/python3.14/site-packages/codex_launcher.py\n/usr/local/lib/python3.14/site-packages/codex_gui.py\n",
+                            "stderr": "",
+                        },
+                    )
+                return type("Result", (), {"returncode": 0, "stdout": "ok\n", "stderr": ""})()
+
+            with (
+                patch("codex_setup._run", fake_run),
+                patch("codex_setup.Path.home", return_value=home),
+                patch("codex_setup._is_executable", return_value=True),
+            ):
+                report = build_setup_report(project=str(root), codex_bin="codex")
+
+            launcher_check = next(check for check in report.checks if check.id == "launcher")
             self.assertEqual(launcher_check.status, "warn")
-            self.assertIn("python3 -m pip install", launcher_check.fix)
+            self.assertIn("not this project", launcher_check.detail)
 
     def test_desktop_check_missing_file_reports_repair_script(self) -> None:
         desktop_file = Path("/tmp") / "does-not-exist-codex-gui.desktop"
@@ -157,6 +226,42 @@ class SetupReportTests(unittest.TestCase):
         self.assertEqual(check.id, "desktop")
         self.assertEqual(check.status, "note")
         self.assertIn("install-codex-gui-desktop-entry.sh", check.fix)
+
+    def test_install_desktop_entry_passes_desktop_file_validate(self) -> None:
+        if shutil.which("desktop-file-validate") is None:
+            self.skipTest("desktop-file-validate not available")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            desktop_file = Path(tmp) / "codex-gui.desktop"
+            env = os.environ.copy()
+            env["DESKTOP_FILE"] = str(desktop_file)
+            project_root = Path(__file__).resolve().parents[1]
+            script = project_root / "scripts" / "install-codex-gui-desktop-entry.sh"
+            result = subprocess.run(
+                ["bash", str(script)],
+                cwd=project_root,
+                env=env,
+                check=False,
+                text=True,
+                capture_output=True,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr or result.stdout)
+            self.assertTrue(desktop_file.exists(), desktop_file)
+
+            validate = subprocess.run(
+                ["desktop-file-validate", str(desktop_file)],
+                text=True,
+                capture_output=True,
+            )
+            self.assertEqual(validate.returncode, 0, validate.stderr or validate.stdout)
+
+            content = desktop_file.read_text(encoding="utf-8")
+            categories = next(
+                line.split("=", 1)[1].strip()
+                for line in content.splitlines()
+                if line.startswith("Categories=")
+            )
+            self.assertEqual(categories, "Utility;")
 
 
 if __name__ == "__main__":

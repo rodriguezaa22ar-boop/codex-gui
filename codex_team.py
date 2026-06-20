@@ -3,9 +3,11 @@
 
 from __future__ import annotations
 
-import json
 import hashlib
+import json
+import re
 import time
+from datetime import datetime
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -117,12 +119,93 @@ class TeamBusReport:
 
 
 @dataclass(frozen=True)
+class TeamBundleTargetStatus:
+    lane_slug: str
+    device_name: str
+    target: str
+    status: str
+    detail: str
+    artifact_path: str = ""
+    artifact_sha256: str = ""
+    artifact_remote_sha256: str = ""
+    marker_path: str = ""
+    ts: int = 0
+
+    @property
+    def is_success(self) -> bool:
+        return self.status in {"synced", "local"}
+
+    @property
+    def is_failure(self) -> bool:
+        return self.status == "failed"
+
+    def detail_line(self) -> str:
+        return f"{self.device_name}: {self.status} | {self.detail}"
+
+
+@dataclass(frozen=True)
+class TeamBundleReport:
+    run_id: str
+    team_dir: str
+    bundle_name: str
+    bundle_path: str
+    bundle_sha256: str
+    sent: int
+    failures: tuple[str, ...]
+    generated: str
+    generated_epoch: int
+    targets: tuple[TeamBundleTargetStatus, ...] = ()
+
+    @property
+    def synced_count(self) -> int:
+        return sum(1 for target in self.targets if target.is_success)
+
+    @property
+    def failed_count(self) -> int:
+        return sum(1 for target in self.targets if target.is_failure)
+
+    @property
+    def stale_count(self) -> int:
+        return sum(1 for target in self.targets if target.status == "stale")
+
+    def target_for_device(self, device_name: str) -> TeamBundleTargetStatus | None:
+        return next((
+            item for item in self.targets
+            if item.device_name == device_name
+        ), None)
+
+    def device_status_map(self) -> dict[str, str]:
+        return {item.device_name: item.status for item in self.targets}
+
+
+@dataclass(frozen=True)
 class TeamOperatorSummary:
     headline: str
     next_action: str
     status: str
     lane_text: str
     bus_text: str
+
+
+@dataclass(frozen=True)
+class TeamChatEvent:
+    ts: int
+    sender: str
+    lane: str
+    message: str
+    raw: str
+
+
+@dataclass(frozen=True)
+class TeamChatSummary:
+    total_updates: int
+    active_senders: tuple[str, ...]
+    sender_counts: tuple[tuple[str, int], ...]
+    lane_activity: tuple[tuple[str, int, str, int, str], ...]
+    latest: TeamChatEvent | None
+    blocked_mentions: int
+    review_mentions: int
+    events: tuple[TeamChatEvent, ...] = ()
 
 
 def team_lane_status_counts(run_status: TeamRunStatus | None) -> dict[str, int]:
@@ -307,6 +390,25 @@ def team_roles_markdown() -> str:
 
 
 TEAM_CHAT_FILE = "team-chat.md"
+CHAT_TIMESTAMP_RE = re.compile(r"^\[(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\]")
+TEAM_CHAT_ENTRY_RE = re.compile(
+    r"^\[(?P<timestamp>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\]\s+"
+    r"(?P<sender>[^(]+)\((?P<lane>[^)]+)\):\s*(?P<message>.*)$"
+)
+
+TEAM_CHAT_BLOCK_KEYWORDS = ("blocked", "blocked by", "blocker", "blocked on", "issue", "stalled", "stopping")
+TEAM_CHAT_REVIEW_KEYWORDS = ("review", "needs review", "please review", "ready for review", "review needed")
+
+
+def _chat_timestamp(line: str) -> int:
+    match = CHAT_TIMESTAMP_RE.match(line)
+    if not match:
+        return 0
+    try:
+        parsed = datetime.strptime(match.group(1), "%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        return 0
+    return int(parsed.timestamp())
 
 
 def write_role_bootstrap(
@@ -773,6 +875,91 @@ def write_bus_report(
     return path
 
 
+def load_bundle_report(team_dir: Path) -> TeamBundleReport | None:
+    raw = _read_json(team_dir / "out" / "evidence-bundle-report.json")
+    if not raw:
+        return None
+    run_id = str(raw.get("run_id") or inspect_team_run(team_dir).run_id)
+    targets: list[TeamBundleTargetStatus] = []
+    raw_targets = raw.get("targets")
+    if isinstance(raw_targets, list):
+        for item in raw_targets:
+            if not isinstance(item, dict):
+                continue
+            targets.append(TeamBundleTargetStatus(
+                lane_slug=str(item.get("lane_slug", "")),
+                device_name=str(item.get("device_name", "")),
+                target=str(item.get("target", "")),
+                status=str(item.get("status", "")),
+                detail=str(item.get("detail", "")),
+                artifact_path=str(item.get("artifact_path", "")),
+                artifact_sha256=str(item.get("artifact_sha256", "")),
+                artifact_remote_sha256=str(item.get("artifact_remote_sha256", "")),
+                marker_path=str(item.get("marker_path", "")),
+                ts=int(item.get("ts", 0) or 0),
+            ))
+    return TeamBundleReport(
+        run_id=run_id,
+        team_dir=str(raw.get("team_dir") or team_dir),
+        bundle_name=str(raw.get("bundle_name") or ""),
+        bundle_path=str(raw.get("bundle_path") or ""),
+        bundle_sha256=str(raw.get("bundle_sha256") or ""),
+        sent=int(raw.get("sent", 0) or 0),
+        failures=tuple(str(item) for item in raw.get("failures", ()) if isinstance(item, str)),
+        generated=str(raw.get("generated") or time.strftime('%Y-%m-%dT%H:%M:%S%z')),
+        generated_epoch=int(raw.get("generated_epoch") or 0),
+        targets=tuple(targets),
+    )
+
+
+def write_bundle_report(
+    team_dir: Path,
+    *,
+    sent: int,
+    failures: list[str],
+    bundle_name: str,
+    bundle_path: Path,
+    bundle_sha256: str,
+    target_statuses: tuple[TeamBundleTargetStatus, ...] | list[TeamBundleTargetStatus] = (),
+) -> Path:
+    target_records = tuple(target_statuses)
+    if not target_records:
+        target_records = tuple(
+            TeamBundleTargetStatus(
+                lane_slug="",
+                device_name=str(failure.split(":", 1)[0].strip() or "legacy"),
+                target=str(failure),
+                status="failed",
+                detail=failure,
+                artifact_path=str(bundle_path),
+                artifact_sha256=bundle_sha256,
+                artifact_remote_sha256="",
+                ts=int(time.time()),
+            )
+            for failure in failures
+        )
+    generated = int(time.time())
+    report = {
+        "run_id": inspect_team_run(team_dir).run_id,
+        "team_dir": str(team_dir),
+        "bundle_name": bundle_name,
+        "bundle_path": str(bundle_path),
+        "bundle_sha256": bundle_sha256,
+        "sent": sent,
+        "failures": failures,
+        "targets": [asdict(item) for item in target_records],
+        "generated_epoch": generated,
+        "generated": time.strftime('%Y-%m-%dT%H:%M:%S%z'),
+    }
+    path = team_dir / "out" / "evidence-bundle-report.json"
+    path.write_text(json.dumps(report, indent=2, sort_keys=True), encoding="utf-8")
+    try:
+        path.chmod(0o600)
+    except OSError:
+        pass
+    return path
+
+
 def team_chat_path(team_dir: Path) -> Path:
     return team_dir / "out" / TEAM_CHAT_FILE
 
@@ -794,16 +981,117 @@ def read_team_chat(team_dir: Path, max_lines: int = 200) -> str:
 def merge_team_chat_texts(*texts: str) -> str:
     seen: set[str] = set()
     merged: list[str] = []
-    for raw in texts:
-        for line in raw.splitlines():
+    non_timestamped: list[tuple[int, int, str]] = []
+    timestamped: list[tuple[int, int, int, str]] = []
+
+    for raw_index, raw in enumerate(texts):
+        for line_index, line in enumerate(raw.splitlines()):
             text = line.strip()
             if not text:
                 continue
             if text in seen:
                 continue
             seen.add(text)
-            merged.append(text)
+            ts = _chat_timestamp(text)
+            if ts <= 0:
+                non_timestamped.append((raw_index, line_index, text))
+            else:
+                timestamped.append((ts, raw_index, line_index, text))
+
+    # Preserve stable contextual text order, then sort update lines by timestamp
+    # so merged streams are readable regardless of fan-out order.
+    for _, _, text in sorted(non_timestamped, key=lambda item: (item[0], item[1])):
+        merged.append(text)
+    for _, _, _, text in sorted(timestamped, key=lambda item: (item[0], item[1], item[2])):
+        merged.append(text)
+
     return "\n".join(merged).rstrip() + ("\n" if merged else "")
+
+
+def summarize_team_chat(text: str) -> TeamChatSummary:
+    seen_lines: set[str] = set()
+    events: list[TeamChatEvent] = []
+    latest_event: TeamChatEvent | None = None
+    blocked_count = 0
+    review_count = 0
+    ordered_senders: list[str] = []
+    seen_senders: set[str] = set()
+    lane_latest: dict[str, TeamChatEvent] = {}
+    lane_counts: dict[str, int] = {}
+    sender_counts: dict[str, int] = {}
+    previous_sender: str | None = None
+
+    for line in text.splitlines():
+        raw = line.strip()
+        if not raw:
+            continue
+        ts = _chat_timestamp(raw)
+        if ts <= 0:
+            continue
+        if raw in seen_lines:
+            continue
+        seen_lines.add(raw)
+        match = TEAM_CHAT_ENTRY_RE.match(raw)
+        if not match:
+            continue
+        message = match.group("message").strip()
+        event = TeamChatEvent(
+            ts=ts,
+            sender=match.group("sender").strip(),
+            lane=match.group("lane").strip(),
+            message=message,
+            raw=raw,
+        )
+        events.append(event)
+        lane_counts[event.lane] = lane_counts.get(event.lane, 0) + 1
+        if previous_sender != event.sender:
+            sender_counts[event.sender] = sender_counts.get(event.sender, 0) + 1
+        previous_sender = event.sender
+        lowered = message.lower()
+        if any(keyword in lowered for keyword in TEAM_CHAT_BLOCK_KEYWORDS):
+            blocked_count += 1
+        if any(keyword in lowered for keyword in TEAM_CHAT_REVIEW_KEYWORDS):
+            review_count += 1
+        sender = event.sender
+        if sender and sender not in seen_senders:
+            seen_senders.add(sender)
+            ordered_senders.append(sender)
+        current_latest = lane_latest.get(event.lane)
+        if current_latest is None or event.ts > current_latest.ts:
+            lane_latest[event.lane] = event
+        if latest_event is None or event.ts > latest_event.ts:
+            latest_event = event
+
+    lane_activity: list[tuple[str, int, str, int, str]] = []
+    for lane, count in lane_counts.items():
+        lane_event = lane_latest.get(lane)
+        if lane_event is None:
+            continue
+        lane_activity.append((
+            lane,
+            count,
+            lane_event.sender,
+            lane_event.ts,
+            lane_event.message[:120],
+        ))
+    lane_activity = sorted(lane_activity, key=lambda item: (-item[1], item[0]))
+
+    sender_activity = tuple(sorted(sender_counts.items(), key=lambda item: (-item[1], item[0])))
+    lane_activity_records = tuple(lane_activity)
+    events_tuple = tuple(events)
+
+    if events:
+        latest_event = max(events, key=lambda item: item.ts)
+    return TeamChatSummary(
+        total_updates=len(events),
+        active_senders=tuple(ordered_senders[:5]),
+        sender_counts=sender_activity,
+        lane_activity=lane_activity_records,
+        events=events_tuple,
+        latest=latest_event,
+        blocked_mentions=blocked_count,
+        review_mentions=review_count,
+    )
 
 
 def write_team_chat_entry(

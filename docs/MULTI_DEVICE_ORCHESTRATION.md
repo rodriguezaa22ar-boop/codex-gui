@@ -97,6 +97,35 @@ You can also use the launcher script:
 bash scripts/codex-team-ops.sh status
 ```
 
+For repeatable commander evidence, run the smoke harness:
+
+```bash
+bash scripts/atlas-mesh-smoke.sh
+```
+
+It captures a timestamped JSON receipt bundle under
+`~/.config/codex-gui/smoke-reports/<timestamp>/` including:
+
+- device discovery
+- fleet check output
+- role assignment
+- doctor diagnostics
+- prepare preflight attempt
+- local CLI validators
+- launcher/CLI self-checks
+
+`manifest.json` in the run folder lists every captured step.
+
+For fast actionable blocker triage (reviews and Tailscale approvals), run:
+
+```bash
+bash scripts/atlas-mesh-blockers.sh
+```
+or machine-readable mode:
+```bash
+bash scripts/atlas-mesh-blockers.sh --json
+```
+
 `discover` and `prepare` both read and update `~/.config/codex-gui/devices.json`. Keep
 `~/.config/codex-gui/team/` clean across attempts to make failure recovery visible.
 

@@ -29,6 +29,12 @@ class ActionCatalogTests(unittest.TestCase):
         results = rank_actions("launch package", limit=5)
         self.assertTrue(any(action.id.startswith("orchestrate.") for action in results))
 
+    def test_search_finds_receipt_bundle(self) -> None:
+        action = action_by_id("receipts.bundle")
+        self.assertIsNotNone(action)
+        results = rank_actions("receipt bundle", limit=5)
+        self.assertTrue(any(item.id == "receipts.bundle" for item in results))
+
     def test_search_finds_mesh_handoff_bus(self) -> None:
         action = action_by_id("mesh.sync_bus")
         self.assertIsNotNone(action)
@@ -65,11 +71,47 @@ class ActionCatalogTests(unittest.TestCase):
         results = rank_actions("team stream copy", limit=5)
         self.assertTrue(any(item.id == "mesh.copy_chat" for item in results))
 
+    def test_search_finds_mesh_bundle_export(self) -> None:
+        action = action_by_id("mesh.export_bundle")
+        self.assertIsNotNone(action)
+        results = rank_actions("evidence bundle", limit=8)
+        self.assertTrue(any(item.id == "mesh.export_bundle" for item in results))
+
+    def test_search_finds_mesh_bundle_distribute(self) -> None:
+        action = action_by_id("mesh.distribute_bundle")
+        self.assertIsNotNone(action)
+        results = rank_actions("distribute team evidence bundle", limit=8)
+        self.assertTrue(any(item.id == "mesh.distribute_bundle" for item in results))
+
     def test_search_finds_mesh_repair(self) -> None:
         action = action_by_id("mesh.repair_bus")
         self.assertIsNotNone(action)
         results = rank_actions("repair bus", limit=5)
         self.assertTrue(any(item.id == "mesh.repair_bus" for item in results))
+
+    def test_search_finds_mesh_bundle_report_copy(self) -> None:
+        action = action_by_id("mesh.copy_bundle_report")
+        self.assertIsNotNone(action)
+        results = rank_actions("copy bundle report", limit=5)
+        self.assertTrue(any(item.id == "mesh.copy_bundle_report" for item in results))
+
+    def test_search_finds_mesh_bundle_verify(self) -> None:
+        action = action_by_id("mesh.verify_bundle")
+        self.assertIsNotNone(action)
+        results = rank_actions("verify team evidence bundle", limit=5)
+        self.assertTrue(any(item.id == "mesh.verify_bundle" for item in results))
+
+    def test_search_finds_mesh_bundle_repair_preview(self) -> None:
+        action = action_by_id("mesh.preview_repair_bundle")
+        self.assertIsNotNone(action)
+        results = rank_actions("preview bundle repair", limit=5)
+        self.assertTrue(any(item.id == "mesh.preview_repair_bundle" for item in results))
+
+    def test_search_finds_mesh_bundle_retry(self) -> None:
+        action = action_by_id("mesh.retry_bundle")
+        self.assertIsNotNone(action)
+        results = rank_actions("retry bundle distribution", limit=5)
+        self.assertTrue(any(item.id == "mesh.retry_bundle" for item in results))
 
     def test_search_finds_mesh_repair_preview(self) -> None:
         action = action_by_id("mesh.preview_repair_bus")

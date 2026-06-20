@@ -6,8 +6,10 @@ from pathlib import Path
 
 from codex_receipts import (
     CodexReceiptRecord,
+    ReviewerBundle,
     atlas_binary,
     build_codex_event,
+    create_reviewer_bundle,
     latest_event_hash,
     linked_receipt_chain,
     load_receipt_records,
@@ -182,6 +184,76 @@ class CodexReceiptTests(unittest.TestCase):
             os.utime(old, (100, 100))
             os.utime(new, (200, 200))
             self.assertEqual(latest_event_hash(Path(tmp)), "2" * 64)
+
+    def test_create_reviewer_bundle_copies_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            receipts_root = Path(tmp) / "receipts"
+            output_root = Path(tmp) / "bundle-output"
+            receipts_root.mkdir()
+            event_one = receipts_root / "events"
+            event_one_file = receipts_root / "event-one.json"
+            event_one_file.write_text("{\"id\": \"event-one\"}\n", encoding="utf-8")
+            records = [
+                CodexReceiptRecord(
+                    id="event-one",
+                    observed_at="2026-06-20T00:00:00Z",
+                    event_type="codex_gui.command.prepared",
+                    project_name="app",
+                    project_hash="p",
+                    action="interactive",
+                    profile="maximum-power",
+                    prompt_hash="a" * 64,
+                    command_hash="b" * 64,
+                    event_path=str(event_one_file),
+                    receipt_path=str(event_one_file),
+                    event_hash="e1",
+                    receipt_hash="r1",
+                    prev_hash="",
+                    status="verified",
+                )
+            ]
+            event_one.mkdir()
+            (receipts_root / "events" / "event-one.json").write_text("{\"id\": \"event-one-mirror\"}\n", encoding="utf-8")
+
+            run_rows = [
+                {"id": "run-1", "status": "done", "command_hash": "c" * 64, "prompt_hash": "p" * 64,
+                 "project_name": "app", "project_hash": "p", "action": "interactive", "profile": "maximum-power", "surface": "embedded"},
+            ]
+            team_summary = Path(tmp) / "team-summary.md"
+            team_summary.write_text("team summary", encoding="utf-8")
+            team_chat = Path(tmp) / "team-chat.md"
+            team_chat.write_text("[2026-06-20 09:00:00] lane: kickoff\n", encoding="utf-8")
+
+            bundle = create_reviewer_bundle(
+                output_root,
+                bundle_name="bundle-test",
+                project="/tmp/app",
+                receipt_records=records,
+                run_records=run_rows,
+                selected_receipt=records[0],
+                launch_package_text="run package",
+                context_summary="context",
+                team_artifacts=[
+                    (team_summary, "team/team-summary.md"),
+                    (team_chat, "team/team-chat.md"),
+                ],
+                max_receipts=5,
+            )
+
+            self.assertIsInstance(bundle, ReviewerBundle)
+            self.assertEqual(bundle.receipt_count, 1)
+            self.assertEqual(bundle.run_count, 1)
+            manifest = json.loads(Path(bundle.manifest_path).read_text(encoding="utf-8"))
+            self.assertEqual(manifest["selected_receipt_id"], "event-one")
+            self.assertEqual(manifest["receipt_count"], 1)
+            summary = Path(Path(bundle.bundle_dir) / "summary.md").read_text(encoding="utf-8")
+            self.assertIn("Project: /tmp/app", summary)
+            self.assertTrue((Path(bundle.bundle_dir) / "evidence" / "receipts" / "events" / "event-one.json").exists())
+            self.assertTrue((Path(bundle.bundle_dir) / "team" / "team-summary.md").exists())
+            self.assertTrue((Path(bundle.bundle_dir) / "team" / "team-chat.md").exists())
+            self.assertEqual(manifest["team_artifact_count"], 2)
+            artifact_destinations = [row[1] for row in manifest["team_artifacts"]]
+            self.assertIn("team/team-chat.md", artifact_destinations)
 
 
 if __name__ == "__main__":
