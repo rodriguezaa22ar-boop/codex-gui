@@ -104,42 +104,86 @@ class MeshReadinessRow:
 
 
 @dataclass(frozen=True)
+class MeshReadinessEntry:
+    device_id: str
+    device_name: str
+    host: str
+    readiness: str
+    blocker: str
+    next_action: str
+    summary: str
+
+
+@dataclass(frozen=True)
 class MeshReadinessReport:
-    generated: int
-    rows: tuple[MeshReadinessRow, ...]
+    generated: int = 0
+    rows: tuple[MeshReadinessRow, ...] = ()
+    entries: tuple[MeshReadinessEntry, ...] = ()
 
     @property
     def ready_count(self) -> int:
-        return sum(1 for row in self.rows if row.is_ready)
+        if self.rows:
+            return sum(1 for row in self.rows if row.is_ready)
+        return sum(1 for entry in self.entries if entry.readiness in {"ready", "local-ready", "stale-checkout"})
+
+    @property
+    def warning_count(self) -> int:
+        if self.rows:
+            return sum(1 for row in self.rows if row.status in {"review", "unknown"})
+        return sum(
+            1
+            for entry in self.entries
+            if entry.readiness in {"missing-project", "missing-codex", "stale-checkout", "needs-review"}
+        )
 
     @property
     def review_count(self) -> int:
-        return sum(1 for row in self.rows if row.status in {"review", "unknown"})
+        if self.rows:
+            return sum(1 for row in self.rows if row.status in {"review", "unknown"})
+        return self.warning_count
 
     @property
     def offline_count(self) -> int:
-        return sum(1 for row in self.rows if row.status == "offline")
+        if self.rows:
+            return sum(1 for row in self.rows if row.status == "offline")
+        return 0
 
     @property
     def blocked_count(self) -> int:
-        return sum(1 for row in self.rows if row.status == "blocked")
+        if self.rows:
+            return sum(1 for row in self.rows if row.status == "blocked")
+        return sum(
+            1
+            for entry in self.entries
+            if entry.readiness.startswith("blocked-") or entry.readiness == "offline-or-timeout"
+        )
 
     @property
     def total(self) -> int:
-        return len(self.rows)
+        return len(self.rows) if self.rows else len(self.entries)
 
     @property
     def summary(self) -> str:
+        if self.rows:
+            return (
+                f"{self.total} device(s) | "
+                f"{self.ready_count} ready | "
+                f"{self.blocked_count} blocked | "
+                f"{self.review_count} review | "
+                f"{self.offline_count} offline"
+            )
         return (
             f"{self.total} device(s) | "
             f"{self.ready_count} ready | "
-            f"{self.blocked_count} blocked | "
-            f"{self.review_count} review | "
-            f"{self.offline_count} offline"
+            f"{self.warning_count} warning | "
+            f"{self.blocked_count} blocked"
         )
 
     def by_device(self, device_id: str) -> MeshReadinessRow | None:
         return next((row for row in self.rows if row.device_id == device_id), None)
+
+    def summary_text(self) -> str:
+        return self.summary
 
     def detail_text(self) -> str:
         lines = [
@@ -147,20 +191,31 @@ class MeshReadinessReport:
             self.summary,
             "",
         ]
-        for row in self.rows:
-            lines.extend([
-                f"## {row.device_name} ({row.host})",
-                f"Status: {row.status}",
-                f"Category: {row.blocker_category}",
-                f"Priority: {row.action_priority}",
-                f"Summary: {row.summary}",
-            ])
-            if row.checked:
-                lines.append(f"Checked: {row.checked}")
-            if row.next_actions:
-                lines.append("Next steps:")
-                lines.extend([f"- {item}" for item in row.next_actions])
-            lines.append("")
+        if self.rows:
+            for row in self.rows:
+                lines.extend([
+                    f"## {row.device_name} ({row.host})",
+                    f"Status: {row.status}",
+                    f"Category: {row.blocker_category}",
+                    f"Priority: {row.action_priority}",
+                    f"Summary: {row.summary}",
+                ])
+                if row.checked:
+                    lines.append(f"Checked: {row.checked}")
+                if row.next_actions:
+                    lines.append("Next steps:")
+                    lines.extend([f"- {item}" for item in row.next_actions])
+                lines.append("")
+        else:
+            for entry in self.entries:
+                lines.extend([
+                    f"## {entry.device_name} ({entry.host})",
+                    f"Status: {entry.readiness}",
+                    f"Category: {entry.blocker}",
+                    f"Summary: {entry.summary}",
+                    f"Next: {entry.next_action}",
+                    "",
+                ])
         return "\n".join(lines).strip() + "\n"
 
 
@@ -1053,6 +1108,147 @@ def classify_probe_failure(text: str, returncode: int) -> tuple[str, str]:
     if "connection closed" in lower or "connection reset by peer" in lower:
         return "blocked", "SSH connection closed"
     return "blocked", clean or "probe failed"
+
+
+def _is_local_mesh_host(host: str) -> bool:
+    clean = _clean_dns_name(host).lower()
+    return clean in {"localhost", "127.0.0.1", "::1"}
+
+
+def readiness_from_probe_summary(status: str, summary: str) -> tuple[str, str, str]:
+    text = summary.lower()
+    if status == "ready":
+        if "behind" in text or "stale" in text:
+            return (
+                "stale-checkout",
+                "Branch appears stale",
+                "Push/pull to align with remote branches before dispatching this lane.",
+            )
+        return ("ready", "Ready for remote execution", "No blocker. Dispatch lane and run as needed.")
+
+    if status == "review":
+        if "project missing" in text:
+            return (
+                "missing-project",
+                "Project path missing",
+                "Create/sync the project root path and retry Check Fleet.",
+            )
+        if "not a git repository" in text:
+            return (
+                "missing-project",
+                "Project root is not a repository",
+                "Point project_root at a valid project directory and retry Check Fleet.",
+            )
+        return (
+            "needs-review",
+            "Needs review",
+            "Inspect device output and resolve the review condition.",
+        )
+
+    if status == "offline":
+        return (
+            "offline-or-timeout",
+            "Offline",
+            "Bring the device online, then rerun Check Fleet.",
+        )
+
+    if status == "blocked":
+        if "requires an additional check" in text or "approval required" in text:
+            return (
+                "blocked-tailscale-approval",
+                "Tailscale approval required",
+                "Approve the Tailscale SSH request from this identity in the browser.",
+            )
+        if "tailscale ssh approval required" in text:
+            return (
+                "blocked-tailscale-approval",
+                "Tailscale approval required",
+                "Approve the Tailscale SSH request from this identity in the browser.",
+            )
+        if "auth denied" in text:
+            return (
+                "blocked-ssh-auth",
+                "SSH auth denied",
+                "Add this machine's public key to the device authorized_keys.",
+            )
+        if "permission denied (publickey" in text:
+            return (
+                "blocked-ssh-auth",
+                "SSH auth denied",
+                "Add this machine's public key to the device authorized_keys.",
+            )
+        if "timed out" in text:
+            return (
+                "offline-or-timeout",
+                "Probe timed out",
+                "Check connectivity and firewall, then retry Check Fleet.",
+            )
+        if "cannot be resolved" in text:
+            return (
+                "blocked-dns",
+                "DNS/host resolution failed",
+                "Validate hostname and Tailscale DNS mapping.",
+            )
+        if "refused" in text:
+            return (
+                "blocked-connection-refused",
+                "SSH service unavailable",
+                "Check sshd availability and target firewall policy.",
+            )
+        if "codex" in text and "not found" in text:
+            return (
+                "missing-codex",
+                "Codex CLI missing",
+                "Install Codex or fix PATH/codex_bin for this target.",
+            )
+        return (
+            "blocked-ssh",
+            "SSH blocked",
+            "Inspect SSH command output on the target and rerun Check Fleet.",
+        )
+
+    return (
+        "needs-check",
+        "Needs a fleet check",
+        "Run Check Fleet to get a current readiness verdict.",
+    )
+
+
+def build_mesh_readiness_report(devices: tuple[DeviceRecord, ...]) -> MeshReadinessReport:
+    entries: list[MeshReadinessEntry] = []
+    for device in devices:
+        summary = device.note or "Not checked yet."
+        if _is_local_mesh_host(device.host) and device.status == "ready":
+            readiness, blocker, action = "local-ready", "Local execution", "Use local execution path for local workflows."
+        else:
+            readiness, blocker, action = readiness_from_probe_summary(device.status, summary)
+
+        if readiness == "ready":
+            action = "Ready for lane launch."
+
+        entries.append(MeshReadinessEntry(
+            device_id=device.id,
+            device_name=device.name,
+            host=device.host,
+            readiness=readiness,
+            blocker=blocker,
+            next_action=action,
+            summary=summary,
+        ))
+    return MeshReadinessReport(entries=tuple(entries))
+
+
+def mesh_readiness_markdown(report: MeshReadinessReport) -> str:
+    lines = ["# Mesh readiness", "", report.summary_text()]
+    if not report.entries:
+        lines.append("- no devices")
+    else:
+        for entry in report.entries:
+            lines.append(f"- {entry.device_name} ({entry.host}): {entry.blocker}")
+            lines.append(f"  next: {entry.next_action}")
+            if entry.summary:
+                lines.append(f"  detail: {entry.summary}")
+    return "\n".join(lines) + "\n"
 
 
 def parse_probe_output(device: DeviceRecord, text: str, returncode: int, timestamp: int | None = None) -> DeviceProbe:

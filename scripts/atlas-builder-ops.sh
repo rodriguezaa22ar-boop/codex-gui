@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # High-signal control surface for atlas-builder in one entry point.
-# Usage: builder|fab [status|shell|command|root|tmux|tmux-root|monitor|help] [...]
+# Usage: builder|fab [status|shell|command|root|tmux|tmux-root|monitor|monitor-daemon|help] [...]
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 HOST="${ATLAS_BUILDER_HOST:-atlas-builder}"
@@ -62,7 +62,7 @@ EOF
 usage() {
   cat <<'EOF'
 Usage:
-  scripts/atlas-builder-ops.sh [--quiet] [status|shell|command|root|tmux|tmux-root|monitor|help] [payload]
+  scripts/atlas-builder-ops.sh [--quiet] [status|shell|command|root|tmux|tmux-root|monitor|monitor-daemon|help] [payload]
 
 Aliases:
   fab
@@ -76,6 +76,10 @@ Modes:
   tmux        Attach to builder tmux session
   tmux-root   Attach to builder tmux with sudo shell
   monitor     Open local web monitor proxy command
+  monitor-daemon
+             Manage persistent local monitor service. Subcommands:
+             install | start | stop | status | logs | disable | remove.
+             Example: scripts/atlas-builder-ops.sh monitor-daemon install
   help        Show this help
 EOF
 }
@@ -113,7 +117,10 @@ case "$ACTION" in
     run_full tmux-root
     ;;
   monitor)
-    run_full monitor
+    bash "${SCRIPT_DIR}/run-atlas-builder-monitor.sh" --host "$HOST" --user "$USER"
+    ;;
+  monitor-daemon)
+    bash "${SCRIPT_DIR}/atlas-builder-monitor-service.sh" --host "$HOST" --user "$USER" "$@"
     ;;
   help|-h|--help|"")
     usage

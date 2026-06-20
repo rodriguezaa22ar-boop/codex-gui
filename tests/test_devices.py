@@ -5,6 +5,7 @@ from pathlib import Path
 
 from codex_devices import (
     DeviceRecord,
+    MeshReadinessReport,
     devices_from_tailscale_status_json,
     import_memory_text,
     local_agent_command,
@@ -15,6 +16,9 @@ from codex_devices import (
     memory_markdown,
     mesh_readiness_report,
     mesh_state,
+    build_mesh_readiness_report,
+    mesh_readiness_markdown,
+    readiness_from_probe_summary,
     new_device,
     parse_probe_output,
     remote_path_expr,
@@ -681,6 +685,68 @@ class DeviceMeshTests(unittest.TestCase):
         memories = import_memory_text((), "profile: maximum-power")
 
         self.assertEqual(mesh_state(devices, memories).summary(), "2 device(s) | 1 ready | 1 memory item(s)")
+
+    def test_readiness_classification_for_fleet_blockers(self) -> None:
+        devices = (
+            DeviceRecord(
+                id="local", name="Local", host="localhost", user="", status="ready",
+                note="local execution path",
+            ),
+            DeviceRecord(
+                id="auth", name="Builder", host="atlas-builder", status="blocked",
+                note="ao@atlas-builder: Permission denied (publickey).",
+            ),
+            DeviceRecord(
+                id="approve", name="Main", host="atlas-main", status="blocked",
+                note="# Tailscale SSH requires an additional check.",
+            ),
+            DeviceRecord(
+                id="missing", name="Remote", host="atlas-remote", status="review",
+                note="Codex ready, project missing: ~/Projects/codex-gui",
+            ),
+            DeviceRecord(
+                id="stale", name="Legacy", host="stale.local", status="ready",
+                note="codex-cli 0.150.0 | ## main...origin/main [behind 3]",
+            ),
+        )
+
+        report = build_mesh_readiness_report(devices)
+        summary = report.summary_text()
+
+        self.assertEqual(report.ready_count, 2)
+        self.assertEqual(report.warning_count, 2)
+        self.assertEqual(report.blocked_count, 2)
+        self.assertIn("5 device(s)", summary)
+
+        by_name = {entry.device_name: entry for entry in report.entries}
+        self.assertEqual(by_name["Local"].readiness, "local-ready")
+        self.assertEqual(by_name["Builder"].readiness, "blocked-ssh-auth")
+        self.assertEqual(by_name["Main"].readiness, "blocked-tailscale-approval")
+        self.assertEqual(by_name["Remote"].readiness, "missing-project")
+        self.assertEqual(by_name["Legacy"].readiness, "stale-checkout")
+
+        markdown = mesh_readiness_markdown(report)
+        self.assertIn("# Mesh readiness", markdown)
+        self.assertIn("Local (localhost)", markdown)
+        self.assertIn("next:", markdown)
+
+    def test_readiness_from_probe_summary_rules(self) -> None:
+        self.assertEqual(
+            readiness_from_probe_summary("review", "Codex ready, project missing: ~/Projects/codex-gui"),
+            (
+                "missing-project",
+                "Project path missing",
+                "Create/sync the project root path and retry Check Fleet.",
+            ),
+        )
+        self.assertEqual(
+            readiness_from_probe_summary("blocked", "tailscale ssh requires an additional check"),
+            (
+                "blocked-tailscale-approval",
+                "Tailscale approval required",
+                "Approve the Tailscale SSH request from this identity in the browser.",
+            ),
+        )
 
 
 if __name__ == "__main__":

@@ -40,6 +40,17 @@ HOST_SET=0
 USER_SET=0
 QUIET=0
 
+require_interactive() {
+  if ! [ -t 0 ] || ! [ -t 1 ]; then
+    echo "builder interactive mode requires a terminal (TTY)." >&2
+    echo "Run from a real terminal:" >&2
+    echo "  builder tmux-root" >&2
+    echo "Or use command mode for non-interactive runs:" >&2
+    echo "  builder command \"<command>\"" >&2
+    exit 2
+  fi
+}
+
 ssh_common=(
   -o BatchMode=yes
   -o ConnectTimeout=12
@@ -51,6 +62,14 @@ run_ssh_command() {
     ssh "${ssh_common[@]}" "$TARGET" "$@" | sed -u '/^declare -x /d'
   else
     ssh "${ssh_common[@]}" "$TARGET" "$@"
+  fi
+}
+
+run_ssh_interactive() {
+  if [[ "$QUIET" -eq 1 ]]; then
+    ssh -t "${ssh_common[@]}" "$TARGET" "$@" | sed -u '/^declare -x /d'
+  else
+    ssh -t "${ssh_common[@]}" "$TARGET" "$@"
   fi
 }
 
@@ -117,6 +136,7 @@ TARGET="${USER}@${HOST}"
 
 case "$ACTION" in
   shell)
+    require_interactive
     exec ssh "${ssh_common[@]}" "$TARGET"
     ;;
   command)
@@ -134,14 +154,22 @@ case "$ACTION" in
     fi
     ;;
   tmux)
-    exec ssh "${ssh_common[@]}" "$TARGET" \
+    require_interactive
+    prev_quiet="$QUIET"
+    QUIET=1
+    run_ssh_interactive \
       "command -v tmux >/dev/null 2>&1 || { echo 'tmux is required for this mode' >&2; exit 1; }; \
       exec tmux new-session -A -s \"${TMUX_SESSION}\""
+    QUIET="$prev_quiet"
     ;;
   tmux-root)
-    exec ssh "${ssh_common[@]}" "$TARGET" \
+    require_interactive
+    prev_quiet="$QUIET"
+    QUIET=1
+    run_ssh_interactive \
       "command -v tmux >/dev/null 2>&1 || { echo 'tmux is required for this mode' >&2; exit 1; }; \
       exec tmux new-session -A -s \"${TMUX_SESSION}\" 'sudo -s'"
+    QUIET="$prev_quiet"
     ;;
   monitor)
     exec bash scripts/run-atlas-builder-monitor.sh --host "$HOST" --user "$USER"

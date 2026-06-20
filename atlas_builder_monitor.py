@@ -283,8 +283,24 @@ print(json.dumps(payload, sort_keys=True))
 
 def run_ssh_metrics(host: str, user: str = "ao", timeout: float = 8.0) -> dict[str, Any]:
     """Fetch latest metrics from a remote machine via SSH."""
-
-    command = "python3 - <<'PY'\n" + REMOTE_METRICS_PY + "\nPY"
+    command = (
+        "tmp=\"${TMPDIR:-/tmp}/atlas_builder_metrics_$$.py\"\n"
+        "cat > \"$tmp\" <<'PY'\n"
+        + REMOTE_METRICS_PY
+        + "\nPY\n"
+        "if command -v python3 >/dev/null 2>&1; then\n"
+        "  python3 \"$tmp\"\n"
+        "elif command -v nix-shell >/dev/null 2>&1; then\n"
+        "  nix-shell -p python3 --run \"python3 $tmp\"\n"
+        "else\n"
+        "  echo '{\"error\":\"python3 unavailable\"}' >&2\n"
+        "  rm -f \"$tmp\"\n"
+        "  exit 127\n"
+        "fi\n"
+        "status=$?\n"
+        "rm -f \"$tmp\"\n"
+        "exit \"$status\"\n"
+    )
     target = f"{user}@{host}" if user else host
     result = subprocess.run(
         [
@@ -313,6 +329,11 @@ def run_ssh_metrics(host: str, user: str = "ao", timeout: float = 8.0) -> dict[s
     if not text:
         raise RuntimeError("empty metrics output")
     try:
+        payload_start = text.find("{")
+        payload_end = text.rfind("}")
+        if payload_start == -1 or payload_end <= payload_start:
+            raise RuntimeError(f"invalid remote metrics payload: {text[:200]}")
+        text = text[payload_start : payload_end + 1]
         return json.loads(text)
     except json.JSONDecodeError as exc:
         raise RuntimeError(f"invalid remote metrics payload: {text[:200]}") from exc
@@ -431,14 +452,18 @@ PAGE = """<!doctype html>
   <title>Atlas Builder Monitor</title>
   <style>
     :root {
-      --bg: #090d16;
-      --card: #131a28;
-      --line: #24314f;
-      --text: #ebf2ff;
-      --muted: #96a5c2;
-      --accent: #43d9ad;
+      --bg: #060a13;
+      --bg-soft: #0d1322;
+      --panel: rgba(17, 26, 45, 0.88);
+      --panel-alt: rgba(24, 36, 60, 0.75);
+      --line: rgba(136, 160, 214, 0.28);
+      --text: #edf3ff;
+      --muted: #96a5bf;
+      --accent: #4dd3b0;
+      --accent-2: #5eb5ff;
       --warn: #f5a524;
       --bad: #ff6b6b;
+      --good: #5fe3ad;
     }
 
     * { box-sizing: border-box; }
@@ -446,123 +471,300 @@ PAGE = """<!doctype html>
       margin: 0;
       padding: 0;
       min-height: 100%;
-      background: radial-gradient(circle at 18% 22%, rgba(67,217,173,0.08), transparent 25%),
-        radial-gradient(circle at 82% 0%, rgba(87,138,255,0.10), transparent 35%),
-        var(--bg);
+      background:
+        radial-gradient(circle at 14% 8%, rgba(93, 183, 255, 0.14), transparent 32%),
+        radial-gradient(circle at 86% 0%, rgba(77, 211, 176, 0.12), transparent 38%),
+        linear-gradient(160deg, var(--bg-soft), var(--bg));
       color: var(--text);
-      font: 14px/1.5 ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, sans-serif;
+      font: 14px/1.45 ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, sans-serif;
     }
-    .wrap { max-width: 1200px; margin: 0 auto; padding: 22px; }
-    .header { display:flex; justify-content:space-between; gap:12px; align-items:center; flex-wrap: wrap; }
-    h1 { margin: 0; font-size: 1.5rem; letter-spacing: 0.01em; }
-    .status { padding: 6px 10px; border: 1px solid var(--line); border-radius: 999px; color: var(--muted); }
-    .grid { margin-top: 14px; display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; }
+    body::before {
+      content: '';
+      position: fixed;
+      inset: 0;
+      background:
+        repeating-linear-gradient(
+          120deg,
+          rgba(255, 255, 255, 0.025),
+          rgba(255, 255, 255, 0.025) 1px,
+          transparent 1px,
+          transparent 3px
+        );
+      opacity: 0.3;
+      pointer-events: none;
+      z-index: -1;
+    }
+    .wrap {
+      max-width: 1300px;
+      margin: 0 auto;
+      padding: 24px;
+    }
+    .header {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-end;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+    .eyebrow {
+      margin: 0;
+      font-size: 0.72rem;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      color: var(--muted);
+    }
+    h1 {
+      margin: 4px 0 0;
+      font-size: 1.58rem;
+      letter-spacing: 0.01em;
+    }
+    .header-right {
+      display: flex;
+      gap: 10px;
+      align-items: center;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+    }
+    .status, .metric-chip {
+      padding: 7px 11px;
+      border: 1px solid rgba(255, 255, 255, 0.22);
+      border-radius: 999px;
+      color: var(--muted);
+      font-weight: 600;
+      font-size: 0.85rem;
+      letter-spacing: 0.01em;
+      backdrop-filter: blur(4px);
+      background: rgba(255, 255, 255, 0.03);
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .status:before,
+    .metric-chip:before {
+      content: '';
+      width: 8px;
+      height: 8px;
+      border-radius: 99px;
+      background: var(--muted);
+    }
+    .ok { color: var(--good); }
+    .ok:before { background: var(--good); }
+    .bad { color: var(--bad); }
+    .bad:before { background: var(--bad); }
+    .warn { color: var(--warn); }
+    .warn:before { background: var(--warn); }
+    .metric-chip.ok:before { background: var(--good); }
+
+    .grid {
+      margin-top: 16px;
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      gap: 14px;
+    }
     .card {
-      background: linear-gradient(165deg, rgba(20,30,52,0.94), rgba(19, 22, 32, 0.84));
+      background: linear-gradient(160deg, var(--panel), var(--panel-alt));
       border: 1px solid var(--line);
-      border-radius: 10px;
-      padding: 12px;
-      min-height: 120px;
-      box-shadow: 0 12px 26px rgba(0,0,0,0.25);
+      border-radius: 16px;
+      padding: 14px;
+      min-height: 132px;
+      box-shadow: 0 20px 40px rgba(0, 0, 0, 0.32);
+      position: relative;
+      overflow: hidden;
     }
-    .label { color: var(--muted); font-size: 0.84rem; text-transform: uppercase; letter-spacing: 0.06em; }
-    .value { font-size: 1.45rem; font-weight: 640; margin: 8px 0; }
-    .meta { color: var(--muted); font-size: 0.9rem; }
+    .metric-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 8px;
+    }
+    .label {
+      color: var(--muted);
+      font-size: 0.8rem;
+      text-transform: uppercase;
+      letter-spacing: 0.07em;
+    }
+    .trend {
+      color: var(--muted);
+      font-size: 0.77rem;
+      white-space: nowrap;
+    }
+    .value {
+      font-size: 1.52rem;
+      font-weight: 700;
+      margin: 8px 0 5px;
+      letter-spacing: -0.01em;
+    }
+    .meta {
+      color: var(--muted);
+      font-size: 0.88rem;
+      line-height: 1.35;
+    }
     .bar {
       margin-top: 10px;
-      background: rgba(255,255,255,0.06);
-      border-radius: 999px;
       height: 10px;
+      border-radius: 99px;
+      background: rgba(255, 255, 255, 0.12);
+      border: 1px solid rgba(255, 255, 255, 0.18);
       overflow: hidden;
-      border: 1px solid rgba(255,255,255,0.12);
     }
     .bar > i {
       display: block;
       height: 100%;
       width: 0;
-      background: linear-gradient(90deg, #4dd6a8, #5baeff);
-      transition: width 250ms ease;
+      border-radius: 99px;
+      background: linear-gradient(90deg, var(--accent), var(--accent-2));
+      transition: width 260ms ease, filter 260ms ease;
     }
-    .bad { color: var(--bad); }
-    .warn { color: var(--warn); }
-    .ok { color: var(--accent); }
+    .sparkline {
+      margin-top: 8px;
+      display: flex;
+      align-items: end;
+      gap: 3px;
+      height: 24px;
+    }
+    .spark {
+      flex: 1;
+      min-height: 3px;
+      border-radius: 4px;
+      background: linear-gradient(180deg, rgba(94, 181, 255, 0.96), rgba(77, 211, 176, 0.96));
+      opacity: 0.9;
+    }
     .layout {
       margin-top: 14px;
       display: grid;
       grid-template-columns: minmax(320px, 2fr) minmax(320px, 2fr);
-      gap: 12px;
+      gap: 14px;
     }
     .wide { grid-column: 1 / -1; }
+    .table-wrap {
+      margin-top: 8px;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      background: rgba(255, 255, 255, 0.02);
+      overflow: hidden;
+    }
     table {
       width: 100%;
       border-collapse: collapse;
       font-size: 0.9rem;
     }
-    th, td { border-bottom: 1px solid var(--line); padding: 8px; text-align: left; }
-    th { color: var(--muted); font-weight: 600; }
+    th, td {
+      border-bottom: 1px solid var(--line);
+      padding: 9px 8px;
+      text-align: left;
+    }
+    th { color: var(--muted); font-weight: 600; background: rgba(255, 255, 255, 0.02); }
     .muted { color: var(--muted); }
     .muted-small { color: var(--muted); font-size: 0.82rem; }
-    .row {
+    .temp-item {
       display: flex;
       justify-content: space-between;
       gap: 10px;
-      padding: 6px 0;
+      padding: 8px 0;
+      align-items: center;
     }
-    .row + .row { border-top: 1px dashed var(--line); }
-    .footer { margin-top: 18px; color: var(--muted); font-size: 0.84rem; }
+    .temp-item + .temp-item { border-top: 1px dashed var(--line); }
+    .temp-pill {
+      color: var(--text);
+      padding: 3px 7px;
+      border-radius: 999px;
+      font-size: 0.76rem;
+      background: rgba(255, 255, 255, 0.05);
+      border: 1px solid rgba(255,255,255,0.14);
+    }
+    .footer {
+      margin-top: 16px;
+      color: var(--muted);
+      font-size: 0.82rem;
+      padding-bottom: 20px;
+    }
     pre {
       white-space: pre-wrap;
       margin: 0;
       font-size: 0.84rem;
       color: var(--muted);
+      border: 1px solid var(--line);
+      padding: 8px;
+      border-radius: 10px;
+      background: rgba(255, 255, 255, 0.02);
+      max-height: 280px;
+      overflow: auto;
     }
 
     @media (max-width: 860px) {
       .layout { grid-template-columns: 1fr; }
       .wrap { padding: 14px; }
-      h1 { font-size: 1.25rem; }
+      h1 { font-size: 1.29rem; }
+      .header-right { width: 100%; justify-content: flex-start; }
     }
   </style>
 </head>
 <body>
   <div class="wrap">
     <div class="header">
-      <h1>Atlas Builder Monitor</h1>
-      <div id="status" class="status">initializing…</div>
+      <div>
+        <p class="eyebrow">Atlas Builder Command Node</p>
+        <h1>Builder Monitor</h1>
+      </div>
+      <div class="header-right">
+        <div id="health" class="metric-chip">Health: n/a</div>
+        <div id="status" class="status">initializing…</div>
+      </div>
     </div>
 
     <div class="grid">
       <div class="card">
-        <div class="label">CPU</div>
+        <div class="metric-head">
+          <div class="label">CPU Utilization</div>
+          <div class="trend" id="cpu-trend">n/a</div>
+        </div>
         <div class="value" id="cpu">n/a</div>
         <div class="meta" id="cpu-meta">cores: n/a · load 0m/5m/15m: n/a</div>
         <div class="bar"><i id="cpu-bar"></i></div>
+        <div class="sparkline" id="cpu-spark"></div>
       </div>
       <div class="card">
-        <div class="label">Memory</div>
+        <div class="metric-head">
+          <div class="label">Memory</div>
+          <div class="trend" id="mem-trend">n/a</div>
+        </div>
         <div class="value" id="mem">n/a</div>
         <div class="meta" id="mem-meta">swap: n/a</div>
         <div class="bar"><i id="mem-bar"></i></div>
+        <div class="sparkline" id="mem-spark"></div>
       </div>
       <div class="card">
-        <div class="label">Battery</div>
+        <div class="metric-head">
+          <div class="label">Battery</div>
+          <div class="trend" id="bat-trend">n/a</div>
+        </div>
         <div class="value" id="bat">n/a</div>
         <div class="meta" id="bat-meta">state: n/a</div>
         <div class="bar"><i id="bat-bar"></i></div>
       </div>
       <div class="card">
-        <div class="label">Uptime</div>
+        <div class="metric-head">
+          <div class="label">Uptime</div>
+          <div class="trend">live</div>
+        </div>
         <div class="value" id="uptime">n/a</div>
         <div class="meta" id="uptime-meta">host: n/a</div>
       </div>
       <div class="card">
-        <div class="label">Load</div>
+        <div class="metric-head">
+          <div class="label">Load</div>
+          <div class="trend" id="load-trend">n/a</div>
+        </div>
         <div class="value" id="load">n/a</div>
         <div class="meta" id="load-meta">processes: n/a</div>
         <div class="bar"><i id="load-bar"></i></div>
+        <div class="sparkline" id="load-spark"></div>
       </div>
       <div class="card">
-        <div class="label">Disk / Home</div>
+        <div class="metric-head">
+          <div class="label">Disk / Home</div>
+          <div class="trend">usage</div>
+        </div>
         <div class="value" id="disk-home">n/a</div>
         <div class="meta" id="disk-root">/ root: n/a</div>
         <div class="meta" id="disk-meta">/home: n/a</div>
@@ -577,18 +779,23 @@ PAGE = """<!doctype html>
       </div>
       <div class="card wide">
         <div class="label">Network (bytes)</div>
-        <table>
-          <thead><tr><th>Interface</th><th>RX</th><th>TX</th></tr></thead>
-          <tbody id="network"></tbody>
-        </table>
+        <div class="meta">counters are cumulative since node boot</div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Interface</th><th>RX</th><th>TX</th></tr></thead>
+            <tbody id="network"></tbody>
+          </table>
+        </div>
       </div>
       <div class="card wide">
         <div class="label">Top Processes</div>
         <div class="meta">CPU + memory leaders (top 10)</div>
-        <table>
-          <thead><tr><th>pid</th><th>user</th><th>%CPU</th><th>%MEM</th><th>elapsed</th><th>cmd</th></tr></thead>
-          <tbody id="processes"></tbody>
-        </table>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>pid</th><th>user</th><th>%CPU</th><th>%MEM</th><th>elapsed</th><th>cmd</th></tr></thead>
+            <tbody id="processes"></tbody>
+          </table>
+        </div>
       </div>
       <div class="card wide">
         <div class="label">Raw payload</div>
@@ -602,22 +809,146 @@ PAGE = """<!doctype html>
   <script>
     const INTERVAL_MS = %%INTERVAL_MS%%;
     const statusEl = document.getElementById('status');
+    const healthEl = document.getElementById('health');
+    const history = {
+      cpu: [],
+      mem: [],
+      load: [],
+      battery: [],
+    };
+    const HISTORY_SIZE = 18;
+
+    function clamp(value, min, max) {
+      const number = Number(value);
+      if (!Number.isFinite(number)) return min;
+      return Math.min(max, Math.max(min, number));
+    }
 
     function setBar(id, pct) {
-      const normalized = Math.max(0, Math.min(100, Number(pct || 0)));
+      const normalized = clamp(pct, 0, 100);
       const el = document.getElementById(id);
       if (!el) return;
       el.style.width = `${normalized}%`;
     }
 
-    function render(d) {
-      statusEl.textContent = `${d.status === 'ok' ? 'online' : 'error'} · ${d.detail || 'ok'} · last: ${d.refreshed_at || ''}`;
+    function setText(id, value, fallback = 'n/a') {
+      const el = document.getElementById(id);
+      if (!el) return;
+      const text = value === null || value === undefined || value === '' ? fallback : value;
+      el.textContent = String(text);
+    }
 
-      if (d.status === 'ok') {
-        statusEl.className = 'status ok';
-      } else {
-        statusEl.className = 'status bad';
+    function setClass(id, klass) {
+      const el = document.getElementById(id);
+      if (!el) return;
+      el.className = `trend${klass ? ` ${klass}` : ''}`;
+    }
+
+    function pushHistory(key, value) {
+      const list = history[key];
+      if (!Array.isArray(list)) return;
+      list.push(clamp(value, 0, 100));
+      if (list.length > HISTORY_SIZE) {
+        list.shift();
       }
+    }
+
+    function renderSparkline(id, values) {
+      const el = document.getElementById(id);
+      if (!el) return;
+
+      const sanitized = (values || []).filter((v) => Number.isFinite(v));
+      if (!sanitized.length) {
+        el.innerHTML = '';
+        return;
+      }
+
+      el.innerHTML = sanitized
+        .map((value) => {
+          const height = Math.max(12, Math.round(clamp(value, 0, 100)));
+          return `<span class="spark" style="height:${height}%"></span>`;
+        })
+        .join('');
+    }
+
+    function trendText(current, previous, biggerIsBetter) {
+      if (!Number.isFinite(current)) {
+        return {text: 'n/a', klass: ''};
+      }
+      if (!Number.isFinite(previous)) {
+        return {text: 'new', klass: ''};
+      }
+
+      const delta = current - previous;
+      if (Math.abs(delta) < 0.15) {
+        return {text: `→ ${current.toFixed(1)}%`, klass: ''};
+      }
+
+      const arrow = delta > 0 ? '↑' : '↓';
+      const value = Math.abs(delta).toFixed(1);
+      const text = `${arrow} ${value}%`;
+
+      if (biggerIsBetter) {
+        if (delta >= 8) return {text, klass: 'ok'};
+        if (delta <= -8) return {text, klass: 'bad'};
+        return {text, klass: 'warn'};
+      }
+
+      if (delta <= -8) return {text, klass: 'ok'};
+      if (delta >= 8) return {text, klass: 'bad'};
+      return {text, klass: 'warn'};
+    }
+
+    function renderTrend(id, current, previous, biggerIsBetter = false) {
+      const {text, klass} = trendText(current, previous, biggerIsBetter);
+      setText(id, text);
+      setClass(id, klass);
+    }
+
+    function updateHealth(cpuPercent, memPercent, loadNormalized, tempPeak, batteryPercent) {
+      if (!healthEl) return;
+      if (!Number.isFinite(cpuPercent) || !Number.isFinite(memPercent) || !Number.isFinite(loadNormalized)) {
+        healthEl.textContent = 'Health: n/a (error)';
+        healthEl.className = 'metric-chip bad';
+        return;
+      }
+
+      let score = 100;
+      score -= clamp(cpuPercent * 0.35, 0, 35);
+      score -= clamp(memPercent * 0.30, 0, 30);
+      score -= clamp(loadNormalized * 0.25, 0, 20);
+      if (Number.isFinite(tempPeak)) {
+        score -= clamp((tempPeak - 75) * 0.6, 0, 25);
+      }
+      if (batteryPercent !== null && Number.isFinite(batteryPercent)) {
+        score -= clamp((100 - batteryPercent) * 0.08, 0, 8);
+      }
+
+      const normalized = clamp(Math.round(score), 0, 100);
+      if (normalized >= 85) {
+        healthEl.className = 'metric-chip ok';
+      } else if (normalized >= 65) {
+        healthEl.className = 'metric-chip warn';
+      } else {
+        healthEl.className = 'metric-chip bad';
+      }
+
+      let label = 'degraded';
+      if (normalized >= 85) {
+        label = 'excellent';
+      } else if (normalized >= 72) {
+        label = 'healthy';
+      } else if (normalized >= 55) {
+        label = 'watch';
+      }
+
+      healthEl.textContent = `Health: ${normalized}% · ${label}`;
+    }
+
+    function render(d) {
+      const stateOk = d.status === 'ok';
+      statusEl.textContent = `${stateOk ? 'online' : 'error'} · ${d.detail || 'ok'} · last: ${d.refreshed_at || ''}`;
+      statusEl.className = stateOk ? 'status ok' : 'status bad';
 
       const cpu = d.cpu || {};
       const mem = d.memory || {};
@@ -625,62 +956,102 @@ PAGE = """<!doctype html>
       const load = d.loadavg || {};
       const net = d.network || [];
       const procs = d.top_processes || [];
+      const disks = d.disk || {};
+      const temps = d.temperatures || [];
 
-      document.getElementById('cpu').textContent = `${Number(cpu.percent || 0).toFixed(1)}%`;
-      document.getElementById('cpu-meta').textContent = `cores: ${cpu.cores || 'n/a'} · load 0m/5m/15m: ${load['1m'] || 'n/a'} / ${load['5m'] || 'n/a'} / ${load['15m'] || 'n/a'}`;
-      setBar('cpu-bar', cpu.percent);
+      const cpuPercent = Number(cpu.percent || 0);
+      const memPercent = Number(mem.percent || 0);
+      const batPercent = bat.present ? Number(bat.capacity_percent || 0) : null;
+      const loadValue = Number(load['1m'] || 0) / Math.max(Number(cpu.cores || 1), 1) * 100;
+      const loadNormalized = Number.isFinite(loadValue) ? loadValue : 0;
+      const lastTemp = temps.length ? Math.max(...temps.map((item) => Number(item.celsius || -Infinity)).filter(Number.isFinite)) : null;
+      const cpuPrev = history.cpu[history.cpu.length - 1];
+      const memPrev = history.mem[history.mem.length - 1];
+      const loadPrev = history.load[history.load.length - 1];
+      const batteryPrev = history.battery[history.battery.length - 1];
 
-      document.getElementById('mem').textContent = `${Number(mem.percent || 0).toFixed(1)}% (${humanBytes((mem.total_mib || 0) * 1024 * 1024)})`;
-      document.getElementById('mem-meta').textContent = `used ${humanBytes((mem.used_mib || 0) * 1024 * 1024)} free ${humanBytes((mem.available_mib || 0) * 1024 * 1024)} | swap ${humanBytes((mem.swap_used_mib || 0) * 1024 * 1024)} / ${humanBytes((mem.swap_total_mib || 0) * 1024 * 1024)} (${Number(mem.swap_percent || 0).toFixed(1)}%)`;
-      setBar('mem-bar', mem.percent);
-
-      if (bat.present) {
-        document.getElementById('bat').textContent = bat.capacity_percent == null ? 'n/a' : `${bat.capacity_percent}%`;
-        document.getElementById('bat-meta').textContent = `status: ${bat.status || 'n/a'} · model: ${bat.model || 'n/a'} · source: ${bat.unit || 'n/a'}`;
-        setBar('bat-bar', bat.capacity_percent);
+      pushHistory('cpu', cpuPercent);
+      pushHistory('mem', memPercent);
+      pushHistory('load', loadNormalized);
+      if (bat.present && Number.isFinite(batPercent)) {
+        pushHistory('battery', batPercent);
       } else {
-        document.getElementById('bat').textContent = 'no battery';
-        document.getElementById('bat-meta').textContent = 'AC-powered desktop or headless node.';
-        setBar('bat-bar', 0);
+        pushHistory('battery', 0);
       }
 
-      document.getElementById('uptime').textContent = humanSeconds(d.uptime_sec || 0);
-      document.getElementById('uptime-meta').textContent = `host: ${d.host || ''} · user: ${d.user || ''}`;
+      const cpuTrendPrev = history.cpu.length > 1 ? history.cpu[history.cpu.length - 2] : cpuPrev;
+      const memTrendPrev = history.mem.length > 1 ? history.mem[history.mem.length - 2] : memPrev;
+      const loadTrendPrev = history.load.length > 1 ? history.load[history.load.length - 2] : loadPrev;
+      const batTrendPrev = history.battery.length > 1 ? history.battery[history.battery.length - 2] : batteryPrev;
 
-      const loadValue = Number(load['1m'] || 0) / Math.max(cpu.cores || 1, 1) * 100;
-      document.getElementById('load').textContent = `${Number(load['1m'] || 0).toFixed(2)} / ${Number(load['5m'] || 0).toFixed(2)} / ${Number(load['15m'] || 0).toFixed(2)}`;
-      document.getElementById('load-meta').textContent = `load-1 normalized: ${humanPercent(loadValue)}`;
-      setBar('load-bar', Math.min(loadValue, 100));
+      setText('cpu', `${cpuPercent.toFixed(1)}%`);
+      setText('cpu-meta', `cores: ${cpu.cores || 'n/a'} · load 0m/5m/15m: ${load['1m'] || 'n/a'} / ${load['5m'] || 'n/a'} / ${load['15m'] || 'n/a'}`);
+      setBar('cpu-bar', cpuPercent);
+      renderSparkline('cpu-spark', history.cpu);
+      renderTrend('cpu-trend', cpuPercent, cpuTrendPrev, false);
 
-      const disks = d.disk || {};
+      setText('mem', `${memPercent.toFixed(1)}% (${humanBytes((mem.total_mib || 0) * 1024 * 1024)})`);
+      setText(
+        'mem-meta',
+        `used ${humanBytes((mem.used_mib || 0) * 1024 * 1024)} free ${humanBytes((mem.available_mib || 0) * 1024 * 1024)} | swap ${humanBytes((mem.swap_used_mib || 0) * 1024 * 1024)} / ${humanBytes((mem.swap_total_mib || 0) * 1024 * 1024)} (${Number(mem.swap_percent || 0).toFixed(1)}%)`
+      );
+      setBar('mem-bar', memPercent);
+      renderSparkline('mem-spark', history.mem);
+      renderTrend('mem-trend', memPercent, memTrendPrev, false);
+
+      if (bat.present) {
+        setText('bat', batPercent == null || Number.isNaN(batPercent) ? 'n/a' : `${batPercent.toFixed(0)}%`);
+        setText('bat-meta', `status: ${bat.status || 'n/a'} · model: ${bat.model || 'n/a'} · source: ${bat.unit || 'n/a'}`);
+        setBar('bat-bar', batPercent);
+        renderTrend('bat-trend', batPercent, batTrendPrev, true);
+      } else {
+        setText('bat', 'no battery');
+        setText('bat-meta', 'AC-powered desktop or headless node.');
+        setBar('bat-bar', 0);
+        setText('bat-trend', 'n/a');
+        setClass('bat-trend', '');
+      }
+
+      setText('uptime', humanSeconds(d.uptime_sec || 0));
+      setText('uptime-meta', `host: ${d.host || ''} · user: ${d.user || ''}`);
+
+      setText('load', `${Number(load['1m'] || 0).toFixed(2)} / ${Number(load['5m'] || 0).toFixed(2)} / ${Number(load['15m'] || 0).toFixed(2)}`);
+      setText('load-meta', `load-1 normalized: ${humanPercent(loadNormalized)}`);
+      setBar('load-bar', Math.min(loadNormalized, 100));
+      renderSparkline('load-spark', history.load);
+      renderTrend('load-trend', loadNormalized, loadTrendPrev, false);
+
       const root = disks['/'] || {};
       const home = disks['/home'] || {};
-      document.getElementById('disk-root').textContent = `/ root: ${humanBytes((root.total_gb || 0) * 1024 * 1024 * 1024)} total · ${humanPercent(root.percent)} used`;
-      document.getElementById('disk-meta').textContent = `/home: ${humanBytes((home.total_gb || 0) * 1024 * 1024 * 1024)} total · ${humanPercent(home.percent)} used`;
-      document.getElementById('disk-home').textContent = `${humanPercent(home.percent || 0)} (${humanBytes((home.used_gb || 0) * 1024 * 1024 * 1024)} used)`;
+      setText('disk-root', `/ root: ${humanBytes((root.total_gb || 0) * 1024 * 1024 * 1024)} total · ${humanPercent(root.percent || 0)} used`);
+      setText('disk-meta', `/home: ${humanBytes((home.total_gb || 0) * 1024 * 1024 * 1024)} total · ${humanPercent(home.percent || 0)} used`);
+      setText('disk-home', `${humanPercent(home.percent || 0)} (${humanBytes((home.used_gb || 0) * 1024 * 1024 * 1024)} used)`);
 
       const tempArea = document.getElementById('temp-grid');
-      const temps = d.temperatures || [];
       if (!temps.length) {
         tempArea.innerHTML = '<div class="muted-small">No /sys/class/thermal temperature endpoints available.</div>';
       } else {
-        tempArea.innerHTML = temps.map(item => {
-          const level = Math.min(100, Math.max(0, (item.celsius + 20) * 1.25));
-          return `<div class="row"><span>${escapeHtml(item.name)}</span><span class="muted">${item.celsius}°C</span><span class=\"bar\" style=\"display:inline-block;width:34%;height:10px;\"><i style=\"display:block;height:100%;width:${level}%;background:#60e1ff\"></i></span></div>`;
-        }).join('');
+        tempArea.innerHTML = temps
+          .map((item) => {
+            const celsius = Number(item.celsius);
+            const level = clamp((celsius + 20) * 1.25, 0, 100);
+            return `<div class="temp-item"><span>${escapeHtml(item.name)}</span><span class="temp-pill">${celsius}°C</span><span class="bar"><i style="width:${level}%"></i></span></div>`;
+          })
+          .join('');
       }
 
       const nbody = document.getElementById('network');
-      nbody.innerHTML = (net || []).map(item => {
+      nbody.innerHTML = (net || []).map((item) => {
         return `<tr><td>${escapeHtml(item.iface)}</td><td>${humanBytes(item.rx_bytes || 0)}</td><td>${humanBytes(item.tx_bytes || 0)}</td></tr>`;
       }).join('') || '<tr><td colspan="3">No interfaces</td></tr>';
 
       const pbody = document.getElementById('processes');
-      pbody.innerHTML = (procs || []).map(item => {
+      pbody.innerHTML = (procs || []).map((item) => {
         return `<tr><td>${item.pid}</td><td>${escapeHtml(item.user || '')}</td><td>${Number(item.cpu || 0).toFixed(2)}</td><td>${Number(item.mem || 0).toFixed(2)}</td><td>${escapeHtml(item.elapsed || '')}</td><td>${escapeHtml(item.command || '')}</td></tr>`;
       }).join('') || '<tr><td colspan="6">No process snapshot</td></tr>';
 
-      document.getElementById('raw').textContent = JSON.stringify(d, null, 2);
+      updateHealth(cpuPercent, memPercent, loadNormalized, lastTemp, batPercent);
+      setText('raw', JSON.stringify(d, null, 2));
     }
 
     function humanPercent(v) {
@@ -688,7 +1059,7 @@ PAGE = """<!doctype html>
     }
 
     function humanBytes(v) {
-      const units = ['B','KB','MB','GB','TB'];
+      const units = ['B', 'KB', 'MB', 'GB', 'TB'];
       let val = Number(v || 0);
       let unitIndex = 0;
       while (val >= 1024 && unitIndex < units.length - 1) {
@@ -699,7 +1070,7 @@ PAGE = """<!doctype html>
     }
 
     function humanSeconds(sec) {
-      const total = Number(sec || 0);
+      const total = Math.floor(Number(sec || 0));
       const d = Math.floor(total / 86400);
       const h = Math.floor((total % 86400) / 3600);
       const m = Math.floor((total % 3600) / 60);
