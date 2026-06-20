@@ -609,7 +609,7 @@ def _doctor_bus_health(
             "stale": 0,
             "targets": 0,
             "failures": 0,
-        }
+    }
     if bus_report is None:
         status = "reviewed" if summary_reviewed else "not_synced"
         return {
@@ -620,7 +620,7 @@ def _doctor_bus_health(
             "stale": 0,
             "targets": 0,
             "failures": 0,
-        }
+    }
     failures = len(bus_report.failures)
     if summary_reviewed:
         status = "reviewed"
