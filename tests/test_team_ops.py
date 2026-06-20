@@ -408,7 +408,14 @@ class TeamOpsTests(unittest.TestCase):
                 host="atlas-builder",
                 user="ao",
                 status="blocked",
-                note="SSH auth denied",
+                note="SSH auth denied PRIVATE_RAW_OUTPUT SENSITIVE_MARKER",
+            )
+            remote_ready = DeviceRecord(
+                id="remote-ready",
+                name="atlas-main",
+                host="atlas-main",
+                user="ao",
+                status="ready",
             )
             untrusted = DeviceRecord(
                 id="security-node",
@@ -417,7 +424,7 @@ class TeamOpsTests(unittest.TestCase):
                 user="ao",
                 status="ready",
             )
-            save_devices(ctx.devices, (ready, blocked, untrusted))
+            save_devices(ctx.devices, (ready, blocked, remote_ready, untrusted))
             assignments = [
                 {
                     "device_id": ready.id,
@@ -428,6 +435,11 @@ class TeamOpsTests(unittest.TestCase):
                     "device_id": blocked.id,
                     "device_name": blocked.name,
                     "lane_slug": "backend-builder-atlas-builder",
+                },
+                {
+                    "device_id": remote_ready.id,
+                    "device_name": remote_ready.name,
+                    "lane_slug": "ui-polish-atlas-main",
                 },
                 {
                     "device_id": untrusted.id,
@@ -443,10 +455,15 @@ class TeamOpsTests(unittest.TestCase):
             self.assertEqual(spawn.call_count, 1)
             error_text = "\n".join(errors)
             self.assertIn("atlas-builder: launch blocked", error_text)
-            self.assertIn("saved status blocked", error_text)
+            self.assertIn("ssh-auth-denied", error_text)
+            self.assertIn("Fix SSH key auth", error_text)
+            self.assertIn("atlas-main: launch blocked", error_text)
+            self.assertIn("needs-probe", error_text)
             self.assertIn("atlas-security: launch blocked", error_text)
             self.assertIn("not trusted", error_text)
             self.assertNotIn("SSH auth denied", error_text)
+            self.assertNotIn("PRIVATE_RAW_OUTPUT", error_text)
+            self.assertNotIn("SENSITIVE_MARKER", error_text)
             self.assertNotIn("token", error_text.lower())
             self.assertNotIn("password", error_text.lower())
         finally:

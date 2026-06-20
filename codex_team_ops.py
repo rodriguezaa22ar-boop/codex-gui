@@ -72,9 +72,6 @@ BASE_PROMPT = (
     "trusted multi-device Codex teamwork, validation, and reversible changes."
 )
 
-LAUNCH_READY_STATUSES = {"ready", "ok", "prepared", "launched", "done", "passed"}
-
-
 def run_cmd(args: list[str], cwd: str | Path | None = None, timeout: int = 20):
     """Run one shell command and return a CompletedProcess."""
     return subprocess.run(
@@ -122,9 +119,12 @@ def _launch_preflight_error(device: DeviceRecord, assignment: Mapping[str, str])
     lane_slug = assignment.get("lane_slug", "lane")
     if not _is_trusted(device):
         return f"{device.name}: launch blocked for {lane_slug}: device is not trusted for team lanes"
-    if device.status not in LAUNCH_READY_STATUSES:
-        status = device.status or "unknown"
-        return f"{device.name}: launch blocked for {lane_slug}: saved status {status}; run codex-team-ops check before launching"
+    report = mesh_readiness_report((device,), {})
+    row = report.by_device(device.id)
+    if row is None or not row.is_ready:
+        category = row.blocker_category if row is not None else "needs-probe"
+        next_action = row.next_actions[0] if row is not None and row.next_actions else "Run `codex-team-ops check` before launching."
+        return f"{device.name}: launch blocked for {lane_slug}: {category}; {next_action}"
     return ""
 
 

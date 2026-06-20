@@ -210,7 +210,11 @@ def _missing_codex_hint(probe: DeviceProbe, device: DeviceRecord) -> bool:
 
 
 def _ssh_probe_hint_category(probe: DeviceProbe) -> str:
-    haystack = f"{probe.summary} {probe.raw}".lower()
+    return _ssh_text_hint_category(f"{probe.summary} {probe.raw}")
+
+
+def _ssh_text_hint_category(text: str) -> str:
+    haystack = text.lower()
     if (
         "host cannot be resolved" in haystack
         or "could not resolve hostname" in haystack
@@ -228,6 +232,76 @@ def _ssh_probe_hint_category(probe: DeviceProbe) -> str:
     if "connection closed" in haystack or "connection reset by peer" in haystack:
         return "ssh-connection-closed"
     return ""
+
+
+def _saved_note_blocker_category(device: DeviceRecord) -> str:
+    haystack = f"{device.status} {device.note}".lower()
+    if not haystack.strip():
+        return "needs-probe"
+    if "login.tailscale.com/a/" in haystack or ("tailscale" in haystack and "approval" in haystack):
+        return "tailscale-approval-required"
+    if (
+        "ssh auth denied" in haystack
+        or "permission denied" in haystack
+        or "publickey" in haystack
+        or "auth denied" in haystack
+    ):
+        return "ssh-auth-denied"
+    if ssh_category := _ssh_text_hint_category(haystack):
+        return ssh_category
+    if "timed out" in haystack or "timeout" in haystack or "offline" in haystack:
+        return "offline-or-timeout"
+    if (
+        "codex cli missing" in haystack
+        or "codex executable not found" in haystack
+        or "codex: command not found" in haystack
+        or ("no such file" in haystack and "codex" in haystack)
+    ):
+        return "missing-codex"
+    if "project missing" in haystack or "project_exists=no" in haystack:
+        return "missing-project"
+    if "checkout is stale" in haystack or "detached" in haystack or "[behind" in haystack or "behind " in haystack or "diverged" in haystack:
+        return "stale-checkout"
+    if "uncommitted changes" in haystack or "changes=" in haystack:
+        return "needs-review"
+    return "needs-probe"
+
+
+def _saved_note_status(device: DeviceRecord, category: str) -> str:
+    if device.status == "offline" or category in {"offline-or-timeout", "ssh-host-unreachable"}:
+        return "offline"
+    if category in {"missing-project", "stale-checkout", "needs-review"}:
+        return "review"
+    if device.status == "blocked" or category in {
+        "tailscale-approval-required",
+        "ssh-auth-denied",
+        "ssh-host-unresolved",
+        "ssh-host-key-unverified",
+        "ssh-connection-refused",
+        "ssh-connection-closed",
+        "missing-codex",
+    }:
+        return "blocked"
+    return "review"
+
+
+def _saved_note_summary(category: str, status: str) -> str:
+    summaries = {
+        "tailscale-approval-required": "Saved mesh state indicates Tailscale SSH approval is required.",
+        "ssh-auth-denied": "Saved mesh state indicates SSH authentication is denied.",
+        "ssh-host-unresolved": "Saved mesh state indicates the SSH host cannot be resolved.",
+        "ssh-host-key-unverified": "Saved mesh state indicates SSH host key trust needs review.",
+        "ssh-connection-refused": "Saved mesh state indicates SSH is refusing connections.",
+        "ssh-host-unreachable": "Saved mesh state indicates the SSH host is unreachable.",
+        "ssh-connection-closed": "Saved mesh state indicates SSH closes the session early.",
+        "offline-or-timeout": "Saved mesh state indicates the device is offline or timing out.",
+        "missing-codex": "Saved mesh state indicates the Codex CLI is missing.",
+        "missing-project": "Saved mesh state indicates the project checkout is missing.",
+        "stale-checkout": "Saved mesh state indicates the checkout is stale.",
+        "needs-review": "Saved mesh state needs operator review before team launch.",
+        "needs-probe": "Saved mesh state needs a fresh probe before team launch.",
+    }
+    return summaries.get(category, f"Saved mesh state is {status} and needs review.")
 
 
 def _readiness_action_priority(status: str, category: str) -> int:
@@ -343,8 +417,8 @@ def _probe_actions(category: str, device: DeviceRecord, approval_url: str = "") 
 
 def _row_from_device_probe(device: DeviceRecord, probe: DeviceProbe | None) -> MeshReadinessRow:
     if probe is None:
-        if _is_local_host(device.host):
-            if device.status in {"ready", "ok", "prepared", "launched", "done", "passed"}:
+        if device.status in {"ready", "ok", "prepared", "launched", "done", "passed"}:
+            if _is_local_host(device.host):
                 category = "local-ready"
                 return MeshReadinessRow(
                     device_id=device.id,
@@ -358,22 +432,8 @@ def _row_from_device_probe(device: DeviceRecord, probe: DeviceProbe | None) -> M
                     checked=0,
                     source="saved",
                 )
-            return MeshReadinessRow(
-                device_id=device.id,
-                device_name=device.name,
-                host=device.host,
-                status="review",
-                blocker_category="needs-probe",
-                action_priority=_readiness_action_priority("review", "needs-probe"),
-                summary=f"No probe data yet. Last note: {device.note or 'no note'}",
-                next_actions=_probe_actions("needs-probe", device),
-                checked=0,
-                source="saved",
-            )
-        if device.status in {"ready", "ok", "prepared", "launched", "done", "passed"}:
             category = "needs-probe"
             status = "review"
-            summary = f"No probe data yet. Last note: {device.note or 'no note'}"
             return MeshReadinessRow(
                 device_id=device.id,
                 device_name=device.name,
@@ -381,32 +441,22 @@ def _row_from_device_probe(device: DeviceRecord, probe: DeviceProbe | None) -> M
                 status=status,
                 blocker_category=category,
                 action_priority=_readiness_action_priority(status, category),
-                summary=summary,
+                summary="Saved remote ready state needs a fresh probe before team launch.",
                 next_actions=_probe_actions(category, device),
                 checked=0,
                 source="saved",
             )
-        if device.status == "offline":
-            return MeshReadinessRow(
-                device_id=device.id,
-                device_name=device.name,
-                host=device.host,
-                status="offline",
-                blocker_category="offline",
-                action_priority=_readiness_action_priority("offline", "offline"),
-                summary="Device is currently offline in saved mesh state.",
-                next_actions=_probe_actions("offline-or-timeout", device),
-                source="saved",
-            )
+        category = _saved_note_blocker_category(device)
+        status = _saved_note_status(device, category)
         return MeshReadinessRow(
             device_id=device.id,
             device_name=device.name,
             host=device.host,
-            status="review",
-            blocker_category="needs-probe",
-            action_priority=_readiness_action_priority("review", "needs-probe"),
-            summary=f"No probe data yet. Last note: {device.note or 'no note'}",
-            next_actions=_probe_actions("needs-probe", device),
+            status=status,
+            blocker_category=category,
+            action_priority=_readiness_action_priority(status, category),
+            summary=_saved_note_summary(category, status),
+            next_actions=_probe_actions(category, device),
             checked=0,
             source="saved",
         )
