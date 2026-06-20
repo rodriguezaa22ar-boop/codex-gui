@@ -409,6 +409,5 @@ class GuiSourceTests(unittest.TestCase):
         self.assertIn("update_next_step_banner", ast.unparse(render_quality))
         self.assertIn("next_enabled = False", ast.unparse(render_quality))
 
-
 if __name__ == "__main__":
     unittest.main()
