@@ -40,6 +40,11 @@ python3 -m pip install --user .
 codex-gui
 ```
 
+`codex-gui` is a GTK desktop application. Launch it from a graphical local
+session on the target machine. Running `python3 codex_gui.py` or `codex-gui`
+from a headless SSH shell without a live display server will fail because GTK
+cannot initialize.
+
 If your environment is still resolving an outdated launcher script, repair it with:
 
 ```bash
@@ -68,6 +73,9 @@ python3 -m py_compile *.py
 python3 -m unittest discover -s tests
 codex doctor --summary --ascii
 ```
+
+For GUI verification, run `codex-gui` or `python3 codex_gui.py` from a real
+desktop session, not from a display-less SSH shell.
 
 The app's Quality Gate also runs a setup readiness check that reports missing
 runtime pieces before you rely on the workstation.
