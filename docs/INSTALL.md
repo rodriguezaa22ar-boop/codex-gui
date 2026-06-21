@@ -104,6 +104,9 @@ Useful flags:
 The app's Quality Gate also runs a setup readiness check that reports missing
 runtime pieces before you rely on the workstation.
 
+For release notes and command examples for the multi-device launcher, see
+[`RELEASE_NOTES.md`](docs/RELEASE_NOTES.md).
+
 ## Device Mesh
 
 For other trusted machines, first make each machine a clean clone of the same
