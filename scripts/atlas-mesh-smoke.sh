@@ -7,11 +7,50 @@ PROJECT_ROOT="${CODEX_GUI_PROJECT_ROOT:-$REPO_ROOT}"
 RECEIPT_DIR="${CODEX_GUI_SMOKE_ROOT:-$HOME/.config/codex-gui/smoke-reports}"
 TIMESTAMP="${CODEX_GUI_SMOKE_TS:-$(date -u +%Y%m%dT%H%M%SZ)}"
 RUN_DIR="$RECEIPT_DIR/$TIMESTAMP"
+PYTHON_BIN="${CODEX_GUI_PYTHON:-}"
+PYTHON_WRAPPER=""
 
 mkdir -p "$RUN_DIR"
 cd "$REPO_ROOT"
 
 OUTPUTS=()
+
+cleanup() {
+    if [[ -n "$PYTHON_WRAPPER" ]]; then
+        rm -f "$PYTHON_WRAPPER"
+    fi
+}
+trap cleanup EXIT
+
+resolve_python() {
+    if [[ -n "$PYTHON_BIN" ]]; then
+        return 0
+    fi
+    if command -v python3 >/dev/null 2>&1; then
+        PYTHON_BIN="$(command -v python3)"
+        return 0
+    fi
+    if command -v python >/dev/null 2>&1; then
+        PYTHON_BIN="$(command -v python)"
+        return 0
+    fi
+    if command -v nix-shell >/dev/null 2>&1; then
+        PYTHON_WRAPPER="$(mktemp)"
+        cat > "$PYTHON_WRAPPER" <<'SH'
+#!/usr/bin/env bash
+quoted=()
+for arg in "$@"; do
+  quoted+=("$(printf '%q' "$arg")")
+done
+exec nix-shell -p python3 --run "python3 ${quoted[*]}"
+SH
+        chmod +x "$PYTHON_WRAPPER"
+        PYTHON_BIN="$PYTHON_WRAPPER"
+        return 0
+    fi
+    echo "No Python runtime found. Install python3 or set CODEX_GUI_PYTHON." >&2
+    exit 127
+}
 
 run_capture() {
     local label="$1"
@@ -54,16 +93,18 @@ echo "Mesh smoke run: $TIMESTAMP"
 echo "Repository: $REPO_ROOT"
 echo "Output: $RUN_DIR"
 
-echo "[mesh-smoke] running local validators"
-run_capture "local-pyc" python3 -m py_compile codex_devices.py codex_gui.py codex_team.py
-run_capture "local-tests" python3 -m unittest discover -s tests
+resolve_python
 
-run_capture "discover" python3 codex_team_ops.py --json discover
-run_capture "check" python3 codex_team_ops.py --json check
-run_capture "roles" python3 codex_team_ops.py --json roles
-run_capture "doctor" python3 codex_team_ops.py --json doctor --check
+echo "[mesh-smoke] running local validators"
+run_capture "local-pyc" "$PYTHON_BIN" -m py_compile codex_devices.py codex_gui.py codex_team.py
+run_capture "local-tests" "$PYTHON_BIN" -m unittest discover -s tests
+
+run_capture "discover" "$PYTHON_BIN" codex_team_ops.py --json discover
+run_capture "check" "$PYTHON_BIN" codex_team_ops.py --json check
+run_capture "roles" "$PYTHON_BIN" codex_team_ops.py --json roles
+run_capture "doctor" "$PYTHON_BIN" codex_team_ops.py --json doctor --check
 # This command intentionally may fail when no ready trusted devices exist.
-run_capture "prepare-check" python3 codex_team_ops.py --json prepare --project-root "$PROJECT_ROOT" --check || true
+run_capture "prepare-check" "$PYTHON_BIN" codex_team_ops.py --json prepare --project-root "$PROJECT_ROOT" --check || true
 
 if [[ -f ~/.local/bin/codex-gui ]]; then
   run_capture "codex-gui-self-check" codex-gui --self-check --project "$PROJECT_ROOT" --json

@@ -6,6 +6,45 @@ REPO_ROOT="${CODEX_GUI_ROOT:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 PROJECT_ROOT="${CODEX_GUI_PROJECT_ROOT:-$REPO_ROOT}"
 NO_PERSIST=0
 JSON_OUTPUT=0
+PYTHON_BIN="${CODEX_GUI_PYTHON:-}"
+PYTHON_WRAPPER=""
+
+cleanup() {
+  rm -f "$JSON_PATH"
+  if [[ -n "$PYTHON_WRAPPER" ]]; then
+    rm -f "$PYTHON_WRAPPER"
+  fi
+}
+
+resolve_python() {
+  if [[ -n "$PYTHON_BIN" ]]; then
+    return 0
+  fi
+  if command -v python3 >/dev/null 2>&1; then
+    PYTHON_BIN="$(command -v python3)"
+    return 0
+  fi
+  if command -v python >/dev/null 2>&1; then
+    PYTHON_BIN="$(command -v python)"
+    return 0
+  fi
+  if command -v nix-shell >/dev/null 2>&1; then
+    PYTHON_WRAPPER="$(mktemp)"
+    cat > "$PYTHON_WRAPPER" <<'SH'
+#!/usr/bin/env bash
+quoted=()
+for arg in "$@"; do
+  quoted+=("$(printf '%q' "$arg")")
+done
+exec nix-shell -p python3 --run "python3 ${quoted[*]}"
+SH
+    chmod +x "$PYTHON_WRAPPER"
+    PYTHON_BIN="$PYTHON_WRAPPER"
+    return 0
+  fi
+  echo "No Python runtime found. Install python3 or set CODEX_GUI_PYTHON." >&2
+  exit 127
+}
 
 print_usage() {
   cat <<'USAGE'
@@ -49,15 +88,16 @@ if [[ ! -f "$REPO_ROOT/codex_team_ops.py" ]]; then
 fi
 
 JSON_PATH="$(mktemp)"
-trap 'rm -f "$JSON_PATH"' EXIT
+trap cleanup EXIT
+resolve_python
 
 if (( NO_PERSIST )); then
-  python3 codex_team_ops.py --json check --no-persist > "$JSON_PATH"
+  "$PYTHON_BIN" codex_team_ops.py --json check --no-persist > "$JSON_PATH"
 else
-  python3 codex_team_ops.py --json check > "$JSON_PATH"
+  "$PYTHON_BIN" codex_team_ops.py --json check > "$JSON_PATH"
 fi
 
-python3 - "$JSON_PATH" "$PROJECT_ROOT" "$JSON_OUTPUT" <<'PY'
+"$PYTHON_BIN" - "$JSON_PATH" "$PROJECT_ROOT" "$JSON_OUTPUT" <<'PY'
 import json
 import pathlib
 import sys
