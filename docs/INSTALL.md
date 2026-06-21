@@ -97,6 +97,8 @@ Useful flags:
 
 - `--sync-repo` to refresh remote checkout before launch
 - `--collect-results` to run `git status --porcelain` and include modified files
+- `--summarize-results` to also collect per-host diff and commit metadata
+- `--summary-base` to set the commit range base for `--summarize-results` (default `HEAD~1`)
 - `--max-retries` and `--backoff-seconds` for SSH/launch retry control
 
 `scripts/launch_agents.yaml.example` provides a starting configuration.

@@ -312,6 +312,32 @@ class LaunchAgentsTests(unittest.TestCase):
             self.assertEqual(entries[0]["failure_stage"], "launch_agent")
             self.assertIn("error", entries[0])
 
+    def test_empty_device_list_fails_fast(self) -> None:
+        payload = "[]"
+        devices_file = self._make_temp(".json", payload)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            captured_errors: list[str] = []
+
+            with patch.object(
+                launch_agents.logging,
+                "error",
+                side_effect=lambda message, *args, **kwargs: captured_errors.append(str(message)),
+            ):
+                argv = [
+                    "launch_agents.py",
+                    "--devices",
+                    devices_file,
+                    "--repo-path",
+                    str(tmp_path),
+                ]
+                with patch("sys.argv", argv):
+                    with self.assertRaises(SystemExit) as exc:
+                        launch_agents.main()
+
+            self.assertEqual(exc.exception.code, 1)
+            self.assertTrue(any("No devices configured" in error for error in captured_errors))
+
     def test_collect_diff_summary_parse(self) -> None:
         with patch.object(
             launch_agents,

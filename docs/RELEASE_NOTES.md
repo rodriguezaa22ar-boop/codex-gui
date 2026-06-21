@@ -6,6 +6,7 @@
 - Added a reusable launcher script at `scripts/launch_agents.py`.
 - Added YAML and JSON device config support (`.json`, `.yaml`, `.yml`).
 - Added configurable result collection with `--collect-results`.
+- Added `--summarize-results` and `--summary-base` for per-host diff/commit summaries.
 - Added retry/backoff handling for SSH connect, sync, launch, and result collection.
 - Added installable console entrypoint `codex-launch-agents`.
 - Added sample configuration file: `scripts/launch_agents.yaml.example`.
@@ -23,10 +24,11 @@ codex-launch-agents \
 Useful flags:
 - `--sync-repo` synchronize remote checkout before launch (`git fetch` + `git pull --ff-only`).
 - `--collect-results` run `git status --porcelain` after launch and include changed files.
+- `--summarize-results` include `diff_summary` and `commit` metadata in JSON output.
 - `--max-retries` and `--backoff-seconds` tune transient-retry behavior.
 
 ### Verification
 
-- `python3 -m pytest -q`
-- `python3 -m pytest -q tests/test_launch_agents.py`
+- `python3 -m unittest discover -s tests`
+- `python3 -m unittest tests.test_launch_agents -v`
 - `codex doctor --summary --ascii`
