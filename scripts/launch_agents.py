@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import concurrent.futures
+import os
 import json
 import logging
 import shlex
@@ -73,8 +74,11 @@ def launch_agent(
     if not prompt_local.exists():
         raise FileNotFoundError(f"missing prompt file: {prompt_local}")
     remote_prompt = f"/tmp/codex_prompt_{device.role.lower()}.md"
-    remote_log = log_dir / f"{device.role.lower()}_{device.host}.log"
-    command = build_launch_command(repo_path, device, remote_prompt, str(remote_log))
+    remote_log_name = f"{device.role.lower()}_{device.host}.log"
+    remote_log_dir = str(log_dir)
+    remote_log = f"{remote_log_dir.rstrip(os.sep)}{os.sep}{remote_log_name}" if remote_log_dir else remote_log_name
+    run_remote(ssh, f"cd {shlex.quote(repo_path)} && mkdir -p {shlex.quote(remote_log_dir)}")
+    command = build_launch_command(repo_path, device, remote_prompt, remote_log)
 
     sftp = ssh.open_sftp()
     sftp.put(str(prompt_local), remote_prompt)
@@ -293,6 +297,9 @@ def main() -> None:
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
     devices = build_devices(args.devices)
+    if not devices:
+        logging.error("No devices configured in %s", args.devices)
+        raise SystemExit(1)
     results: list[dict] = []
 
     def task(device: Device) -> dict:
@@ -316,9 +323,13 @@ def main() -> None:
                 )
 
             stage = "launch_agent"
+            prompt_file = prompt_path / f"{device.role.lower()}.md"
+            if not prompt_file.exists():
+                raise FileNotFoundError(f"missing prompt file: {prompt_file}")
             remote_prompt = f"/tmp/codex_prompt_{device.role.lower()}.md"
-            remote_log = log_dir / f"{device.role.lower()}_{device.host}.log"
-            command = build_launch_command(args.repo_path, device, remote_prompt, str(remote_log))
+            remote_log_dir = str(log_dir)
+            remote_log = f"{remote_log_dir.rstrip(os.sep)}{os.sep}{device.role.lower()}_{device.host}.log" if remote_log_dir else f"{device.role.lower()}_{device.host}.log"
+            command = build_launch_command(args.repo_path, device, remote_prompt, remote_log)
             launch_result = with_retry(
                 launch_agent,
                 args.max_retries,
