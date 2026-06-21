@@ -7,6 +7,8 @@ from unittest.mock import patch
 from pathlib import Path
 from types import ModuleType
 
+import codex_launch_agents
+
 LAUNCH_AGENTS_PATH = Path(__file__).resolve().parents[1] / "scripts" / "launch_agents.py"
 
 
@@ -193,6 +195,16 @@ class LaunchAgentsTests(unittest.TestCase):
             self.assertEqual(entries[0]["role"], "Planner")
             self.assertEqual(entries[0]["modified_files"], ["changed.py", "new.txt"])
             self.assertIn("log", entries[0])
+
+
+class LaunchAgentsEntrypointTests(unittest.TestCase):
+    def test_codex_launch_agents_delegates_to_script(self) -> None:
+        with patch.object(codex_launch_agents.runpy, "run_path") as run_path:
+            codex_launch_agents.main()
+            expected_script = Path(codex_launch_agents.__file__).resolve().parent / "scripts" / "launch_agents.py"
+            self.assertEqual(run_path.call_count, 1)
+            self.assertEqual(run_path.call_args.args[0], str(expected_script))
+            self.assertEqual(run_path.call_args.kwargs["run_name"], "__main__")
 
 
 if __name__ == "__main__":
